@@ -1,0 +1,43 @@
+# Framework-independent Python dependencies.
+#
+# PyTorch and JAX are deliberately NOT pinned here: the correct wheel depends on the
+# accelerator (CUDA / TPU / CPU) and, on Colab, on the CUDA build already present.
+# Installing them in the wrong order is the one thing that reliably breaks this setup, so
+# they are handled by setup_colab.sh instead.
+#
+#     bash setup_colab.sh          # environment-sensitive install, in the right order
+#     pip install -r requirements.txt   # everything else
+
+numpy>=1.26
+PyYAML>=6.0
+matplotlib>=3.7
+scikit-image>=0.22
+scipy>=1.11
+tqdm>=4.66
+python-dotenv>=1.0
+
+# Pillow 12.3.0 is pinned: the notebooks this repository came from hit a recurring Colab
+# problem where a partially-removed Pillow leaves PIL importable but ImageDraw/ImageFilter
+# broken, which silently breaks stroke-geometry extraction.  setup_colab.sh repairs it.
+Pillow==12.3.0
+
+# Model loading and checkpoints
+huggingface_hub>=0.34
+safetensors>=0.4.5
+diffusers>=0.36,<0.40
+transformers>=4.46
+accelerate>=1.1
+timm==0.9.16
+einops>=0.8.0
+
+# ImageNet validation images (data.source: hf_imagenet_val)
+datasets>=2.19
+
+# LPIPS is a headline metric of this benchmark, not an optional extra.
+lpips>=0.1.4
+
+# JAX-side model repositories (pMF, iMF) import these directly.
+ml_collections>=0.1.1
+dm-tree>=0.1.8
+cached_property>=1.5
+absl-py>=2.0

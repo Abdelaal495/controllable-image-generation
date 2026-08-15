@@ -1,0 +1,22 @@
+# Never commit credentials.
+.env
+
+# Run artefacts and caches
+outputs/
+cache/
+*.npz
+*.png
+!docs/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

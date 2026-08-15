@@ -1,0 +1,255 @@
+# =====================================================================================
+# SDEdit vs. MPC-Flow  --  the only file you normally edit.
+# =====================================================================================
+#
+# The question this repository answers:
+#
+#   Given the same degraded observation, the same generative model, the same corruption
+#   strength t0 and the same sampled generative noise, how much do MPC-RHC and MPC-delta_t
+#   improve reconstruction relative to ordinary SDEdit, and what does that cost?
+#
+# Structure
+#   experiments.<name>.degradation      the inverse problem's parameters (built ONCE and
+#                                       shared by every model and method below it)
+#   experiments.<name>.models.<model>   which model participates
+#   ....methods.{sdedit,mpc_rhc,mpc_delta_t}
+#
+# You never write `standard_flow:` or `meanflow:`.  The registry already knows that JiT and
+# SiT are standard flows and that pMF and iMF are MeanFlows.
+#
+# SWEEPS.  These fields accept a scalar or a list; lists expand as a Cartesian product:
+#   shared      t0
+#   sdedit      steps, solver
+#   mpc         num_mpc_steps, lam, n_ctrl, lr, optimizer, warm_start, grad_clip,
+#               phi_normalization, control_cost_normalization
+#   mpc_rhc     K
+#   mpc_delta_t delta_t_lambda_scaling
+# Any other list (e.g. models.jit.guidance.interval) is a literal value, never a sweep.
+#
+# Unknown keys are ERRORS, not silent no-ops.  Check the plan first:
+#   python run.py --config configs/experiments.yaml --dry-run
+#
+# The defaults below are deliberately small (2 images per task) so the whole thing is a
+# usable end-to-end test.  Raise num_images and lengthen the sweeps once it runs clean.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto             # auto | gpu | tpu | cpu
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto # true keeps JiT (Torch) and pMF (JAX) from co-residing
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 256          # sweep-explosion guard; override with --max-jobs
+  resume: true                  # reuse finished jobs whose resolved spec matches exactly
+  replicate: 0                  # stochastic trial index; changing it changes epsilon
+
+data:
+  source: hf_imagenet_val       # hf_imagenet_val | local_folder
+  local_folder: ""
+  image_size: 256
+
+# Technical model integration only -- never experiment participation.
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 2
+  pmf:
+    batch_size: 2
+  # sit: {batch_size: 2}        # implemented; see the SiT/iMF note at the bottom
+  # imf: {batch_size: 2}
+
+# Method-level defaults inherited by every experiment that does not override them.
+defaults:
+  phi_normalization: half_sum_squared
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true                   # headline metric; do not disable for a real benchmark
+  lpips_net: alex
+
+# =====================================================================================
+# The six experiments
+# =====================================================================================
+# Every block uses the SAME shape:
+#   * sdedit runs at the same t0 as the MPC methods, so the comparison is paired;
+#   * SDEdit's `steps` are matched to the MPC methods' `num_mpc_steps` where the two
+#     algorithms discretise comparably (JiT), and left at pMF's native small counts
+#     otherwise -- the difference is recorded rather than hidden;
+#   * lam / n_ctrl / lr are left unset so they fall back to MPC-Flow Table E2, and every
+#     result row records that provenance.  They were tuned for a CelebA 128x128 U-Net and
+#     are STARTING VALUES here, not published JiT/pMF hyperparameters.
+# =====================================================================================
+experiments:
+
+  # ------------------------------------------------------------------- 1. denoising
+  denoising:
+    enabled: true
+    problem: denoising
+    num_images: 2
+    degradation:
+      sigma: 0.20               # the paper's setting; degraded PSNR is then ~20.0 dB
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+  # ------------------------------------------------------------------- 2. deblurring
+  deblurring:
+    enabled: true
+    problem: deblur
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7            # the paper fixes only blur_sigma; the support is our choice
+      padding: reflect
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+  # ------------------------------------------------------------------- 3. super-resolution
+  # A is a REAL low-resolution measurement operator (keep every second pixel), so y is
+  # 128x128.  The 256x256 bicubic lift is the INITIALISATION GUIDE only and never enters
+  # the MPC objective.
+  super_resolution:
+    enabled: true
+    problem: super_resolution
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      factor: 2
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+  # ------------------------------------------------------------------- 4. box inpainting
+  # The guide is the zero-filled masked observation.  No Telea / Navier-Stokes / RePaint
+  # prefill and no hard per-step projection -- see the README.
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      box: 40
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+  # ------------------------------------------------------------------- 5. random inpainting
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 2
+    degradation:
+      sigma: 0.01
+      missing_fraction: 0.70
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+  # ------------------------------------------------------------------- 6. stroke painting
+  # The SLIC stroke geometry is extracted from the source image with the original SDEdit
+  # algorithm and then FROZEN; y is produced by the differentiable renderer that MPC also
+  # optimises against.  No measurement noise by default.
+  # This task has no MPC-Flow Table E2 entry, so lam/n_ctrl/lr fall back to this
+  # repository's conservative defaults -- recorded as `repository_default` in results.csv.
+  stroke_painting:
+    enabled: true
+    problem: stroke_painting
+    num_images: 2
+    degradation:
+      preset: medium            # sparse | medium | dense
+      sigma: 0.0
+      blur_sigma: 0.8
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+      pmf:
+        methods:
+          sdedit:      {t0: 0.8, steps: [1, 2]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+
+# =====================================================================================
+# Enabling SiT / iMF, and larger sweeps
+# =====================================================================================
+# Both adapters are fully implemented and are simply not part of the default workload.
+# To use them, add the technical block at the top:
+#
+#   models:
+#     sit: {batch_size: 2}
+#     imf: {batch_size: 2}
+#
+# and add them under any experiment exactly like JiT and pMF -- the registry supplies the
+# dynamics family, so nothing else changes:
+#
+#   denoising:
+#     models:
+#       sit:                       # standard flow, latent (SD-VAE), Torch
+#         methods:
+#           sdedit:      {t0: 0.8, steps: 25, solver: heun}
+#           mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: [1, 3]}
+#       imf:                       # MeanFlow, latent, JAX
+#         methods:
+#           sdedit:      {t0: 0.8, steps: 2}
+#           mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+#
+# A t0 sweep, holding the number of MPC intervals fixed, changes delta = t0/N as well --
+# the planner warns about that confound and every row records t0, num_mpc_steps and delta:
+#
+#   mpc_rhc: {t0: [0.5, 0.6, 0.7, 0.8], num_mpc_steps: 4, K: [1, 3], lam: [0.05, 0.1]}
+#
+# To sweep lambda explicitly rather than inheriting Table E2:
+#
+#   mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, lam: [1.0, 5.0, 10.0], n_ctrl: 20, lr: 0.1}
