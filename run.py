@@ -315,12 +315,14 @@ def warm_up(adapter, spec, problem, manager, verbose: bool = True) -> float:
     meaningless, so the benchmark reports steady-state reconstruction runtime and records
     the cold/compile time separately.
     """
+    # The warm-up must trace EXACTLY the trajectory the timed job will run.  Reducing
+    # steps / num_mpc_steps here would change the time grid, so the real job would meet
+    # uncompiled intervals and pay for their compilation inside the measured region --
+    # which is precisely what "steady-state runtime" is supposed to exclude.  Only
+    # n_ctrl and the image count are reduced: neither changes the traced computation.
     tiny = dataclasses.replace(
         spec,
         num_images=min(int(spec.batch_size), int(spec.num_images)),
-        steps=1 if spec.method == "sdedit" else None,
-        num_mpc_steps=None if spec.method == "sdedit" else 1,
-        delta=None if spec.method == "sdedit" else spec.t0,
         n_ctrl=None if spec.method == "sdedit" else 1,
         record_loss_history=False)
     started = time.perf_counter()
@@ -811,8 +813,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print("        -> reused a finished job from %s" % finished["output_dir"])
                     continue
 
+            # Every field below alters the time grid or the traced graph, so each
+            # distinct combination needs its own untimed warm-up.
             warm_key = (spec.method, spec.batch_size, spec.problem,
-                        tuple(problem.measurement.shape[1:]), spec.K)
+                        tuple(problem.measurement.shape[1:]), spec.K, spec.t0,
+                        spec.steps, spec.num_mpc_steps, spec.solver,
+                        spec.phi_normalization, spec.control_cost_normalization)
             warm_seconds = warmed.get(warm_key, 0.0)
             try:
                 if do_warmup and warm_key not in warmed:

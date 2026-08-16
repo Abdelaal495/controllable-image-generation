@@ -1117,7 +1117,8 @@ def _inherit(field_name: str, layers: Sequence[Tuple[str, Dict[str, Any]]],
 
 
 def _estimate_cost(spec_method: str, K: Optional[int], n_ctrl: int, num_steps: int,
-                   dynamics_family: str, solver: Optional[str]) -> Dict[str, int]:
+                   dynamics_family: str, solver: Optional[str],
+                   euler_final_step_for_heun: bool = False) -> Dict[str, int]:
     """Per-chunk compute estimate.  Measured counts are recorded alongside these at run time.
 
     SDEdit:   standard flow -> stage evaluations per step (euler 1, heun 2, rk4 4);
@@ -1130,6 +1131,8 @@ def _estimate_cost(spec_method: str, K: Optional[int], n_ctrl: int, num_steps: i
     if spec_method == "sdedit":
         if dynamics_family == STANDARD_FLOW:
             evals = num_steps * SOLVER_STAGE_EVALUATIONS.get(solver or "euler", 1)
+            if solver == "heun" and euler_final_step_for_heun:
+                evals -= 1        # the official JiT sampler takes its last step with Euler
         else:
             evals = num_steps
         return {"control_iterations": 0, "model_evals": evals, "backprops": 0}
@@ -1293,7 +1296,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     cost = _estimate_cost(method_name, values["K"],
                                           int(hp["n_ctrl"] or 0),
                                           int(values["steps"] or n_steps or 1),
-                                          reg["dynamics_family"], values["solver"])
+                                          reg["dynamics_family"], values["solver"],
+                                          bool(reg.get("euler_final_step_for_heun", False)))
                     job_id = stable_hash(run_id, exp_name, problem, params_key, model_name,
                                          method_name, values["K"], t0, values["steps"],
                                          values["solver"], n_steps, hp["lam"], hp["n_ctrl"],
