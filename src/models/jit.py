@@ -31,7 +31,8 @@ import numpy as np
 
 from ..utils import (FLOW_ASCENDING, STANDARD_FLOW, assert_pixel_batch, load_python_module,
                      native_time, record_time)
-from .base import AdapterSpec, Conditioning, StandardFlowAdapter, register_adapter
+from .base import (AdapterSpec, Conditioning, StandardFlowAdapter, register_adapter,
+                   register_prefetch)
 
 
 class JiTAdapter(StandardFlowAdapter):
@@ -329,3 +330,18 @@ class JiTAdapter(StandardFlowAdapter):
 def _make_jit(registry: Dict[str, Any], context: Dict[str, Any]) -> JiTAdapter:
     return JiTAdapter(registry, context["repo_paths"]["jit"], context["ckpt_cache"],
                       context["torch_device"], context["torch_dtypes"]["jit"])
+
+
+@register_prefetch("jit")
+def _prefetch_jit(registry: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Download JiT's weights WITHOUT building the model (login-node safe)."""
+    from huggingface_hub import snapshot_download
+    if registry["checkpoint_backend"] != "hf_mirror":
+        return {"skipped": "checkpoint_backend=%s uses a local file"
+                           % registry["checkpoint_backend"]}
+    folder = registry["variant"].replace("/", "-")
+    local_root = Path(context["ckpt_cache"]).resolve() / "jit_diffusers"
+    snapshot_download(repo_id=registry["hf_mirror_repo"],
+                      allow_patterns=["%s/*" % folder, "%s/**" % folder],
+                      local_dir=str(local_root))
+    return {"path": str(local_root / folder), "repo": registry["hf_mirror_repo"]}

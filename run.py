@@ -44,11 +44,13 @@ from src.config import (ConfigError, MODEL_REGISTRY_DEFAULTS, METHOD_DECLARATION
 from src.data import DataManager
 from src.metrics import configure_lpips, degraded_baseline, evaluate_reconstruction
 from src.models import ModelManager, build_initial_state, load_adapters
+from src.models.base import PREFETCH_HOOKS
 from src.models.base import Conditioning
 from src.mpc import select_reconstructor
 from src.problems import ProblemStore
 from src.sdedit import ReconstructionStats
-from src.utils import (RULE, THIN, detect_accelerator, free_memory, in_ipython, jsonable,
+from src.utils import (RULE, THIN, apply_offline_mode, detect_accelerator,
+                       detect_environment, env_default, free_memory, in_ipython, jsonable,
                        load_dotenv, now_iso, pixel_fingerprint, progress, save_json,
                        save_yaml, set_global_seed, set_progress_enabled, timing_summary,
                        to_uint8)
@@ -91,12 +93,69 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-warmup", action="store_true",
                    help="skip the untimed warm-up (timings will then include compilation)")
     p.add_argument("--run-id", default=None, help="reuse an existing run directory name")
+
+    cluster = p.add_argument_group(
+        "cluster / offline execution",
+        "Alliance (Compute Canada) compute nodes have NO internet access, so every asset "
+        "must be on disk before a job starts.")
+    cluster.add_argument("--prefetch", action="store_true",
+                         help="download every asset the config needs (model repositories, "
+                              "checkpoints, ImageNet images, LPIPS weights) and exit. Run "
+                              "this ONCE on a login node; no GPU and no model build.")
+    cluster.add_argument("--offline", dest="offline", action="store_true", default=None,
+                         help="forbid all network access (auto-enabled under SLURM)")
+    cluster.add_argument("--online", dest="offline", action="store_false",
+                         help="allow network access even under SLURM")
+    cluster.add_argument("--shard", default=None, metavar="K/N",
+                         help="run only shard K of N (0-based) for SLURM job arrays. Shards "
+                              "are contiguous over a model-major ordering, so a shard "
+                              "usually loads a single checkpoint.")
+    cluster.add_argument("--aggregate", action="store_true",
+                         help="merge the per-job results already on disk in --run-id into "
+                              "results.csv plus figures, then exit. Use after a job array.")
     return p.parse_args(argv)
+
+
+def parse_shard(text: Optional[str]) -> Optional[Tuple[int, int]]:
+    if not text:
+        return None
+    try:
+        k, n = text.split("/")
+        shard, total = int(k), int(n)
+    except Exception:
+        raise ConfigError("--shard must look like K/N, e.g. 0/4 (K is 0-based). Got %r"
+                          % text)
+    if total < 1 or not 0 <= shard < total:
+        raise ConfigError("--shard K/N needs N >= 1 and 0 <= K < N. Got %r" % text)
+    return shard, total
+
+
+def select_shard(specs: Sequence, shard: int, total: int) -> List:
+    """Contiguous slice of a MODEL-MAJOR ordering.
+
+    Contiguous rather than round-robin so a shard usually needs one checkpoint: loading pMF
+    costs ~2 minutes, and interleaving would make most shards pay for both models.  The
+    ordering is derived from stable job ids, so every array task computes the same split
+    without communicating.
+    """
+    from src.config import MODEL_NAMES
+    order = {name: i for i, name in enumerate(MODEL_NAMES)}
+    ordered = sorted(specs, key=lambda s: (order.get(s.model, 99), s.experiment, s.method,
+                                           s.job_id))
+    n = len(ordered)
+    lo = (n * shard) // total
+    hi = (n * (shard + 1)) // total
+    return ordered[lo:hi]
 
 
 def apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     config = copy.deepcopy(config)
     rt = config.setdefault("runtime", {})
+    # Job scripts set these once and every array task inherits them.
+    if os.environ.get("MPCFLOW_OUTPUT_ROOT"):
+        rt["output_root"] = os.environ["MPCFLOW_OUTPUT_ROOT"]
+    if os.environ.get("MPCFLOW_CACHE_ROOT"):
+        rt["cache_root"] = os.environ["MPCFLOW_CACHE_ROOT"]
     if args.max_jobs is not None:
         rt["max_atomic_jobs"] = int(args.max_jobs)
     if args.output_root:
@@ -458,12 +517,15 @@ class ResultWriter:
     sweep never erases earlier reconstructions.
     """
 
-    def __init__(self, run_dir: Path):
+    def __init__(self, run_dir: Path, shard: Optional[Tuple[int, int]] = None):
         self.run_dir = Path(run_dir)
         self.records: List[Dict[str, Any]] = []
         self.image_rows: List[Dict[str, Any]] = []
-        self.jsonl = self.run_dir / "results.jsonl"
-        self.log = self.run_dir / "experiment_log.jsonl"
+        # Parallel array tasks must never write the same file: each shard owns its own,
+        # and `--aggregate` merges them from the per-job metadata afterwards.
+        self.suffix = "" if shard is None else "_shard%02d" % shard[0]
+        self.jsonl = self.run_dir / ("results%s.jsonl" % self.suffix)
+        self.log = self.run_dir / ("experiment_log%s.jsonl" % self.suffix)
 
     def add(self, record: Dict[str, Any], image_rows: Sequence[Dict[str, Any]] = ()) -> None:
         self.records.append(record)
@@ -480,14 +542,14 @@ class ResultWriter:
 
     def write_csv(self) -> Path:
         import csv
-        path = self.run_dir / "results.csv"
+        path = self.run_dir / ("results%s.csv" % self.suffix)
         with open(path, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             for row in self.records:
                 writer.writerow({k: row.get(k) for k in RESULT_COLUMNS})
         if self.image_rows:
-            per_image = self.run_dir / "results_per_image.csv"
+            per_image = self.run_dir / ("results_per_image%s.csv" % self.suffix)
             with open(per_image, "w", newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
                 writer.writeheader()
@@ -665,13 +727,188 @@ def make_figures(run_dir: Path, plan, store, records, reconstructions,
 
 
 # =====================================================================================
+# Prefetch (login node) and aggregate (after a job array)
+# =====================================================================================
+def prefetch_assets(plan, config: Dict[str, Any], cache_root: Path) -> Dict[str, Any]:
+    """Download everything a run needs, so compute nodes never touch the network.
+
+    Alliance/DRAC compute nodes have no route to the internet.  Anything not on disk when
+    the job starts is a failure, not a slow download, so this runs once on a login node.
+    Deliberately download-only: no model is built and no GPU is required.
+    """
+    report: Dict[str, Any] = {"cache_root": str(cache_root), "models": {}, "started": now_iso()}
+    print(RULE)
+    print("PREFETCH -- staging every asset for offline execution")
+    print("  cache root: %s" % cache_root)
+    print(RULE)
+
+    print("\n[1/4] Model repositories")
+    context = ensure_repositories(plan, cache_root)
+    context["ckpt_cache"] = (cache_root / "checkpoints").resolve()
+    context["ckpt_cache"].mkdir(parents=True, exist_ok=True)
+    report["repositories"] = context.get("repo_heads", {})
+
+    print("\n[2/4] Model checkpoints")
+    load_adapters(plan.resources.models)
+    for model in plan.resources.models:
+        hook = PREFETCH_HOOKS.get(model)
+        if hook is None:
+            print("   %-5s no prefetch hook; it will download at first use." % model)
+            report["models"][model] = {"status": "no_hook"}
+            continue
+        try:
+            registry = resolve_model_registry(config, model)
+            info = hook(registry, context)
+            report["models"][model] = dict(info, status="ok")
+            print("   %-5s ok  %s" % (model, info))
+        except Exception as exc:
+            report["models"][model] = {"status": "failed", "error": str(exc)}
+            print("   %-5s FAILED: %s" % (model, exc))
+            traceback.print_exc(limit=4)
+
+    print("\n[3/4] Source images")
+    try:
+        data = DataManager(config, cache_root / "data")
+        pool = data.pool(plan.resources.source_pool_size)
+        report["data"] = {"count": len(pool), "source": pool.source,
+                          "image_ids": pool.image_ids}
+        print("   cached %d image(s) from %s" % (len(pool), pool.source))
+    except Exception as exc:
+        report["data"] = {"status": "failed", "error": str(exc)}
+        print("   FAILED: %s" % exc)
+        print("   (a gated-dataset failure here is almost always a missing HF_TOKEN)")
+
+    print("\n[4/4] LPIPS weights")
+    if (config.get("metrics") or {}).get("lpips", True):
+        try:
+            from src.metrics import lpips_per_image
+            probe = np.zeros((1, 64, 64, 3), np.float32)
+            ok = lpips_per_image(probe, probe) is not None
+            report["lpips"] = "ok" if ok else "unavailable"
+            print("   %s" % ("AlexNet weights cached" if ok
+                             else "LPIPS unavailable -- results will have empty LPIPS"))
+        except Exception as exc:
+            report["lpips"] = "failed: %s" % exc
+            print("   FAILED: %s" % exc)
+    else:
+        report["lpips"] = "disabled"
+
+    report["finished"] = now_iso()
+    save_json(cache_root / "prefetch_report.json", report)
+    print("\n%s\nPREFETCH COMPLETE -- report: %s"
+          % (RULE, cache_root / "prefetch_report.json"))
+    failures = [m for m, v in report["models"].items() if v.get("status") == "failed"]
+    if failures or report.get("data", {}).get("status") == "failed":
+        print("SOME ASSETS FAILED (%s). Fix them here: a compute node cannot download."
+              % (failures or "data"))
+        return report
+    print("Compute nodes can now run fully offline. Point runs at the SAME cache root:")
+    print("    python run.py --config %s --cache-root %s" % ("configs/experiments.yaml",
+                                                             cache_root))
+    print(RULE)
+    return report
+
+
+def collect_finished_jobs(run_dir: Path, plan) -> Tuple[List[Dict[str, Any]],
+                                                        Dict[str, np.ndarray]]:
+    """Read every per-job artefact under a run directory.
+
+    Per-job metadata.json is the source of truth, so merging the output of parallel array
+    tasks needs no coordination between them and no shared append-only file.
+    """
+    records, reconstructions = [], {}
+    by_id = {s.job_id: s for s in plan.specs}
+    for meta_path in sorted(run_dir.rglob("metadata.json")):
+        try:
+            payload = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        if "job_id" not in payload or payload.get("status") != "ok":
+            continue
+        records.append({k: payload.get(k) for k in RESULT_COLUMNS})
+        array_path = meta_path.parent / "results.npz"
+        if payload["job_id"] in by_id and array_path.exists():
+            try:
+                with np.load(array_path) as z:
+                    reconstructions[payload["job_id"]] = (
+                        np.asarray(z["reconstruction"], np.float32) / 127.5) - 1.0
+            except Exception:
+                pass
+    return records, reconstructions
+
+
+def aggregate_only(plan, config: Dict[str, Any], run_dir: Path, args) -> int:
+    """Merge the per-job artefacts written by parallel array tasks into one result set."""
+    print("\n%s\nAGGREGATE -- merging finished jobs under %s\n%s" % (RULE, run_dir, RULE))
+    records, reconstructions = collect_finished_jobs(run_dir, plan)
+    if not records:
+        print("No finished job found. Did the array tasks write to this --run-id?")
+        return 1
+
+    done = {r["job_id"] for r in records}
+    missing = [s for s in plan.specs if s.job_id not in done]
+    print("  found %d finished job(s) of %d planned" % (len(records), len(plan.specs)))
+    if missing:
+        print("  %d job(s) are MISSING -- the merge below is partial:" % len(missing))
+        for spec in missing[:10]:
+            print("     %s" % spec.label)
+        if len(missing) > 10:
+            print("     ... and %d more" % (len(missing) - 10))
+
+    writer = ResultWriter(run_dir)
+    writer.records = records
+    csv_path = writer.write_csv()
+    print("  wrote %s" % csv_path)
+
+    print_summary_tables(records)
+
+    if not args.no_figures:
+        print("\nRebuilding problem instances for the figures ...")
+        cache_root = Path(plan.cache_root).resolve()
+        data = DataManager(config, cache_root / "data")
+        store = ProblemStore()
+        store.build_all(plan.problems, data, verbose=False)
+        try:
+            figures = make_figures(run_dir, plan, store, records, reconstructions,
+                                   show=in_ipython())
+            print("  %d figure(s) written to %s" % (len(figures), run_dir / "figures"))
+        except Exception as exc:
+            print("  figure generation failed (%s); results.csv is unaffected." % exc)
+
+    save_json(run_dir / "aggregate_metadata.json",
+              {"merged": now_iso(), "found": len(records), "planned": len(plan.specs),
+               "missing_job_ids": [s.job_id for s in missing]})
+    return 0
+
+
+# =====================================================================================
 # Main
 # =====================================================================================
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    shard = parse_shard(args.shard)
     env = load_dotenv(".env")
     if env:
         print("Loaded .env keys: %s" % ", ".join(sorted(env)))
+
+    where = detect_environment()
+    offline = where["offline"] if args.offline is None else bool(args.offline)
+    if args.prefetch:
+        offline = False                     # prefetch exists precisely to use the network
+    apply_offline_mode(offline)
+    print("Environment      : %s%s | offline=%s"
+          % (where["kind"], (" [%s]" % where["cluster"]) if where["cluster"] else "", offline))
+    if where["job_id"]:
+        print("SLURM            : job %s%s on %s | SLURM_TMPDIR=%s"
+              % (where["job_id"],
+                 (" task %s" % where["array_task"]) if where["array_task"] else "",
+                 where["node"], where["tmpdir"]))
+    if offline and not args.prefetch:
+        print("Offline mode: no download will be attempted. Anything missing from the cache")
+        print("  is a hard failure -- run `python run.py --prefetch` on a login node first.")
+    # Progress bars are useless in a SLURM log and produce megabytes of carriage returns.
+    if not sys.stdout.isatty() and where["kind"] != "colab":
+        set_progress_enabled(False)
 
     config = apply_cli_overrides(load_config(args.config), args)
     warnings_ = validate_config(config)
@@ -687,8 +924,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     accel_notes = check_accelerator_compatibility(plan, accel)
     print_run_plan(plan, accel, accel_notes)
 
+    cache_root_early = Path(rt.get("cache_root", "cache")).resolve()
+    if args.prefetch:
+        prefetch_assets(plan, config, cache_root_early)
+        return 0
+
     run_dir = Path(plan.output_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.aggregate:
+        if not args.run_id:
+            raise ConfigError("--aggregate needs --run-id naming the directory to merge.")
+        return aggregate_only(plan, config, run_dir, args)
+
     save_yaml(run_dir / "config.yaml", plan.raw_config)
     save_yaml(run_dir / "resolved_config.yaml", plan.to_dict())
     print("\nSaved %s and %s" % (run_dir / "config.yaml", run_dir / "resolved_config.yaml"))
@@ -697,6 +945,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("\n--dry-run: the plan above was validated and resolved. No model was loaded, "
               "no checkpoint downloaded and no job executed.")
         return 0
+
+    # ---------------------------------------------------------------- shard selection
+    all_specs = plan.specs
+    if shard is not None:
+        selected = select_shard(all_specs, shard[0], shard[1])
+        plan = dataclasses.replace(plan, specs=tuple(selected))
+        models = sorted({s.model for s in selected})
+        print("\n%s\nSHARD %d of %d -- %d of %d atomic jobs, model(s): %s\n%s"
+              % (RULE, shard[0], shard[1], len(selected), len(all_specs),
+                 ", ".join(m.upper() for m in models) or "(none)", RULE))
+        if not selected:
+            print("This shard is empty (more shards than jobs). Nothing to do.")
+            return 0
+        print("Merge the shards afterwards with:")
+        print("    python run.py --config %s --run-id %s --aggregate"
+              % (args.config, plan.run_id))
 
     # ---------------------------------------------------------------- data and problems
     cache_root = Path(plan.cache_root).resolve()
@@ -756,7 +1020,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             or len(plan.resources.frameworks) > 1))
     manager = ModelManager(config, plan, bool(release), context)
 
-    writer = ResultWriter(run_dir)
+    writer = ResultWriter(run_dir, shard=shard)
     reconstructions: Dict[str, np.ndarray] = {}
     resume = bool(rt.get("resume", True))
     save_images = bool(rt.get("save_individual_images", True))

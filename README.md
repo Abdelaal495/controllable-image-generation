@@ -455,7 +455,53 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
 
-## 17. JAX compilation and runtime hygiene
+## 17. Running on Alliance (Compute Canada) clusters
+
+The repository runs unchanged on Colab **and** on Nibi, Narval and Rorqual. One cluster fact
+shapes everything: **compute nodes have no internet access.** Every checkpoint, dataset and
+git repository must be on disk before a job starts.
+
+```bash
+# LOGIN NODE (has internet, but a ~10 CPU-minute budget)
+bash setup_cluster.sh                    # venv from Alliance wheels + stage all assets
+
+# COMPUTE NODE
+sbatch slurm/run_single.sh               # one GPU, whole config
+sbatch slurm/run_array.sh                # N GPUs in parallel
+python run.py --run-id run_<ID> --aggregate    # merge the shards (login node)
+```
+
+What the code does for you:
+
+- **Environment detection.** `detect_environment()` distinguishes Colab, a SLURM compute
+  node, a cluster login node and a local machine. Under SLURM it enables offline mode
+  automatically (`HF_HUB_OFFLINE` etc.), so a missing asset is an immediate, legible error
+  instead of a multi-minute socket timeout buried in a job log. Override with
+  `--online` / `--offline`. Progress bars switch off when stdout is not a TTY.
+- **`--prefetch`.** Downloads model repositories, checkpoints, ImageNet images and LPIPS
+  weights, then exits. Download-only: it builds no model and needs no GPU, so it respects
+  the login-node budget. Writes `cache/prefetch_report.json`.
+- **`--shard K/N`.** Splits the resolved plan across a SLURM job array. Shards are
+  contiguous over a **model-major** ordering, so a task normally loads one checkpoint rather
+  than paying pMF's ~2-minute load twice. Every task derives the same split from stable job
+  ids, with no coordination. Tasks never write a shared file: each owns
+  `results_shardKK.csv` and its own per-job directories.
+- **`--aggregate`.** Merges the per-job `metadata.json` files into one `results.csv` plus
+  figures. Reports any planned job that is missing rather than silently producing a partial
+  table.
+- **Path overrides.** `MPCFLOW_CACHE_ROOT` and `MPCFLOW_OUTPUT_ROOT` (or `--cache-root` /
+  `--output-root`) keep the multi-gigabyte cache and outputs off the small, backed-up
+  `/home` and on `$SCRATCH`. The job scripts stage the read-only cache to `$SLURM_TMPDIR`
+  (node-local NVMe) for repeated checkpoint reads.
+
+`setup_cluster.sh` installs from the Alliance wheelhouse (`pip install --no-index`) so torch
+and jax link against the cluster's own CUDA/cuDNN, and falls back to PyPI only for what has
+no wheel. It writes `activate_cluster.sh`, which the job scripts source. Anaconda is not
+used — the Alliance does not permit it.
+
+Cluster GPU specifiers: `--gpus-per-node=h100:1` on Nibi and Rorqual, `a100:1` on Narval.
+
+## 18. JAX compilation and runtime hygiene
 
 pMF and iMF run on JAX, which compiles per array shape. Three mechanisms keep compilation
 out of the measured runtime:
@@ -481,7 +527,7 @@ columns in `results.csv`; neither is inside `runtime`.
 `diagnose_pmf_timing.py` times a repeated interval against a new one and reports the
 `jax.jit` cache size, if you need to confirm what a given machine is doing.
 
-## 18. Known limitations
+## 19. Known limitations
 
 - The primary baseline is **paired SDEdit at the same `t0`**. A compute-matched SDEdit
   baseline (giving SDEdit as many network evaluations as MPC uses) would be interesting and

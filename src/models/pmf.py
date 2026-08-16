@@ -22,7 +22,8 @@ import numpy as np
 
 from ..utils import (MEANFLOW, assert_pixel_batch, gaussian_noise, native_time, record_time)
 from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
-                   download_and_extract_zip, find_checkpoint_dir, register_adapter)
+                   download_and_extract_zip, find_checkpoint_dir, register_adapter,
+                   register_prefetch)
 
 
 class PMFAdapter(MeanFlowAdapter):
@@ -219,3 +220,11 @@ class PMFAdapter(MeanFlowAdapter):
 @register_adapter("pmf")
 def _make_pmf(registry: Dict[str, Any], context: Dict[str, Any]) -> PMFAdapter:
     return PMFAdapter(registry, context["repo_paths"]["pmf"], context["ckpt_cache"])
+
+
+@register_prefetch("pmf")
+def _prefetch_pmf(registry: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Download and extract the pMF checkpoint archive only -- no JAX, no model build."""
+    target = download_and_extract_zip(registry["hf_repo"], registry["ckpt_file"],
+                                      Path(context["ckpt_cache"]).resolve())
+    return {"path": str(target), "checkpoint_dir": find_checkpoint_dir(target)}

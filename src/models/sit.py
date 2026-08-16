@@ -23,7 +23,8 @@ import numpy as np
 
 from ..utils import (STANDARD_FLOW, assert_pixel_batch, gaussian_noise, load_python_module,
                      native_time, pixel_fingerprint, pushd, record_time, timed)
-from .base import AdapterSpec, Conditioning, StandardFlowAdapter, register_adapter
+from .base import (AdapterSpec, Conditioning, StandardFlowAdapter, register_adapter,
+                   register_prefetch)
 
 
 class SiTAdapter(StandardFlowAdapter):
@@ -256,3 +257,19 @@ class SiTAdapter(StandardFlowAdapter):
 def _make_sit(registry: Dict[str, Any], context: Dict[str, Any]) -> SiTAdapter:
     return SiTAdapter(registry, context["repo_paths"]["sit"], context["torch_device"],
                       context["torch_dtypes"]["sit"])
+
+
+@register_prefetch("sit")
+def _prefetch_sit(registry: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Fetch the SiT checkpoint (through the repository's own downloader) and the SD-VAE."""
+    info: Dict[str, Any] = {}
+    repo_dir = Path(context["repo_paths"]["sit"]).resolve()
+    if registry["checkpoint"] == "official":
+        sit_download = load_python_module("sit_official_download", repo_dir / "download.py")
+        with pushd(repo_dir):
+            sit_download.find_model("SiT-XL-2-256x256.pt")
+        info["checkpoint"] = "SiT-XL-2-256x256.pt (cached under %s)" % repo_dir
+    from diffusers import AutoencoderKL
+    AutoencoderKL.from_pretrained(registry["vae_id"])
+    info["vae"] = registry["vae_id"]
+    return info

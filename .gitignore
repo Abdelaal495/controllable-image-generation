@@ -4,6 +4,10 @@
 # Run artefacts and caches
 outputs/
 cache/
+logs/
+
+# Written by setup_cluster.sh; machine-specific paths
+activate_cluster.sh
 *.npz
 *.png
 !docs/*.png

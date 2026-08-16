@@ -24,7 +24,8 @@ import numpy as np
 from ..utils import (MEANFLOW, assert_pixel_batch, gaussian_noise, native_time,
                      pixel_fingerprint, record_time, timed)
 from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
-                   download_and_extract_zip, find_checkpoint_dir, register_adapter)
+                   download_and_extract_zip, find_checkpoint_dir, register_adapter,
+                   register_prefetch)
 
 
 class IMFAdapter(MeanFlowAdapter):
@@ -263,3 +264,20 @@ class IMFAdapter(MeanFlowAdapter):
 def _make_imf(registry: Dict[str, Any], context: Dict[str, Any]) -> IMFAdapter:
     return IMFAdapter(registry, context["repo_paths"]["imf"], context["ckpt_cache"],
                       context.get("local_device_count", 1))
+
+
+@register_prefetch("imf")
+def _prefetch_imf(registry: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Download the iMF checkpoint AND the Flax SD-VAE the LatentManager will need."""
+    target = download_and_extract_zip(registry["hf_repo"], registry["ckpt_file"],
+                                      Path(context["ckpt_cache"]).resolve())
+    info = {"path": str(target), "checkpoint_dir": find_checkpoint_dir(target)}
+    vae_type = registry.get("vae_type") or "mse"
+    try:
+        from huggingface_hub import snapshot_download
+        repo = "pcuenq/sd-vae-ft-%s-flax" % vae_type
+        snapshot_download(repo_id=repo)
+        info["vae"] = repo
+    except Exception as exc:                                            # pragma: no cover
+        info["vae_error"] = str(exc)
+    return info

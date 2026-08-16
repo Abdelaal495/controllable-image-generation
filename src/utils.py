@@ -493,6 +493,60 @@ def load_python_module(module_name: str, file_path: Any):
     return module
 
 
+def detect_environment() -> Dict[str, Any]:
+    """Where are we running?  Decides defaults, never scientific behaviour.
+
+    Distinguishes Colab, a SLURM compute node (Alliance/DRAC clusters), a cluster login
+    node, and a plain local machine.  The important consequence is `offline`: Alliance
+    compute nodes have NO internet access, so every checkpoint, dataset and repository must
+    already be on disk before the job starts (see `run.py --prefetch`).
+    """
+    env: Dict[str, Any] = {"kind": "local", "offline": False, "scheduler": None,
+                           "job_id": None, "array_task": None, "node": os.uname().nodename,
+                           "tmpdir": None, "cluster": None}
+    try:
+        import google.colab                                              # noqa: F401
+        env["kind"] = "colab"
+        return env
+    except Exception:
+        pass
+
+    if os.environ.get("SLURM_JOB_ID"):
+        env.update(kind="slurm_compute", scheduler="slurm", offline=True,
+                   job_id=os.environ.get("SLURM_JOB_ID"),
+                   array_task=os.environ.get("SLURM_ARRAY_TASK_ID"),
+                   tmpdir=os.environ.get("SLURM_TMPDIR"))
+    elif os.environ.get("CC_CLUSTER"):
+        # Alliance login nodes export CC_CLUSTER; these DO have internet.
+        env.update(kind="cluster_login", scheduler="slurm")
+
+    env["cluster"] = os.environ.get("CC_CLUSTER")
+    if os.environ.get("MPCFLOW_OFFLINE", "").lower() in ("1", "true", "yes"):
+        env["offline"] = True
+    if os.environ.get("MPCFLOW_OFFLINE", "").lower() in ("0", "false", "no"):
+        env["offline"] = False
+    return env
+
+
+def apply_offline_mode(offline: bool) -> None:
+    """Make every download library fail fast and loudly instead of hanging on a socket.
+
+    On a compute node with no route to the internet, an un-set HF_HUB_OFFLINE turns a
+    missing file into a multi-minute connection timeout buried in a job log.
+    """
+    if not offline:
+        return
+    for key in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        os.environ.setdefault(key, "1")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
+
+def env_default(name: str, fallback: Any) -> Any:
+    """Environment-variable override for a path-like default (job scripts set these once)."""
+    value = os.environ.get(name)
+    return value if value else fallback
+
+
 def in_ipython() -> bool:
     try:
         from IPython import get_ipython           # noqa: F401

@@ -234,11 +234,21 @@ class MeanFlowAdapter(ModelAdapter):
 # Adapter registry
 # =====================================================================================
 ADAPTER_FACTORIES: Dict[str, Any] = {}
+# Download-only hooks used by `run.py --prefetch`.  They must NOT build a model: they run on
+# a cluster login node, which has internet but a hard CPU-minute and memory budget.
+PREFETCH_HOOKS: Dict[str, Any] = {}
 
 
 def register_adapter(name: str):
     def wrap(fn):
         ADAPTER_FACTORIES[name] = fn
+        return fn
+    return wrap
+
+
+def register_prefetch(name: str):
+    def wrap(fn):
+        PREFETCH_HOOKS[name] = fn
         return fn
     return wrap
 
