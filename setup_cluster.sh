@@ -82,6 +82,17 @@ if [ $DO_VENV -eq 1 ]; then
   # cuda/cudnn are what the Alliance JAX and PyTorch wheels link against.
   module load cuda cudnn >/dev/null 2>&1 || module load cuda >/dev/null 2>&1 || \
       echo "  (no cuda module loaded; CPU-only wheels will still work)"
+  # The 'arrow' module provides pyarrow, which `datasets` requires. The Alliance wheelhouse ships a
+  # DUMMY pyarrow wheel that fails on purpose and tells you to load this module instead --
+  # and it MUST be loaded BEFORE the virtualenv is activated, or `pip install datasets`
+  # dies with "Failed to build 'pyarrow-noinstall'".
+  if module load gcc arrow >/dev/null 2>&1 || module load arrow >/dev/null 2>&1; then
+      echo '  arrow module loaded (provides pyarrow, which datasets needs)'
+  else
+      echo '  ! no arrow module found: datasets will not install, so the gated ImageNet'
+      echo "    download will fail. Use data.source: local_folder, or run"
+      echo "    'module spider arrow' and pass the version you find."
+  fi
 
   if [ ! -d "$VENV" ]; then
     echo "  creating $VENV"
@@ -126,7 +137,7 @@ for name, label in [("numpy", "numpy"), ("yaml", "PyYAML"), ("PIL", "Pillow"),
                     ("flax", "flax"), ("diffusers", "diffusers"), ("timm", "timm"),
                     ("lpips", "lpips"), ("datasets", "datasets"),
                     ("huggingface_hub", "huggingface_hub"),
-                    ("ml_collections", "ml_collections")]:
+                    ("ml_collections", "ml_collections"), ("pyarrow", "pyarrow (arrow module)")]:
     try:
         module = importlib.import_module(name)
         print("    %-18s %s" % (label, getattr(module, "__version__", "ok")))
@@ -136,6 +147,16 @@ PYEOF
   echo
   echo "  NOTE: torch/jax report no GPU on a login node -- login nodes have none."
   echo "        Device visibility is checked inside the job, not here."
+  if ! python -c "import datasets" >/dev/null 2>&1; then
+    echo
+    echo "  !! 'datasets' is MISSING. It needs pyarrow, which comes from the arrow module."
+    echo "     Fix with:"
+    echo "         deactivate"
+    echo "         module load gcc arrow"
+    echo "         source ${VENV}/bin/activate"
+    echo "         pip install --no-index datasets"
+    echo "     Without it the gated ImageNet download cannot run."
+  fi
 else
   # shellcheck disable=SC1091
   source "$VENV/bin/activate" || { echo "ERROR: no venv at $VENV"; exit 1; }
@@ -169,6 +190,8 @@ module --force purge >/dev/null 2>&1
 module load StdEnv/2023 >/dev/null 2>&1 || true
 module load python/${PY_VERSION} >/dev/null 2>&1
 module load cuda cudnn >/dev/null 2>&1 || module load cuda >/dev/null 2>&1 || true
+# arrow supplies pyarrow for datasets; it must be loaded BEFORE activating the venv.
+module load gcc arrow >/dev/null 2>&1 || module load arrow >/dev/null 2>&1 || true
 source ${VENV}/bin/activate
 export MPCFLOW_CACHE_ROOT="${CACHE_ROOT}"
 export MPCFLOW_OUTPUT_ROOT="${OUTPUT_ROOT}"

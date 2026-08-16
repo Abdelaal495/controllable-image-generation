@@ -572,9 +572,15 @@ def detect_accelerator(requested: str = "auto") -> Dict[str, Any]:
                             "gpu_name": None, "gpu_memory_mb": None, "requested": requested,
                             "bf16_likely": False}
 
-    tpu_nodes = glob.glob("/dev/accel*") + glob.glob("/dev/vfio/*")
+    # /dev/accel* is the real TPU device node.  /dev/vfio/* is NOT a TPU indicator: the
+    # VFIO container device /dev/vfio/vfio exists on any host with IOMMU enabled, which
+    # includes ordinary HPC login and compute nodes.  Probing it produced a false TPU
+    # detection on Narval and made the plan refuse to run PyTorch models.
+    tpu_nodes = glob.glob("/dev/accel*")
     has_tpu = (bool(tpu_nodes) or bool(os.environ.get("COLAB_TPU_ADDR"))
-               or bool(os.environ.get("TPU_WORKER_ID")) or os.path.exists("/usr/share/tpu"))
+               or bool(os.environ.get("TPU_WORKER_ID"))
+               or bool(os.environ.get("TPU_ACCELERATOR_TYPE"))
+               or os.path.exists("/usr/share/tpu"))
 
     has_gpu = False
     if shutil.which("nvidia-smi"):
@@ -604,7 +610,8 @@ def detect_accelerator(requested: str = "auto") -> Dict[str, Any]:
         if requested == "gpu" and not has_gpu:
             print("WARNING: accelerator='gpu' requested but nvidia-smi reported no GPU.")
     elif has_tpu:
-        info.update(kind="tpu", reason="TPU device node present")
+        info.update(kind="tpu", reason="TPU device node present (%s)"
+                                       % (tpu_nodes or "environment variable"))
     elif has_gpu:
         info.update(kind="gpu", reason="nvidia-smi reports %s" % info["gpu_name"])
     return info

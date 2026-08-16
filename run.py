@@ -921,7 +921,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     str((config.get("metrics") or {}).get("lpips_net", "alex")))
 
     accel = detect_accelerator(rt.get("accelerator", "auto"))
-    accel_notes = check_accelerator_compatibility(plan, accel)
+    if args.prefetch:
+        # Prefetch only downloads files. Login nodes have no GPU, so demanding a usable
+        # accelerator here would block the one step that must run on a login node.
+        accel_notes = ["--prefetch: downloading only, so the accelerator is not checked."]
+    else:
+        accel_notes = check_accelerator_compatibility(plan, accel)
     print_run_plan(plan, accel, accel_notes)
 
     cache_root_early = Path(rt.get("cache_root", "cache")).resolve()
