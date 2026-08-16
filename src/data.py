@@ -105,16 +105,47 @@ class DataManager:
             return self._load_local(n, self.config["data"]["local_folder"])
         raise ValueError("Unsupported data.source %r" % self.source_kind)
 
+    def _cached_pools(self):
+        """Every cached pool for this resolution, as (count, path), largest first."""
+        found = []
+        for path in self.cache_dir.glob("imagenet_val_*_%d.npz" % self.image_size):
+            try:
+                found.append((int(path.stem.split("_")[2]), path))
+            except (IndexError, ValueError):
+                continue
+        return sorted(found, reverse=True)
+
     def _load_imagenet(self, n: int) -> SourceExamples:
         cache = self.cache_dir / ("imagenet_val_%d_%d.npz" % (n, self.image_size))
-        if cache.exists():
-            with np.load(cache, allow_pickle=True) as z:
-                return SourceExamples(z["images"], z["labels"], list(z["names"]),
-                                      "hf_imagenet_val", {"cache": str(cache)})
+        # The pool is a deterministic PREFIX of IMAGENET_EXAMPLES, so any cache holding at
+        # least n images already contains exactly the n we want.  Matching the filename's
+        # count exactly would make `--num-images 1` miss a 2-image cache and try to
+        # download -- which is fatal on a compute node with no network.
+        for count, path in sorted(self._cached_pools()):
+            if count >= n:
+                with np.load(path, allow_pickle=True) as z:
+                    return SourceExamples(z["images"][:count], z["labels"][:count],
+                                          list(z["names"])[:count], "hf_imagenet_val",
+                                          {"cache": str(path), "cached_count": count,
+                                           "requested": n})
         if n > len(IMAGENET_EXAMPLES):
             raise ValueError("The curated ImageNet list has %d entries but %d were requested. "
                              "Use data.source: local_folder for a larger pool."
                              % (len(IMAGENET_EXAMPLES), n))
+        import os
+        if os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("HF_DATASETS_OFFLINE") == "1":
+            available = self._cached_pools()
+            raise RuntimeError(
+                "Offline mode is on and no cached pool holds the %d image(s) this run needs.\n"
+                "  cache directory : %s\n"
+                "  pools found     : %s\n"
+                "A compute node cannot download. Stage a pool at least this large from a\n"
+                "LOGIN NODE, then rerun:\n"
+                "    python run.py --config <config> --cache-root <cache> --prefetch\n"
+                "Note that --num-images N only ever needs a cache of N or more, so staging\n"
+                "the largest pool you intend to use covers every smaller run."
+                % (n, self.cache_dir,
+                   ([c for c, _ in available] or "none")))
         token = get_hf_token(required=True)
         try:
             from datasets import load_dataset
