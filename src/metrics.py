@@ -19,6 +19,7 @@ fixes the [-1,1] convention used throughout.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -44,6 +45,41 @@ def ssim(a: np.ndarray, b: np.ndarray) -> float:
                                        channel_axis=2, data_range=PIXEL_PEAK))
 
 
+LPIPS_WEIGHT_URL = ("https://raw.githubusercontent.com/richzhang/PerceptualSimilarity/"
+                    "master/lpips/weights/v0.1/%s.pth")
+
+
+def repair_lpips_weights(net: str = "alex", verbose: bool = True) -> bool:
+    """Restore the small linear-head weights that ship inside the `lpips` package.
+
+    LPIPS needs two things: a torchvision backbone (downloaded to TORCH_HOME) and a ~6 KB
+    calibration head bundled in the package itself.  Some redistributed wheels -- the
+    Alliance `lpips+computecanada` build among them -- omit the bundled file, so the model
+    imports fine and then fails on a missing path.  Downloading it once repairs the install
+    permanently; it requires network, so it happens during --prefetch, never in a job.
+    """
+    try:
+        import lpips as _lp
+        target = Path(_lp.__file__).parent / "weights" / "v0.1" / ("%s.pth" % net)
+        if target.exists() and target.stat().st_size > 1000:
+            return True
+        target.parent.mkdir(parents=True, exist_ok=True)
+        import urllib.request
+        if verbose:
+            print("   LPIPS head weights missing from the installed package; fetching %s"
+                  % target.name)
+        urllib.request.urlretrieve(LPIPS_WEIGHT_URL % net, str(target))
+        ok = target.exists() and target.stat().st_size > 1000
+        if verbose:
+            print("   %s %s (%d bytes)" % ("repaired" if ok else "FAILED to repair",
+                                           target, target.stat().st_size if ok else 0))
+        return ok
+    except Exception as exc:
+        if verbose:
+            print("   could not repair the LPIPS weights: %s" % exc)
+        return False
+
+
 def lpips_per_image(recon: np.ndarray, truth: np.ndarray) -> Optional[List[float]]:
     """Per-image LPIPS (AlexNet by default).  Returns None if the package is unavailable."""
     if not _LPIPS_STATE["enabled"] or _LPIPS_STATE["failed"]:
@@ -52,6 +88,17 @@ def lpips_per_image(recon: np.ndarray, truth: np.ndarray) -> Optional[List[float
         import torch
         if _LPIPS_STATE["model"] is None:
             import lpips as _lp
+            weights = (Path(_lp.__file__).parent / "weights" / "v0.1"
+                       / ("%s.pth" % _LPIPS_STATE["net"]))
+            if not weights.exists():
+                raise FileNotFoundError(
+                    "The installed `lpips` package is missing its bundled weight file %s. "
+                    "This is a packaging defect in some redistributed wheels, not a "
+                    "download failure. Repair it on a machine with network access:\n"
+                    "    python -c \"from src.metrics import repair_lpips_weights; "
+                    "repair_lpips_weights()\"\n"
+                    "or reinstall from PyPI: pip install --force-reinstall --no-deps lpips"
+                    % weights)
             net = _lp.LPIPS(net=_LPIPS_STATE["net"])
             net.eval().requires_grad_(False)
             _LPIPS_STATE["model"] = net

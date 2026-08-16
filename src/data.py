@@ -116,7 +116,30 @@ class DataManager:
                              "Use data.source: local_folder for a larger pool."
                              % (len(IMAGENET_EXAMPLES), n))
         token = get_hf_token(required=True)
-        from datasets import load_dataset
+        try:
+            from datasets import load_dataset
+        except ImportError as exc:
+            # `datasets` needs pyarrow, which on Alliance clusters comes from the `arrow`
+            # module rather than pip.  The cache this builds is a single small .npz that is
+            # fully portable, so it is often easier to build it elsewhere and copy it in
+            # than to fight the module stack.
+            raise RuntimeError(
+                "The `datasets` package is unavailable (%s), so the gated ImageNet download "
+                "cannot run.\n"
+                "Three ways forward:\n"
+                "  1. Alliance clusters: `datasets` needs pyarrow from the arrow MODULE. In a\n"
+                "     clean shell run, IN THIS ORDER:\n"
+                "         module --force purge && module load StdEnv/2023 python/3.11 gcc arrow\n"
+                "         source <your-venv>/bin/activate\n"
+                "         pip install --no-index datasets\n"
+                "     The arrow module must be loaded BEFORE the venv is activated.\n"
+                "  2. Build the cache on any machine that has `datasets` (Colab, a laptop) and\n"
+                "     copy the single file it produces:\n"
+                "         %s\n"
+                "     It is a few hundred KB, self-contained and architecture-independent.\n"
+                "  3. Skip the gated dataset entirely with data.source: local_folder and a\n"
+                "     directory of <classid>_<name>.png images (see the README)."
+                % (exc, cache)) from exc
         wanted = IMAGENET_EXAMPLES[:n]
         target = {c for c, _ in wanted}
         print("Streaming ImageNet validation images for %d classes ..." % len(target))

@@ -119,13 +119,20 @@ if [ $DO_VENV -eq 1 ]; then
 
   echo
   echo "  Remaining packages from PyPI (login nodes have internet)"
-  for pkg in "diffusers>=0.36,<0.40" "timm==0.9.16" "einops>=0.8.0" "lpips>=0.1.4" \
+  for pkg in "diffusers>=0.36,<0.40" "timm==0.9.16" "einops>=0.8.0" \
              "python-dotenv>=1.0" "dm-tree>=0.1.8" "cached_property>=1.5"; do
     pip install "$pkg" || echo "  ! failed: $pkg"
   done
+  # lpips deliberately comes from PyPI, NOT the Alliance wheelhouse: the
+  # lpips+computecanada wheel omits the ~6 KB calibration weights bundled in the package,
+  # so it imports fine and then fails on a missing file. --prefetch repairs it either way.
+  pip install --force-reinstall --no-deps lpips || echo "  ! failed: lpips"
   # These four are needed only if a wheel was missing above.
   python -c "import datasets" 2>/dev/null || pip install "datasets>=2.19" || true
   python -c "import ml_collections" 2>/dev/null || pip install ml_collections || true
+
+  # datasets needs pyarrow from the arrow module loaded above; retry now that it is.
+  python -c "import datasets" >/dev/null 2>&1 || pip install --no-index datasets || true
 
   echo
   echo "  Verifying:"

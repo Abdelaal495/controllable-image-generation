@@ -781,7 +781,10 @@ def prefetch_assets(plan, config: Dict[str, Any], cache_root: Path) -> Dict[str,
     print("\n[4/4] LPIPS weights")
     if (config.get("metrics") or {}).get("lpips", True):
         try:
-            from src.metrics import lpips_per_image
+            from src.metrics import lpips_per_image, repair_lpips_weights
+            # Some redistributed wheels omit the bundled calibration head; fix it here,
+            # where there is still a network, rather than failing inside a job.
+            repair_lpips_weights((config.get("metrics") or {}).get("lpips_net", "alex"))
             probe = np.zeros((1, 64, 64, 3), np.float32)
             ok = lpips_per_image(probe, probe) is not None
             report["lpips"] = "ok" if ok else "unavailable"
