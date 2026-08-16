@@ -394,7 +394,7 @@ class ModelManager:
         except Exception as exc:                                        # pragma: no cover
             print("   release warning:", exc)
         del adapter
-        free_memory()
+        free_memory(deep=True)      # the model is gone; its compiled executables can go too
 
     def release_all(self) -> None:
         for name in list(self._adapters):

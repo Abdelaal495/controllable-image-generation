@@ -439,7 +439,33 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
 
-## 17. Known limitations
+## 17. JAX compilation and runtime hygiene
+
+pMF and iMF run on JAX, which compiles per array shape. Three mechanisms keep compilation
+out of the measured runtime:
+
+1. **Untimed warm-up.** Before any timed job, the *exact* resolved trajectory is executed
+   once with `n_ctrl = 1`. Reducing `steps`/`num_mpc_steps` in the warm-up would change the
+   time grid, so the real job would meet uncompiled intervals and pay for them inside the
+   measured region. The warm-up cache is keyed on everything that alters the traced graph
+   (method, batch, problem, measurement shape, `K`, `t0`, `steps`, `num_mpc_steps`, solver,
+   both normalisations).
+2. **Compiled executables survive between jobs.** `jax.clear_caches()` is a *deep* hook that
+   runs only when a model is released, never in the per-job cleanup path. Calling it between
+   jobs discards every compiled executable and forces a full recompilation before each job —
+   a measured 470 s of compilation for 26 s of work on a six-task run.
+3. **Persistent on-disk cache.** Compiled executables are written under
+   `cache/jax_compilation_cache/`, so rerunning the same benchmark recompiles nothing. Delete
+   that directory if you change JAX or the model code.
+
+The completion summary prints a per-model breakdown of load / warm-up / measured work, and
+flags any model where compilation dominates. `warmup_seconds` and `model_load_seconds` are
+columns in `results.csv`; neither is inside `runtime`.
+
+`diagnose_pmf_timing.py` times a repeated interval against a new one and reports the
+`jax.jit` cache size, if you need to confirm what a given machine is doing.
+
+## 18. Known limitations
 
 - The primary baseline is **paired SDEdit at the same `t0`**. A compute-matched SDEdit
   baseline (giving SDEdit as many network evaluations as MPC uses) would be interesting and

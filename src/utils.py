@@ -405,7 +405,12 @@ RULE, THIN = "=" * 94, "-" * 94
 # Timing / progress / memory
 # =====================================================================================
 TIMING: Dict[str, List[float]] = {}
+# Cheap and non-destructive: safe to run between atomic jobs.
 MEMORY_HOOKS: List[Any] = []
+# Destructive: discards compiled executables and other expensive-to-rebuild state, so it
+# runs ONLY when a model is released.  Calling jax.clear_caches() between jobs would force
+# a full recompilation of the generative model before every single job.
+DEEP_MEMORY_HOOKS: List[Any] = []
 _PROGRESS_ENABLED = [True]
 
 
@@ -444,14 +449,24 @@ def progress(iterable, desc: str = "", total: Optional[int] = None):
         return iterable
 
 
-def free_memory() -> None:
-    """Framework-neutral memory reclamation; each backend registers its own hook."""
+def free_memory(deep: bool = False) -> None:
+    """Framework-neutral memory reclamation; each backend registers its own hook.
+
+    deep=False  between atomic jobs -- releases tensors, KEEPS compiled executables.
+    deep=True   when a model is released -- also discards compilation caches.
+    """
     gc.collect()
     for hook in MEMORY_HOOKS:
         try:
             hook()
         except Exception:
             pass
+    if deep:
+        for hook in DEEP_MEMORY_HOOKS:
+            try:
+                hook()
+            except Exception:
+                pass
 
 
 @contextlib.contextmanager

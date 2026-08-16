@@ -168,7 +168,7 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
 def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
                     cache_root: Path, verbose: bool = True) -> Dict[str, Any]:
     """Import and configure only the frameworks this plan needs."""
-    from src.utils import MEMORY_HOOKS
+    from src.utils import DEEP_MEMORY_HOOKS, MEMORY_HOOKS
     context: Dict[str, Any] = {"torch_dtypes": {}, "local_device_count": 1}
     frameworks = plan.resources.frameworks
 
@@ -182,6 +182,16 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
         jax_cache.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(jax_cache))
         import jax
+        # Persist compiled executables to disk so compilation is paid ONCE EVER rather
+        # than once per session. The defaults skip small/fast entries; pMF's model step is
+        # neither, but being explicit means a rerun of the same benchmark recompiles nothing.
+        for option, value in (("jax_compilation_cache_dir", str(jax_cache)),
+                              ("jax_persistent_cache_min_entry_size_bytes", -1),
+                              ("jax_persistent_cache_min_compile_time_secs", 0.5)):
+            try:
+                jax.config.update(option, value)
+            except Exception:
+                pass                      # older JAX: the env var above still applies
         # Compatibility shims: aliases recent JAX removed but the repositories still use.
         for alias, target in (("tree_map", "tree_map"), ("tree_leaves", "tree_leaves"),
                               ("tree_flatten", "tree_flatten")):
@@ -189,7 +199,10 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
                 setattr(jax, alias, getattr(jax.tree_util, target))
         jax.distributed.initialize = lambda *a, **k: None      # single-host Colab
         context["local_device_count"] = jax.local_device_count()
-        MEMORY_HOOKS.append(lambda: jax.clear_caches())
+        # DEEP, not per-job: jax.clear_caches() discards every compiled executable. Running
+        # it between jobs made pMF recompile the whole model 24 times (~470 s of compilation
+        # for ~26 s of actual work). It now runs only when the model is released.
+        DEEP_MEMORY_HOOKS.append(lambda: jax.clear_caches())
         if verbose:
             print("JAX             : %s | backend: %s | devices: %s"
                   % (jax.__version__, jax.default_backend(), jax.devices()))
@@ -878,6 +891,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("  ok=%d  failed=%d  skipped=%d  (of %d atomic jobs)"
           % (ok, len([r for r in writer.records if r["status"] == "failed"]),
              len([r for r in writer.records if r["status"] == "skipped"]), len(plan.specs)))
+    # Warm-up and loading are excluded from every reported runtime, so show them here --
+    # otherwise a compilation problem hides inside the wall clock and looks like slow compute.
+    print("  wall-clock breakdown (all EXCLUDED from the runtime column):")
+    for model in scheduled:
+        rows = [r for r in writer.records if r["model"] == model and r["status"] == "ok"]
+        warm = sum(r.get("warmup_seconds") or 0.0 for r in rows)
+        work = sum(r.get("runtime") or 0.0 for r in rows)
+        print("    %-5s load %6.1f s | warm-up/compile %7.1f s | measured work %7.1f s%s"
+              % (model.upper(), manager.load_seconds.get(model, 0.0), warm, work,
+                 "   <-- compilation dominates; see README" if warm > 3 * max(work, 1e-9)
+                 else ""))
     print(RULE)
 
     print_summary_tables(writer.records)
