@@ -264,6 +264,22 @@ Every atomic job is written **the moment it finishes**, so a Colab crash halfway
 sweep never erases earlier reconstructions. With `runtime.resume: true` a rerun reuses a
 finished job only when its *resolved spec* matches exactly.
 
+### Figures
+
+`problem_instances.png` sizes its grid to the number of images actually in the run.
+
+`configurations_<model>.png` shows **one bar per resolved configuration**, per model, with
+**no averaging across models, methods or hyperparameters** — a mean over a 4-step and a
+25-step SDEdit, or over two lambdas, describes a run that was never executed. The only
+averaging is over the images inside a single job, which is what `num_images` means. A dashed
+line marks the degraded observation itself, so it is immediately visible whether a
+reconstruction beat doing nothing. Bars group on the structural configuration (method,
+steps/`N`/`K`); lambda is task-dependent via Table E2 and is annotated per bar.
+
+`paired_deltas.png` shows each MPC job minus its **step-matched SDEdit baseline** — the
+SDEdit job at the same task, model and t0 whose step count is closest — annotated with the
+runtime multiple. Never against an average of SDEdit runs.
+
 ### Metrics
 
 Every reconstruction reports **PSNR, SSIM, LPIPS and runtime per image**, per-image and

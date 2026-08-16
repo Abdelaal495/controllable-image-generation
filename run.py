@@ -547,74 +547,78 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
 # Reporting
 # =====================================================================================
 def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
+    """Per-configuration tables.
+
+    Nothing is averaged across models, methods or hyperparameters: each row below is one
+    atomic job, because a mean over a 4-step and a 25-step SDEdit (or over two lambdas)
+    describes a run that was never executed.  The only averaging is over the images inside
+    a single job, which is what `num_images` means.
+    """
     ok = [r for r in records if r["status"] == "ok"]
     if not ok:
         print("No successful job to summarise.")
         return
 
     print("\n" + RULE)
-    print("RESULTS BY TASK / MODEL / METHOD   (mean over images and configurations)")
+    print("RESULTS BY RESOLVED CONFIGURATION   (one row = one atomic job, averaged over its "
+          "images only)")
     print(RULE)
-    header = ("%-18s %-5s %-12s %6s %8s %7s %8s %10s %9s"
-              % ("task", "model", "method", "t0", "PSNR", "SSIM", "LPIPS", "meas-RMSE",
-                 "s/image"))
-    print(header)
+    print("%-18s %-5s %-26s %7s %7s %8s %10s %9s"
+          % ("task", "model", "configuration", "PSNR", "SSIM", "LPIPS", "meas-RMSE",
+             "s/image"))
     print(THIN)
-    groups: Dict[Tuple, List[Dict[str, Any]]] = {}
-    for r in ok:
-        groups.setdefault((r["task"], r["model"], r["method"], r["t0"]), []).append(r)
-    for key in sorted(groups):
-        rows = groups[key]
-
-        def avg(field):
-            vals = [r[field] for r in rows if r.get(field) is not None]
-            return float(np.mean(vals)) if vals else float("nan")
-
-        print("%-18s %-5s %-12s %6.2f %8.2f %7.4f %8s %10.4f %9.2f"
-              % (key[0][:18], key[1], key[2][:12], key[3], avg("psnr"), avg("ssim"),
-                 ("%.4f" % avg("lpips")) if not np.isnan(avg("lpips")) else "n/a",
-                 avg("measurement_rmse"), avg("runtime_per_image")))
+    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2}
+    last_task = None
+    for row in sorted(ok, key=lambda r: (r["task"], r["model"], order.get(r["method"], 9),
+                                         viz.config_label(r))):
+        if last_task is not None and row["task"] != last_task:
+            print()
+        last_task = row["task"]
+        degraded = row.get("degraded_psnr")
+        flag = " " if (row.get("psnr") or 0) >= (degraded or -1e9) else "!"
+        print("%-18s %-5s %-26s %7.2f %7.4f %8s %10.4f %9.2f %s"
+              % (row["task"][:18], row["model"], viz.config_label(row)[:26], row["psnr"],
+                 row["ssim"],
+                 ("%.4f" % row["lpips"]) if row.get("lpips") is not None else "n/a",
+                 row["measurement_rmse"], row["runtime_per_image"], flag))
+    print(THIN)
+    print("!  marks a reconstruction whose PSNR is BELOW the degraded observation itself,")
+    print("   i.e. one that did worse than leaving the measurement untouched.")
 
     # ---------------------------------------------------------------- paired deltas
     print("\n" + RULE)
-    print("PAIRED COMPARISON vs SDEdit   (same image, y, model, t0 and epsilon)")
+    print("PAIRED COMPARISON vs STEP-MATCHED SDEdit")
+    print("each MPC job against the SDEdit job at the SAME task, model and t0 whose step")
+    print("count is closest to its own -- never against an average of SDEdit runs")
     print(RULE)
-    print("%-18s %-5s %6s %-12s %9s %9s %10s %9s"
-          % ("task", "model", "t0", "method", "dPSNR", "dSSIM", "dLPIPS", "runtime x"))
+    print("%-18s %-5s %-24s %-14s %8s %8s %9s %8s"
+          % ("task", "model", "MPC configuration", "baseline", "dPSNR", "dSSIM", "dLPIPS",
+             "runtime"))
     print(THIN)
-    any_pair = False
-    for (task, model, t0) in sorted({(r["task"], r["model"], r["t0"]) for r in ok}):
-        base = [r for r in ok if r["task"] == task and r["model"] == model
-                and r["t0"] == t0 and r["method"] == "sdedit"]
-        if not base:
+    mpc = [r for r in ok if r["method"] in ("mpc_rhc", "mpc_delta_t")]
+    printed = 0
+    last_task = None
+    for row in sorted(mpc, key=lambda r: (r["task"], r["model"], order.get(r["method"], 9),
+                                          viz.config_label(r))):
+        base = viz.step_matched_baseline(row, ok)
+        if base is None:
             continue
-
-        def mean_of(rows, field):
-            vals = [r[field] for r in rows if r.get(field) is not None]
-            return float(np.mean(vals)) if vals else None
-
-        b_psnr, b_ssim = mean_of(base, "psnr"), mean_of(base, "ssim")
-        b_lpips, b_rt = mean_of(base, "lpips"), mean_of(base, "runtime_per_image")
-        for method in ("mpc_rhc", "mpc_delta_t"):
-            rows = [r for r in ok if r["task"] == task and r["model"] == model
-                    and r["t0"] == t0 and r["method"] == method]
-            if not rows:
-                continue
-            any_pair = True
-            m_psnr, m_ssim = mean_of(rows, "psnr"), mean_of(rows, "ssim")
-            m_lpips, m_rt = mean_of(rows, "lpips"), mean_of(rows, "runtime_per_image")
-            print("%-18s %-5s %6.2f %-12s %+9.2f %+9.4f %10s %8.1fx"
-                  % (task[:18], model, t0, method[:12],
-                     (m_psnr - b_psnr) if (m_psnr and b_psnr) else float("nan"),
-                     (m_ssim - b_ssim) if (m_ssim and b_ssim) else float("nan"),
-                     ("%+.4f" % (m_lpips - b_lpips)) if (m_lpips is not None
-                                                         and b_lpips is not None) else "n/a",
-                     (m_rt / b_rt) if (m_rt and b_rt) else float("nan")))
-    if not any_pair:
-        print("  (no method-paired group; add an SDEdit entry at the same t0 to enable this)")
+        if last_task is not None and row["task"] != last_task:
+            print()
+        last_task = row["task"]
+        printed += 1
+        d_lpips = ("%+9.4f" % (row["lpips"] - base["lpips"])
+                   if None not in (row.get("lpips"), base.get("lpips")) else "      n/a")
+        ratio = (row["runtime_per_image"] / base["runtime_per_image"]
+                 if base.get("runtime_per_image") else float("nan"))
+        print("%-18s %-5s %-24s %-14s %+8.2f %+8.4f %s %7.1fx"
+              % (row["task"][:18], row["model"], viz.config_label(row)[:24],
+                 viz.config_label(base)[:14], row["psnr"] - base["psnr"],
+                 row["ssim"] - base["ssim"], d_lpips, ratio))
+    if not printed:
+        print("  (no MPC job has a paired SDEdit baseline at the same t0)")
     print(THIN)
-    print("dLPIPS < 0 is an improvement.  'runtime x' is MPC time divided by SDEdit time at")
-    print("the same t0: the compute price of whatever quality change is shown to its left.")
+    print("dLPIPS < 0 is an improvement. 'runtime' is the multiple of the named baseline.")
 
     failed = [r for r in records if r["status"] != "ok"]
     if failed:
@@ -646,9 +650,14 @@ def make_figures(run_dir: Path, plan, store, records, reconstructions,
         spec = next(s for s in plan.specs if s.experiment == experiment and s.model == model)
         paths += viz.plot_comparison_grid(experiment, model, entries,
                                           store.get(spec.problem_key), figures_dir, show)
-    summary = viz.plot_metric_summary(records, figures_dir / "summary_by_method.png", show)
-    if summary:
-        paths.append(summary)
+    for model in dict.fromkeys(s.model for s in plan.specs):
+        breakdown = viz.plot_configuration_breakdown(
+            records, model, figures_dir / ("configurations_%s.png" % model), show)
+        if breakdown:
+            paths.append(breakdown)
+    deltas = viz.plot_paired_deltas(records, figures_dir / "paired_deltas.png", show)
+    if deltas:
+        paths.append(deltas)
     cost = viz.plot_quality_vs_cost(records, figures_dir / "quality_vs_cost.png", show)
     if cost:
         paths.append(cost)
