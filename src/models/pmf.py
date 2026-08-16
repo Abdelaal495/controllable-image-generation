@@ -23,7 +23,7 @@ import numpy as np
 from ..utils import (MEANFLOW, assert_pixel_batch, gaussian_noise, native_time, record_time)
 from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
                    download_and_extract_zip, find_checkpoint_dir, register_adapter,
-                   register_prefetch)
+                   register_prefetch, stub_missing_module)
 
 
 class PMFAdapter(MeanFlowAdapter):
@@ -45,6 +45,9 @@ class PMFAdapter(MeanFlowAdapter):
         jax, jnp = self.jax, self.jnp
         t_start = time.perf_counter()
         rcfg = self.registry
+        # The repository's logging utilities import wandb at module scope; this
+        # run never logs, so an absent wandb must not block a checkpoint load.
+        stub_missing_module("wandb")
         with self.sandbox:
             import yaml
             from configs.default import get_config as get_default_config

@@ -111,6 +111,13 @@ if [ $DO_VENV -eq 1 ]; then
       echo "  ! torch wheel unavailable -- JiT and SiT will not run"
   pip install --no-index jax flax optax orbax-checkpoint || \
       echo "  ! jax stack unavailable -- pMF and iMF will not run"
+  # Modern JAX keeps CUDA support in SEPARATE plugin packages. Without them jaxlib silently
+  # falls back to the CPU, which leaves pMF/iMF correct but 50-100x slower -- a job that
+  # hits its wall clock instead of failing. Try the wheelhouse names, then the extra.
+  if ! pip install --no-index jax_cuda12_plugin jax_cuda12_pjrt >/dev/null 2>&1; then
+    pip install --no-index "jax[cuda12]" >/dev/null 2>&1 || \
+      echo "  ! no CUDA plugin wheel found for jax; run 'avail_wheels jax*' to see names"
+  fi
   pip install --no-index numpy scipy matplotlib pillow scikit-image pyyaml tqdm \
       pandas h5py || true
   # Available as Alliance wheels on most clusters; harmless if they fall through to PyPI.
@@ -127,6 +134,8 @@ if [ $DO_VENV -eq 1 ]; then
   # lpips+computecanada wheel omits the ~6 KB calibration weights bundled in the package,
   # so it imports fine and then fails on a missing file. --prefetch repairs it either way.
   pip install --force-reinstall --no-deps lpips || echo "  ! failed: lpips"
+  # accelerate speeds up (and lowers the memory of) the JiT checkpoint load.
+  pip install --no-index accelerate >/dev/null 2>&1 || pip install accelerate || true
   # These four are needed only if a wheel was missing above.
   python -c "import datasets" 2>/dev/null || pip install "datasets>=2.19" || true
   python -c "import ml_collections" 2>/dev/null || pip install ml_collections || true
@@ -144,13 +153,27 @@ for name, label in [("numpy", "numpy"), ("yaml", "PyYAML"), ("PIL", "Pillow"),
                     ("flax", "flax"), ("diffusers", "diffusers"), ("timm", "timm"),
                     ("lpips", "lpips"), ("datasets", "datasets"),
                     ("huggingface_hub", "huggingface_hub"),
-                    ("ml_collections", "ml_collections"), ("pyarrow", "pyarrow (arrow module)")]:
+                    ("ml_collections", "ml_collections"), ("pyarrow", "pyarrow (arrow module)"),
+                    ("accelerate", "accelerate")]:
     try:
         module = importlib.import_module(name)
         print("    %-18s %s" % (label, getattr(module, "__version__", "ok")))
     except Exception as exc:
         print("    %-18s MISSING (%s)" % (label, type(exc).__name__))
 PYEOF
+  python - <<'PYEOF2' 2>/dev/null || true
+try:
+    import jax
+    plugins = []
+    for name in ("jax_cuda12_plugin", "jax_cuda12_pjrt"):
+        try:
+            __import__(name)
+            plugins.append(name)
+        except ImportError:
+            pass
+    print("    %-18s CUDA plugin(s): %s" % ("jax", plugins or "NONE -- will run on CPU!"))
+PYEOF2
+
   echo
   echo "  NOTE: torch/jax report no GPU on a login node -- login nodes have none."
   echo "        Device visibility is checked inside the job, not here."

@@ -277,6 +277,49 @@ def find_checkpoint_dir(root: Path) -> str:
     return str(subdirs[0] if subdirs else root)
 
 
+def stub_missing_module(name: str, verbose: bool = True) -> bool:
+    """Install a no-op placeholder for a TRAINING-ONLY dependency, if it is absent.
+
+    The pMF and iMF repositories import `wandb` at module scope from their logging
+    utilities, even though this repository always sets `use_wandb = False` and never logs
+    anything.  Requiring an experiment-tracking service to be installed just to load a
+    checkpoint is a packaging accident, not a real dependency, so an absent one is replaced
+    by a stub whose attributes are inert callables.  Anything that genuinely needs the real
+    package would fail loudly rather than silently mis-train: nothing here trains.
+    """
+    import sys
+    import types
+    if name in sys.modules:
+        return False
+    try:
+        __import__(name)
+        return False
+    except ImportError:
+        pass
+
+    class _Inert:
+        def __init__(self, *a, **k):
+            pass
+
+        def __call__(self, *a, **k):
+            return self
+
+        def __getattr__(self, _item):
+            return _Inert()
+
+        def __bool__(self):
+            return False
+
+    module = types.ModuleType(name)
+    module.__getattr__ = lambda _item: _Inert()          # type: ignore[attr-defined]
+    module.__stubbed_by__ = "sdedit-vs-mpcflow"          # type: ignore[attr-defined]
+    sys.modules[name] = module
+    if verbose:
+        print("   %s is not installed; using an inert stub (logging is disabled anyway)."
+              % name)
+    return True
+
+
 class RepoSandbox:
     """Isolate repositories that share top-level package names.
 

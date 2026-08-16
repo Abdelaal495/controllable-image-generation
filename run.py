@@ -262,9 +262,24 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
         # it between jobs made pMF recompile the whole model 24 times (~470 s of compilation
         # for ~26 s of actual work). It now runs only when the model is released.
         DEEP_MEMORY_HOOKS.append(lambda: jax.clear_caches())
+        backend = jax.default_backend()
         if verbose:
             print("JAX             : %s | backend: %s | devices: %s"
-                  % (jax.__version__, jax.default_backend(), jax.devices()))
+                  % (jax.__version__, backend, jax.devices()))
+        if accel["kind"] == "gpu" and backend != "gpu":
+            # Silent CPU fallback is the worst outcome: pMF/iMF still produce correct
+            # numbers, just 50-100x slower, so a job hits its wall clock instead of failing.
+            print("!" * 94)
+            print("! JAX IS RUNNING ON THE CPU although this node has a GPU.")
+            print("! pMF and iMF would be 50-100x slower and will likely exceed your time")
+            print("! limit. Modern JAX keeps CUDA support in a SEPARATE plugin package that")
+            print("! `pip install jax` does not pull in. On an Alliance cluster, from a")
+            print("! LOGIN node, with the same modules loaded:")
+            print("!     avail_wheels jax jaxlib jax_cuda12_plugin jax_cuda12_pjrt")
+            print("!     pip install --no-index jax_cuda12_plugin jax_cuda12_pjrt")
+            print("! Verify with:  python -c \"import jax; print(jax.devices())\"")
+            print("! Meanwhile, run PyTorch models only:  --models jit")
+            print("!" * 94)
 
     if "torch" in frameworks:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")   # before cuBLAS starts
