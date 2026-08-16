@@ -1221,5 +1221,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
+def _exit(code: int) -> None:
+    """Terminate without running interpreter finalization.
+
+    This process ends up holding ~100 independently-built native extensions (pyarrow,
+    torch, jax, aiohttp via `datasets`, PIL, scipy).  At shutdown they tear down in an
+    order none of them agreed on, and a background thread left by aiohttp can touch the GIL
+    after torch has released its thread state:
+
+        Fatal Python error: PyGILState_Release ... Python runtime state: finalizing
+
+    It happens strictly AFTER main() returns, so no result is affected -- but it turns a
+    successful run into a non-zero exit code, which makes `set -e` job scripts report a
+    failure that did not occur.  Every artefact this program produces is written and closed
+    as it goes (results are persisted per job, not buffered to the end), so skipping
+    finalization costs nothing.  The streams are flushed explicitly first.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(int(code))
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit(main())
