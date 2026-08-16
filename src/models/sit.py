@@ -32,7 +32,7 @@ class SiTAdapter(StandardFlowAdapter):
         import torch
         super().__init__("sit", registry)
         self.torch = torch
-        self.repo_dir = Path(repo_dir)
+        self.repo_dir = Path(repo_dir).resolve()   # pushd() chdirs here
         self.device = device
         self.dtype = dtype                      # network compute dtype
         self.integration_dtype = torch.float32  # MPC / solver state dtype

@@ -141,7 +141,8 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
     setup_colab.sh normally does this; doing it here too keeps a fresh checkout working
     without an extra step, and it is idempotent.
     """
-    repo_root = Path(cache_root) / "repos"
+    # Absolute: adapters chdir into these directories (RepoSandbox / pushd).
+    repo_root = Path(cache_root).resolve() / "repos"
     repo_root.mkdir(parents=True, exist_ok=True)
     paths, heads = {}, {}
     for model in plan.resources.models:
@@ -662,7 +663,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     accel_notes = check_accelerator_compatibility(plan, accel)
     print_run_plan(plan, accel, accel_notes)
 
-    run_dir = Path(plan.output_dir)
+    run_dir = Path(plan.output_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     save_yaml(run_dir / "config.yaml", plan.raw_config)
     save_yaml(run_dir / "resolved_config.yaml", plan.to_dict())
@@ -674,7 +675,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     # ---------------------------------------------------------------- data and problems
-    cache_root = Path(plan.cache_root)
+    cache_root = Path(plan.cache_root).resolve()
     data = DataManager(config, cache_root / "data")
     source = data.pool(plan.resources.source_pool_size)
     print("\nShared image pool (largest enabled experiment needs %d):"

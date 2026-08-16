@@ -40,8 +40,8 @@ class JiTAdapter(StandardFlowAdapter):
         import torch
         super().__init__("jit", registry)
         self.torch = torch
-        self.repo_dir = Path(repo_dir)
-        self.cache_dir = Path(cache_dir)
+        self.repo_dir = Path(repo_dir).resolve()
+        self.cache_dir = Path(cache_dir).resolve()
         self.device = device
         self.dtype = dtype
         self.integration_dtype = torch.float32

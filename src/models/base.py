@@ -283,7 +283,10 @@ class RepoSandbox:
         import sys
         self.sys = sys
         self.name = name
-        self.path = str(path)
+        # ABSOLUTE: __enter__ chdirs here, so any relative path stored by a caller
+        # would afterwards resolve against the repository directory instead of the
+        # original working directory.
+        self.path = str(Path(path).resolve())
         self.roots = tuple(self.CONFLICTING_ROOTS) + tuple(extra_roots)
         self._prev_cwd: Optional[str] = None
         self._depth = 0

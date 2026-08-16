@@ -35,8 +35,9 @@ class IMFAdapter(MeanFlowAdapter):
         import jax.numpy as jnp
         super().__init__("imf", registry)
         self.jax, self.jnp = jax, jnp
-        self.repo_dir = Path(repo_dir)
-        self.ckpt_cache = Path(ckpt_cache)
+        # Resolved BEFORE the sandbox chdirs into the repository (see pmf.py).
+        self.repo_dir = Path(repo_dir).resolve()
+        self.ckpt_cache = Path(ckpt_cache).resolve()
         self.local_device_count = int(local_device_count)
         self.sandbox = RepoSandbox("imf", self.repo_dir, extra_roots=("imf",))
         self.latent_mean = np.asarray(registry["latent_mean"], np.float32)
