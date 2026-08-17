@@ -465,11 +465,27 @@ git repository must be on disk before a job starts.
 # LOGIN NODE (has internet, but a ~10 CPU-minute budget)
 bash setup_cluster.sh                    # venv from Alliance wheels + stage all assets
 
-# COMPUTE NODE
-sbatch slurm/run_single.sh               # one GPU, whole config
-sbatch slurm/run_array.sh                # N GPUs in parallel
-python run.py --run-id run_<ID> --aggregate    # merge the shards (login node)
+# SUBMIT (also from the login node; sbatch returns immediately)
+bash submit.sh                           # one GPU, whole config
+bash submit.sh --array 8                 # 8 GPUs in parallel
+python run.py --run-id run_<ID> --aggregate    # merge the shards
 ```
+
+**No tracked file is ever edited per cluster.** `#SBATCH` lines are plain comments and
+cannot read variables, but sbatch command-line flags override them -- so `submit.sh` passes
+the account, GPU type and shard count from `cluster.env`, which is gitignored and written
+for you by `setup_cluster.sh`. `git pull` therefore never conflicts with your local
+settings. The GPU type is auto-detected (`narval` -> `a100:1`, `nibi`/`rorqual` ->
+`h100:1`), and the account from `~/projects` when you have exactly one. Override anything
+for a single submission:
+
+```bash
+bash submit.sh --time 6:00:00 --mem 96G --gpu h100:2
+bash submit.sh --dry-run                 # print the sbatch command without submitting
+```
+
+The array script reads its shard count from `SLURM_ARRAY_TASK_COUNT` rather than a constant,
+so `--array` and the shard count cannot drift out of sync and silently drop jobs.
 
 What the code does for you:
 

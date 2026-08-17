@@ -8,6 +8,7 @@ logs/
 
 # Written by setup_cluster.sh; machine-specific paths
 activate_cluster.sh
+cluster.env
 *.npz
 *.png
 !docs/*.png

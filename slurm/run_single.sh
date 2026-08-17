@@ -2,14 +2,17 @@
 # =====================================================================================
 # One GPU, one job: the whole configuration end to end.
 #
-#     sbatch slurm/run_single.sh
+#     bash submit.sh                 <-- preferred: fills in account and GPU for you
+#     sbatch slurm/run_single.sh     <-- only if you set --account below yourself
 #
-# EDIT --account. Everything else has a working default.
+# The #SBATCH lines below are DEFAULTS. sbatch command-line flags override them, which is
+# how submit.sh supplies the account and the cluster-appropriate GPU without this file ever
+# being edited -- so `git pull` never conflicts.
 # Run `bash setup_cluster.sh` on a LOGIN NODE first: this job has no internet.
 # =====================================================================================
 #SBATCH --job-name=mpcflow
-#SBATCH --account=def-CHANGEME            # <-- your allocation, e.g. def-yoursupervisor
-#SBATCH --gpus-per-node=1                 # Nibi/Rorqual: h100:1   Narval: a100:1
+#SBATCH --account=def-CHANGEME            # overridden by submit.sh
+#SBATCH --gpus-per-node=1                 # overridden by submit.sh
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
@@ -41,7 +44,7 @@ else
 fi
 
 python run.py \
-  --config configs/experiments.yaml \
+  --config "${MPCFLOW_CONFIG:-configs/experiments.yaml}" \
   --cache-root "$RUN_CACHE" \
   --output-root "$MPCFLOW_OUTPUT_ROOT" \
   --run-id "run_${SLURM_JOB_ID}"

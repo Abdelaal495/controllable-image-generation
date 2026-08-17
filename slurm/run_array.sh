@@ -2,7 +2,8 @@
 # =====================================================================================
 # Job ARRAY: split the atomic jobs across independent GPUs, then merge.
 #
-#     sbatch slurm/run_array.sh                     # 4 shards (see --array below)
+#     bash submit.sh --array          # 4 shards
+#     bash submit.sh --array 8        # 8 shards -- no file needs editing
 #
 # Each task runs `--shard K/N` over the SAME resolved plan. Shards are contiguous over a
 # model-major ordering, so a task normally loads ONE checkpoint. Tasks never write the same
@@ -12,11 +13,12 @@
 #     source activate_cluster.sh
 #     python run.py --config configs/experiments.yaml --run-id run_<ARRAYJOBID> --aggregate
 #
-# EDIT --account and, if you like, --array.
+# The #SBATCH lines below are DEFAULTS; submit.sh overrides account, GPU and --array from
+# the command line, so this file never needs editing.
 # =====================================================================================
 #SBATCH --job-name=mpcflow-array
-#SBATCH --account=def-CHANGEME            # <-- your allocation
-#SBATCH --array=0-3                       # N shards; must match NUM_SHARDS below
+#SBATCH --account=def-CHANGEME            # overridden by submit.sh
+#SBATCH --array=0-3                       # overridden by submit.sh --array N
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -29,7 +31,9 @@ cd "$SLURM_SUBMIT_DIR"
 mkdir -p logs
 source activate_cluster.sh
 
-NUM_SHARDS=4                              # keep in sync with --array=0-(N-1)
+# Read the shard count from SLURM itself rather than a constant that has to be kept in
+# sync with --array by hand -- a mismatch there would silently drop or duplicate jobs.
+NUM_SHARDS="${SLURM_ARRAY_TASK_COUNT:-4}"
 SHARD="${SLURM_ARRAY_TASK_ID}"
 # Every task shares ONE run id so the shards land in the same directory and can be merged.
 RUN_ID="run_${SLURM_ARRAY_JOB_ID}"
@@ -50,7 +54,7 @@ else
 fi
 
 python run.py \
-  --config configs/experiments.yaml \
+  --config "${MPCFLOW_CONFIG:-configs/experiments.yaml}" \
   --cache-root "$RUN_CACHE" \
   --output-root "$MPCFLOW_OUTPUT_ROOT" \
   --run-id "$RUN_ID" \
@@ -58,4 +62,4 @@ python run.py \
   --no-figures                            # figures are built once, by --aggregate
 
 echo "shard $SHARD done. Merge with:"
-echo "  python run.py --config configs/experiments.yaml --run-id $RUN_ID --aggregate"
+echo "  python run.py --config ${MPCFLOW_CONFIG:-configs/experiments.yaml} --run-id $RUN_ID --aggregate"
