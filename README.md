@@ -4,7 +4,7 @@ A research repository that attempts to explore one question:
 
 > How can we control **Mean Flow** models, without any extra pre-training, to adhere to arbitrary constrains/fit a degraded observation?
  
-To tackle that inquiry, we adapt multiple different methods to the MeanFlow paradigm, and examine how much a given reconstruction strategy improves the result over ordinary SDEdit, and at what cost. When making comparisons, we use the **same** degraded observation, the **same** generative model, the **same**
+To tackle that inquiry, we adapt multiple different methods to the MeanFlow paradigm, and examine how much a given reconstruction strategy improves the result over an ordinary SDEdit-like strategy, and at what cost. When making comparisons, we use the **same** degraded observation, the **same** generative model, the **same**
 corruption strength `t0` and the **same** sampled generative noise.
 
 The strategies are pluggable. Three ship today: **SDEdit**, **MPC-RHC** and **MPC-Δt**.
