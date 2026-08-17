@@ -107,16 +107,16 @@ formed by one function (`models.base.build_initial_state`). At `t0 = 1` the impl
 returns the prior-noise array **itself**, so the pure-noise path is bitwise identical to the
 notebooks' rather than merely numerically close.
 
-- **`sdedit`** — ordinary generation from `s_start = 1 − t0` to the data endpoint. Standard
+- **`sdedit`**: ordinary generation from `s_start = 1 − t0` to the data endpoint. Standard
   flows use the Euler / Heun / RK4 integrator from the SDEdit notebook (Heun's final step
   falls back to Euler when the adapter advertises that policy, as JiT's official sampler
   does). MeanFlows use successive learned interval transitions; `steps` is the number of
   intervals and is always recorded explicitly. There is no measurement term — the
   measurement enters only through the guide.
-- **`mpc_rhc`** — receding-horizon control (Algorithms 1 and 3). `K = 1` hoists the
+- **`mpc_rhc`**: receding-horizon control (Algorithms 1 and 3). `K = 1` hoists the
   dynamics evaluation out of the graph, so it does **zero** backprop through the generative
   model.
-- **`mpc_delta_t`** — Δt-horizon control with the one-step value surrogate (Algorithm 2).
+- **`mpc_delta_t`**: Δt-horizon control with the one-step value surrogate (Algorithm 2).
   `K` is meaningless here and is **rejected** by the validator.
 
 The MPC terminal objective is always evaluated in canonical pixel space,
