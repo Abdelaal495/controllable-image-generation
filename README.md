@@ -1,13 +1,14 @@
-# Controllable Image Generation for Inverse Problems
+# Controllable Image Generation with MeanFlows for Solving Inverse Problems
 
-A small research repository for asking one question under strictly controlled conditions:
+A research repository that attempts to explore one question:
 
-> Given the **same** degraded observation, the **same** generative model, the **same**
-> corruption strength `t0` and the **same** sampled generative noise, how much does a given
-> reconstruction strategy improve the result over ordinary SDEdit, and what does it cost?
+> How can we control **Mean Flow** models, without any extra pre-training, to adhere to arbitrary constrains/fit a degraded observation?
+ 
+To tackle that inquiry, we adapt multiple different methods to the MeanFlow paradigm, and examine how much a given reconstruction strategy improves the result over ordinary SDEdit, and at what cost. When making comparisons, we use the **same** degraded observation, the **same** generative model, the **same**
+corruption strength `t0` and the **same** sampled generative noise.
 
-The strategies are pluggable. Three ship today — **SDEdit**, **MPC-RHC** and **MPC-Δt** —
-and the layout is designed so that adding a fourth is a new function plus a registry entry,
+The strategies are pluggable. Three ship today: **SDEdit**, **MPC-RHC** and **MPC-Δt**.
+The layout is designed so that adding a fourth is a new function plus a registry entry,
 with every fairness guarantee inherited automatically (see
 [`docs/extending.md`](docs/extending.md)).
 
