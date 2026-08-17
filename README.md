@@ -1,15 +1,15 @@
-# SDEdit vs. MPC-Flow on ImageNet-256
+# Controllable Image Generation for Inverse Problems
 
-A small research repository that asks one question:
+A small research repository for asking one question under strictly controlled conditions:
 
 > Given the **same** degraded observation, the **same** generative model, the **same**
-> corruption strength `t0` and the **same** sampled generative noise, how much do
-> **MPC-RHC** and **MPC-Δt** improve reconstruction relative to ordinary **SDEdit**, and
-> what computational cost do those improvements require?
+> corruption strength `t0` and the **same** sampled generative noise, how much does a given
+> reconstruction strategy improve the result over ordinary SDEdit, and what does it cost?
 
-It is a merge of two Jupyter notebooks — an MPC-Flow inverse-problems notebook and a
-unified SDEdit-style editing notebook — into one coherent codebase with a **single model
-abstraction** and a **single inverse-problem abstraction** shared by every method.
+The strategies are pluggable. Three ship today — **SDEdit**, **MPC-RHC** and **MPC-Δt** —
+and the layout is designed so that adding a fourth is a new function plus a registry entry,
+with every fairness guarantee inherited automatically (see
+[`docs/extending.md`](docs/extending.md)).
 
 The central invariant:
 
@@ -20,7 +20,41 @@ same problem + same model + same t0 + same epsilon
 
 ---
 
-## 1. Supported models
+## Getting started
+
+| | |
+|---|---|
+| **Google Colab** | open [`notebooks/colab_demo.ipynb`](notebooks/colab_demo.ipynb) — clone, `bash setup_colab.sh`, restart once, `%run run.py` |
+| **Alliance / Compute Canada clusters** (Narval, Nibi, Rorqual) | follow [`docs/quickstart_cluster.md`](docs/quickstart_cluster.md) |
+| **Something went wrong** | [`docs/troubleshooting.md`](docs/troubleshooting.md) — every failure seen in practice, with its cause |
+| **Adding a method, model or task** | [`docs/extending.md`](docs/extending.md) |
+
+Minimal Colab session:
+
+```bash
+!git clone <your-repo-url>
+%cd <repo>
+!bash setup_colab.sh
+```
+*restart the runtime once*, then:
+```python
+%run run.py --config configs/experiments.yaml
+```
+
+Minimal cluster session (after one-time setup):
+
+```bash
+source activate_cluster.sh
+python run.py --config configs/experiments.yaml --dry-run   # check the plan
+bash submit.sh                                              # or: bash submit.sh --array 8
+```
+
+An A100 or L4 runs the default configuration in minutes; a T4 works but is substantially
+slower.
+
+---
+
+## Supported models
 
 | model | dynamics family | framework | state space | default |
 |---|---|---|---|---|
@@ -37,7 +71,7 @@ pMF and iMF are never approximated as ordinary velocity models. Their dynamics a
 learned finite-interval transition `T_θ(x; s→r)`, and the MeanFlow-specific MPC logic is
 preserved.
 
-## 2. Six tasks
+## Six inverse problems
 
 Each builds an inverse-problem instance from a clean ImageNet image `x*`, generally
 `y = A(x*) + η`.
@@ -60,9 +94,9 @@ For super-resolution, `y` and `g(y)` are kept strictly separate: MPC's data-fide
 uses `A(x) − y` at `128×128`, while the bicubic `256×256` lift exists only to initialise.
 **The bicubic upsample never replaces `A` inside the loss.**
 
-## 3. Three reconstruction methods
+## Reconstruction strategies
 
-All three start from the *same* SDEdit-style corrupted state
+Every strategy starts from the *same* SDEdit-style corrupted state
 
 ```
 z_t0 = (1 − t0) · g(y) + t0 · ε
@@ -99,50 +133,25 @@ control → trajectory → native terminal state → to_pixels(differentiable=Tr
 contains no NumPy conversion, no `detach` and no PIL. For latent models the gradient
 continues through the VAE decoder.
 
-## 4. Installation (Colab)
+## Installation
 
-```bash
-!git clone <this-repo>
-%cd <repo>
-!bash setup_colab.sh
-```
+Setup is covered in the guides linked at the top:
+[Colab notebook](notebooks/colab_demo.ipynb) ·
+[cluster quickstart](docs/quickstart_cluster.md) ·
+[troubleshooting](docs/troubleshooting.md).
 
-`setup_colab.sh` detects the accelerator, installs the JAX and/or PyTorch stacks in the
-order that is known to work on Colab, repairs Pillow, and clones the model repositories at
-their pinned revisions. It is idempotent.
+The rest of this section covers what the configuration *means*; the guides cover how to get
+it running.
 
-> **One restart.** Installing JAX replaces shared libraries an already-running Python
-> process has imported. If the JAX stack is (re)installed the script says so; restart the
-> Colab runtime **once**, then continue. Re-running the script afterwards is a no-op.
+### `.env` and the gated dataset
 
-Then:
+ImageNet-1k is gated. Accept the licence at
+<https://huggingface.co/datasets/ILSVRC/imagenet-1k>, create a token, then either
+`cp .env.example .env` and set `HF_TOKEN`, add a Colab secret of the same name, or export it.
+`.env` is gitignored and `.env.example` is committed; no token is ever stored in the
+repository. None of this is needed with `data.source: local_folder`.
 
-```python
-%run run.py --config configs/experiments.yaml
-```
-
-`%run` gives notebook-like behaviour: the resolved plan, progress, summary tables and
-matplotlib figures all appear inline. There are no setup cells to execute by hand.
-
-Non-Colab users can `pip install -r requirements.txt` after installing a PyTorch and/or
-JAX build matching their hardware.
-
-## 5. `.env` setup
-
-ImageNet-1k is a **gated** Hugging Face dataset.
-
-```bash
-cp .env.example .env      # then set HF_TOKEN=hf_...
-```
-
-You must also accept the licence at
-<https://huggingface.co/datasets/ILSVRC/imagenet-1k>. A Colab secret named `HF_TOKEN`, or an
-exported `HF_TOKEN`, works too and always takes precedence over the file. `.env` is
-gitignored; `.env.example` is committed; no real token is ever stored in the repository.
-
-No token is needed if you use `data.source: local_folder`.
-
-## 6. Configuration
+## Configuration
 
 Everything lives in `configs/experiments.yaml`. One entry per experiment:
 
@@ -169,10 +178,10 @@ experiments:
           mpc_delta_t: {t0: [0.6, 0.8], num_mpc_steps: [2, 4]}
 ```
 
-You never write `standard_flow:` or `meanflow:`. **You specify the model; the
-implementation determines its family.**
+You never write `standard_flow:` or `meanflow:`. **You specify the model; the implementation
+determines its family.**
 
-### 7. Scalar / list sweeps
+### Scalar / list sweeps
 
 Every sweepable field accepts a scalar or a list; lists expand as a Cartesian product.
 
@@ -190,26 +199,26 @@ value, never a sweep.
 Validation is strict — unknown keys are errors, not silent no-ops:
 
 ```
-n_ctrls: 20     ->  Unknown key 'n_ctrls' ... Did you mean: n_ctrl ?
-K: 3 (sdedit)   ->  'K' is meaningless for sdedit and is rejected.
-solver: heun (pMF) -> pMF is a MeanFlow model; ODE solvers do not apply.
+n_ctrls: 20        ->  Unknown key 'n_ctrls' ... Did you mean: n_ctrl ?
+K: 3 (sdedit)      ->  'K' is meaningless for sdedit and is rejected.
+solver: heun (pMF) ->  pMF is a MeanFlow model; ODE solvers do not apply.
 ```
 
 `K` on `mpc_delta_t`, unknown models/methods/degradation parameters, `t0 ∉ (0,1]`,
 non-positive step counts, mask fractions outside `(0,1)` and even blur kernels are all
 rejected **before** any checkpoint is downloaded.
 
-### 8. Dry run
+### Dry run
 
 ```bash
 python run.py --config configs/experiments.yaml --dry-run
 ```
 
-validates, resolves defaults, expands sweeps, determines model resources, computes atomic
-jobs, prints the plan and the warnings, and exits without loading anything:
+validates, resolves defaults, expands sweeps, computes atomic jobs, prints the plan and the
+warnings, and exits without loading anything:
 
 ```
-denoising   (denoising, 2 images)
+denoising   (denoising, 8 images)
   JiT
     SDEdit .............. 2 jobs
     MPC-RHC ............. 1 jobs
@@ -218,10 +227,10 @@ denoising   (denoising, 2 images)
 TOTAL ATOMIC JOBS: 48
 ```
 
-`runtime.max_atomic_jobs` (default 256) is a guard against a sweep that accidentally
-explodes; exceeding it is an error until you raise it deliberately (`--max-jobs`).
+`runtime.max_atomic_jobs` (default 256) guards against a sweep that explodes; exceeding it
+is an error until you raise it deliberately (`--max-jobs`).
 
-### 9. Normal run
+### Normal run
 
 ```bash
 python run.py --config configs/experiments.yaml
@@ -229,13 +238,30 @@ python run.py --config configs/experiments.yaml
 
 Useful flags: `--models jit`, `--experiments denoising,deblurring`, `--num-images 1`,
 `--checks-only`, `--no-check`, `--replicate 1`, `--no-resume`, `--no-figures`,
-`--no-warmup`, `--run-id <existing>`.
+`--no-warmup`, `--run-id <existing>`, `--prefetch`, `--shard K/N`, `--aggregate`.
 
 Execution is **model-major**: each checkpoint is loaded once, every job that needs it runs,
 and it is released before the next model loads — which matters because JiT is Torch and pMF
 is JAX and they should not be resident simultaneously.
 
-## 10. Outputs
+### Suggested experiments
+
+The default configuration sits at `t0: 0.8`, where 80% of the signal is destroyed and most
+strategies score below the degraded observation itself (the tables flag these with `!`).
+Three sweeps worth running, all config-only:
+
+```yaml
+# where does each strategy start beating the degraded input?
+{t0: [0.3, 0.5, 0.6, 0.8]}
+
+# does a finer planning horizon close the gap between the two value approximations?
+{num_mpc_steps: [2, 4, 8, 16]}
+
+# the built-in lambda defaults come from a paper tuned on a different model and resolution
+{lam: [0.5, 1, 5, 15]}
+```
+
+## Outputs
 
 ```
 outputs/<run_id>/
@@ -305,7 +331,7 @@ measurement, every `model × method × required shape` gets an **untimed warm-up
 compilation never lands inside a measured run; the reported figure is steady-state runtime
 and the warm-up cost is stored in its own column.
 
-## 11. Scientific comparison assumptions
+## Scientific comparison assumptions
 
 For every comparison the following are held constant, and only the reconstruction strategy
 changes: source image, source class label, degradation operator and parameters, measurement
@@ -355,14 +381,14 @@ the MPC methods' `num_mpc_steps` so the comparison is also step-matched. Where t
 define "steps" the same way (pMF's learned intervals vs. an Euler grid), the difference is
 recorded precisely rather than forced.
 
-## 12. Class-conditioning assumption
+## Class-conditioning assumption
 
 JiT and pMF are ImageNet class-conditional, and every reconstruction is conditioned on the
 **true ImageNet class of the source image** — identically for SDEdit and both MPC methods.
 The benchmark should therefore be described as *reconstruction conditioned on the known
 source class*, not as blind restoration. This is recorded in `run_metadata.json`.
 
-## 13. Fixed-geometry stroke operator — caveat
+## Fixed-geometry stroke operator — caveat
 
 The stroke task needs a differentiable forward operator, and the original SDEdit stroke
 transform is not one: it uses SLIC segmentation, `np.where`, eigenvector selection,
@@ -396,7 +422,7 @@ No measurement noise is added by default; the objective is `Φ(x) = ½‖A_G(x) 
 > information about `x*` than its visual sparsity suggests. This is recorded in the
 > problem metadata.
 
-## 14. Deliberate changes from the source notebooks
+## Deliberate changes from the source notebooks
 
 Everything else was preserved; these are the changes, with reasons:
 
@@ -411,10 +437,12 @@ Everything else was preserved; these are the changes, with reasons:
 | `diffusers` installed once at `>=0.36,<0.40` | The two notebooks installed it twice with different bounds; the intersection is what both stacks actually need. |
 | Untimed warm-up before every timed run | Comparing a cold JAX-compiled first run against later compiled ones would have made the runtime column meaningless. |
 
-## 15. Repository layout
+## Repository layout
 
 ```
 configs/experiments.yaml   the only file you normally edit
+notebooks/colab_demo.ipynb end-to-end Colab walkthrough
+docs/                      quickstart_cluster.md, troubleshooting.md, extending.md
 src/
   config.py                registries, validation, sweeps, planner, Table E2 provenance
   data.py                  the shared ImageNet pool, stable image ids
@@ -428,11 +456,14 @@ src/
   visualization.py         paginated comparison grids, summary plots
   checks.py                parity, gradient, stroke and fairness tests
   utils.py                 canonical clock, seeding, backend shim, timing
-run.py                     the notebook replacement / orchestrator
-setup_colab.sh  requirements.txt  .env.example  .gitignore
+run.py                     the orchestrator
+submit.sh                  cluster job submission (reads the gitignored cluster.env)
+slurm/                     SLURM job templates (never need editing)
+setup_colab.sh  setup_cluster.sh  requirements.txt
+.env.example  cluster.env.example  .gitignore
 ```
 
-## 16. Hyperparameter provenance
+## Hyperparameter provenance
 
 `λ`, `N_ctrl` and `lr` default to MPC-Flow **Appendix E.2**. Those values were tuned for a
 **CelebA 128×128 pixel-space U-Net** with a particular loss normalisation — they are
@@ -455,69 +486,23 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
 
-## 17. Running on Alliance (Compute Canada) clusters
+## Running on clusters
 
-The repository runs unchanged on Colab **and** on Nibi, Narval and Rorqual. One cluster fact
-shapes everything: **compute nodes have no internet access.** Every checkpoint, dataset and
-git repository must be on disk before a job starts.
+The repository runs unchanged on Colab **and** on Alliance (Compute Canada) clusters. One
+fact shapes the whole cluster workflow: **compute nodes have no internet access**, so every
+checkpoint, dataset and repository is staged first by `run.py --prefetch` on a login node,
+and jobs then run fully offline.
 
-```bash
-# LOGIN NODE (has internet, but a ~10 CPU-minute budget)
-bash setup_cluster.sh                    # venv from Alliance wheels + stage all assets
+Supporting machinery: environment auto-detection (Colab / SLURM compute node / login node /
+local, with offline mode enabled automatically under SLURM), `--prefetch` for staging,
+`--shard K/N` for job arrays split contiguously over a model-major ordering, `--aggregate`
+to merge the shards, and `submit.sh`, which supplies the account, GPU type and shard count
+from a gitignored `cluster.env` so no tracked file is ever edited.
 
-# SUBMIT (also from the login node; sbatch returns immediately)
-bash submit.sh                           # one GPU, whole config
-bash submit.sh --array 8                 # 8 GPUs in parallel
-python run.py --run-id run_<ID> --aggregate    # merge the shards
-```
+Full walkthrough, first-time setup and daily use:
+**[`docs/quickstart_cluster.md`](docs/quickstart_cluster.md)**.
 
-**No tracked file is ever edited per cluster.** `#SBATCH` lines are plain comments and
-cannot read variables, but sbatch command-line flags override them -- so `submit.sh` passes
-the account, GPU type and shard count from `cluster.env`, which is gitignored and written
-for you by `setup_cluster.sh`. `git pull` therefore never conflicts with your local
-settings. The GPU type is auto-detected (`narval` -> `a100:1`, `nibi`/`rorqual` ->
-`h100:1`), and the account from `~/projects` when you have exactly one. Override anything
-for a single submission:
-
-```bash
-bash submit.sh --time 6:00:00 --mem 96G --gpu h100:2
-bash submit.sh --dry-run                 # print the sbatch command without submitting
-```
-
-The array script reads its shard count from `SLURM_ARRAY_TASK_COUNT` rather than a constant,
-so `--array` and the shard count cannot drift out of sync and silently drop jobs.
-
-What the code does for you:
-
-- **Environment detection.** `detect_environment()` distinguishes Colab, a SLURM compute
-  node, a cluster login node and a local machine. Under SLURM it enables offline mode
-  automatically (`HF_HUB_OFFLINE` etc.), so a missing asset is an immediate, legible error
-  instead of a multi-minute socket timeout buried in a job log. Override with
-  `--online` / `--offline`. Progress bars switch off when stdout is not a TTY.
-- **`--prefetch`.** Downloads model repositories, checkpoints, ImageNet images and LPIPS
-  weights, then exits. Download-only: it builds no model and needs no GPU, so it respects
-  the login-node budget. Writes `cache/prefetch_report.json`.
-- **`--shard K/N`.** Splits the resolved plan across a SLURM job array. Shards are
-  contiguous over a **model-major** ordering, so a task normally loads one checkpoint rather
-  than paying pMF's ~2-minute load twice. Every task derives the same split from stable job
-  ids, with no coordination. Tasks never write a shared file: each owns
-  `results_shardKK.csv` and its own per-job directories.
-- **`--aggregate`.** Merges the per-job `metadata.json` files into one `results.csv` plus
-  figures. Reports any planned job that is missing rather than silently producing a partial
-  table.
-- **Path overrides.** `MPCFLOW_CACHE_ROOT` and `MPCFLOW_OUTPUT_ROOT` (or `--cache-root` /
-  `--output-root`) keep the multi-gigabyte cache and outputs off the small, backed-up
-  `/home` and on `$SCRATCH`. The job scripts stage the read-only cache to `$SLURM_TMPDIR`
-  (node-local NVMe) for repeated checkpoint reads.
-
-`setup_cluster.sh` installs from the Alliance wheelhouse (`pip install --no-index`) so torch
-and jax link against the cluster's own CUDA/cuDNN, and falls back to PyPI only for what has
-no wheel. It writes `activate_cluster.sh`, which the job scripts source. Anaconda is not
-used — the Alliance does not permit it.
-
-Cluster GPU specifiers: `--gpus-per-node=h100:1` on Nibi and Rorqual, `a100:1` on Narval.
-
-## 18. JAX compilation and runtime hygiene
+## JAX compilation and runtime hygiene
 
 pMF and iMF run on JAX, which compiles per array shape. Three mechanisms keep compilation
 out of the measured runtime:
@@ -543,7 +528,7 @@ columns in `results.csv`; neither is inside `runtime`.
 `diagnose_pmf_timing.py` times a repeated interval against a new one and reports the
 `jax.jit` cache size, if you need to confirm what a given machine is doing.
 
-## 19. Known limitations
+## Known limitations
 
 - The primary baseline is **paired SDEdit at the same `t0`**. A compute-matched SDEdit
   baseline (giving SDEdit as many network evaluations as MPC uses) would be interesting and
