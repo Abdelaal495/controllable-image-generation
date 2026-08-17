@@ -33,8 +33,8 @@ same problem + same model + same t0 + same epsilon
 Minimal Colab session:
 
 ```bash
-!git clone <your-repo-url>
-%cd <repo>
+!git clone https://github.com/Abdelaal495/controllable-image-generation
+%cd controllable-image-generation
 !bash setup_colab.sh
 ```
 *restart the runtime once*, then:
