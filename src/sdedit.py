@@ -13,12 +13,17 @@ That is the point: it is what MPC's trajectory control is being compared against
 Standard flows (JiT, SiT)
     fixed-step integration of the instantaneous velocity field, with the Euler / Heun / RK4
     solvers from the SDEdit notebook.  Heun's final step falls back to Euler when the
-    adapter advertises that policy (JiT's official sampler does).
+    adapter advertises that policy (JiT's official sampler does).  Each step advances by
+    the ACTUAL local dt_k = s_{k+1} - s_k of the schedule, so a non-uniform beta needs no
+    change to the solver arithmetic.
 
 MeanFlows (pMF, iMF)
     successive learned interval transitions along the canonical grid.  pMF is NOT treated as
     an ordinary velocity model; `steps` is the number of MeanFlow intervals and is always
     recorded explicitly in the results.
+
+The grid itself comes from `schedule.canonical_time_grid`, the one place the universal
+power-law exponent `beta` is applied (beta = 1 is the legacy uniform grid).
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import numpy as np
 
 from .config import SOLVER_STAGE_EVALUATIONS
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
+from .schedule import canonical_time_grid, spec_beta
 from .utils import MEANFLOW, STANDARD_FLOW
 
 
@@ -82,20 +88,12 @@ class ReconstructionStats:
         self.denoiser_samples += other.denoiser_samples
 
 
-def canonical_time_grid(s_start: float, steps: int) -> List[float]:
-    """The `steps` + 1 canonical execution times s_start ... 1 (exact at both ends).
-
-    Both families use this grid; the adapters convert each s to their own native time, so
-    no model-specific clock inversion appears in this file.
-    """
-    if steps < 1:
-        raise ValueError("steps must be >= 1, got %r" % (steps,))
-    if abs(1.0 - float(s_start)) < 1e-12:
-        raise ValueError("Degenerate time grid: s_start == 1 leaves nothing to generate. "
-                         "Use t0 > 0.")
-    grid = [float(s_start) + (1.0 - float(s_start)) * (k / steps) for k in range(steps + 1)]
-    grid[-1] = 1.0                      # kill accumulated rounding at the terminal time
-    return grid
+# `canonical_time_grid` used to be defined HERE, which made an algorithm module the owner
+# of the time discretisation every other method also depends on.  It now lives in the
+# neutral `schedule.py` and carries the universal `beta` exponent; the name is re-exported
+# so that `from src.sdedit import canonical_time_grid` keeps working unchanged.
+__all__ = ["ReconstructionStats", "canonical_time_grid", "sdedit_flow", "sdedit_meanflow",
+           "sdedit_reconstruct"]
 
 
 def _is_finite(adapter: ModelAdapter, x) -> bool:
@@ -116,7 +114,7 @@ def sdedit_flow(adapter: StandardFlowAdapter, cond: Conditioning, x0, spec) -> T
     solver = spec.solver or "euler"
     if solver not in SOLVER_STAGE_EVALUATIONS:
         raise ValueError("Unknown solver %r" % solver)
-    grid = canonical_time_grid(spec.canonical_start_time, int(spec.steps))
+    grid = canonical_time_grid(spec.canonical_start_time, int(spec.steps), spec_beta(spec))
     # The final-step policy is a MODEL property, read from the adapter -- not a name check.
     final_euler = bool(adapter.spec.euler_final_step_for_heun)
 
@@ -171,11 +169,14 @@ def sdedit_meanflow(adapter: MeanFlowAdapter, cond: Conditioning, x0,
                     spec) -> Tuple[Any, ReconstructionStats]:
     """Successive transitions T(x; s_k -> s_{k+1}) along the canonical grid.
 
+    The endpoints follow the universal beta schedule; the transitions themselves are the
+    model's own learned finite-interval maps and are never approximated by a velocity.
+
     This is the notebooks' ordinary MeanFlow sampling, unchanged.  With `steps: 1` it is the
     single-interval transition straight to the data endpoint, which is what pMF is designed
     for; larger values subdivide the same interval.
     """
-    grid = canonical_time_grid(spec.canonical_start_time, int(spec.steps))
+    grid = canonical_time_grid(spec.canonical_start_time, int(spec.steps), spec_beta(spec))
     stats = ReconstructionStats()
     started = time.perf_counter()
     x = x0
@@ -205,3 +206,6 @@ def sdedit_reconstruct(adapter: ModelAdapter, cond: Conditioning, x0, problem,
     if spec.dynamics_family == MEANFLOW:
         return sdedit_meanflow(adapter, cond, x0, spec)
     raise ValueError("No SDEdit strategy for dynamics family %r" % spec.dynamics_family)
+
+
+

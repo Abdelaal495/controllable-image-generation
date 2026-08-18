@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""SDEdit vs. MPC-Flow vs. PnP-Flow vs. D-Flow -- the experiment orchestrator.
+"""SDEdit vs. MPC-Flow vs. PnP-Flow vs. D-Flow vs. RHSO -- the experiment orchestrator.
 
     python run.py --config configs/experiments.yaml --dry-run     # plan only, no models
     python run.py --config configs/experiments.yaml               # full run
@@ -441,16 +441,20 @@ def warm_up(adapter, spec, problem, manager, verbose: bool = True) -> float:
     #           iteration re-runs the SAME traced computation, so a single iteration is
     #           enough to compile everything the timed run needs -- including the backward
     #           pass and the Adam update.
+    #   RHSO    num_rhso_steps and beta fix the outer grid, and EVERY outer stage traces a
+    #           different computation (a different s_k, and for a standard flow a shorter
+    #           remaining suffix), so all N stages must run.  Only the inner Adam budget is
+    #           reduced: each of its iterations re-runs the same traced objective.
     #
     # Only n_ctrl / num_opt_steps and the image count are reduced: none of them changes the
-    # traced computation.
+    # traced computation.  `beta` is NEVER reduced -- it defines the time grid itself.
     reductions: Dict[str, Any] = {
         "num_images": min(int(spec.batch_size), int(spec.num_images)),
         "record_loss_history": False,
     }
     if spec.method in ("mpc_rhc", "mpc_delta_t"):
         reductions["n_ctrl"] = 1
-    if spec.method == "dflow":
+    if spec.method in ("dflow", "rhso"):
         reductions["num_opt_steps"] = 1
     tiny = dataclasses.replace(spec, **reductions)
     started = time.perf_counter()
@@ -469,12 +473,17 @@ def warmup_key(spec, problem) -> Tuple:
     """
     return (spec.method, spec.batch_size, spec.problem,
             tuple(problem.measurement.shape[1:]), spec.K, spec.t0,
+            # beta changes the RESOLVED time grid, so two jobs differing only in it must not
+            # share a warm-up: the second would compile inside its measured region.
+            spec.beta,
             spec.steps, spec.num_mpc_steps, spec.solver,
             spec.phi_normalization, spec.control_cost_normalization,
             # PnP: N fixes the whole s_k grid, M fixes how many denoiser calls are traced.
             spec.num_pnp_steps, spec.noise_samples,
             # D-Flow: the trajectory graph, not the number of Adam updates.
-            spec.optimizer)
+            spec.optimizer,
+            # RHSO: N fixes the outer grid AND, for a standard flow, every planning suffix.
+            spec.num_rhso_steps)
 
 
 # =====================================================================================
@@ -483,13 +492,14 @@ def warmup_key(spec, problem) -> Tuple:
 RESULT_COLUMNS = [
     "run_id", "job_id", "task", "experiment", "problem", "problem_key", "image_id",
     "model", "model_family", "framework", "state_space", "method", "method_title",
-    "t0", "canonical_start_time", "native_start_time", "native_end_time",
+    "t0", "beta", "canonical_start_time", "native_start_time", "native_end_time",
     "native_time_mapping", "initialization_kind", "initialization_guide_mode",
-    "steps", "solver", "num_mpc_steps", "delta", "K", "lam", "n_ctrl", "lr",
+    "steps", "solver", "num_mpc_steps", "delta", "delta_nominal_uniform", "delta_min",
+    "delta_max", "K", "lam", "n_ctrl", "lr",
     "optimizer", "warm_start", "grad_clip", "phi_normalization",
     "control_cost_normalization", "delta_t_lambda_scaling",
-    # PnP-Flow / D-Flow hyperparameters
-    "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps",
+    # PnP-Flow / D-Flow / RHSO hyperparameters
+    "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps", "num_rhso_steps",
     "hyperparameter_source_lam", "hyperparameter_source_n_ctrl", "hyperparameter_source_lr",
     "hyperparameter_source_gamma0", "hyperparameter_source_alpha",
     "psnr", "ssim", "lpips", "measurement_rmse", "missing_rmse", "missing_psnr",
@@ -526,19 +536,25 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "model": spec.model, "model_family": spec.dynamics_family,
         "framework": spec.framework, "state_space": spec.state_space,
         "method": spec.method, "method_title": spec.method_title,
-        "t0": spec.t0, "canonical_start_time": spec.canonical_start_time,
+        "t0": spec.t0, "beta": spec.beta,
+        "canonical_start_time": spec.canonical_start_time,
         "native_start_time": spec.native_start_time, "native_end_time": spec.native_end_time,
         "native_time_mapping": spec.native_time_mapping,
         "initialization_kind": spec.initialization_kind,
         "initialization_guide_mode": spec.initialization_guide_mode,
         "steps": spec.steps, "solver": spec.solver, "num_mpc_steps": spec.num_mpc_steps,
-        "delta": spec.delta, "K": spec.K, "lam": spec.lam, "n_ctrl": spec.n_ctrl,
+        # `delta` is NOMINAL uniform spacing and is null when beta != 1; delta_min/max are
+        # the step sizes actually executed.
+        "delta": spec.delta, "delta_nominal_uniform": spec.delta_nominal_uniform,
+        "delta_min": spec.delta_min, "delta_max": spec.delta_max,
+        "K": spec.K, "lam": spec.lam, "n_ctrl": spec.n_ctrl,
         "lr": spec.lr, "optimizer": spec.optimizer, "warm_start": spec.warm_start,
         "grad_clip": spec.grad_clip, "phi_normalization": spec.phi_normalization,
         "control_cost_normalization": spec.control_cost_normalization,
         "delta_t_lambda_scaling": spec.delta_t_lambda_scaling,
         "num_pnp_steps": spec.num_pnp_steps, "gamma0": spec.gamma0, "alpha": spec.alpha,
         "noise_samples": spec.noise_samples, "num_opt_steps": spec.num_opt_steps,
+        "num_rhso_steps": spec.num_rhso_steps,
         "hyperparameter_source_lam": spec.hyperparameter_sources.get("lam"),
         "hyperparameter_source_n_ctrl": spec.hyperparameter_sources.get("n_ctrl"),
         "hyperparameter_source_lr": spec.hyperparameter_sources.get("lr"),
@@ -713,7 +729,8 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
 # =====================================================================================
 # Reporting
 # =====================================================================================
-METHOD_ORDER = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4}
+METHOD_ORDER = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4,
+                "rhso": 5}
 
 
 def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
@@ -1376,9 +1393,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "peak are not the same kind of measurement."),
         "class_conditioning": (
             "Every reconstruction is conditioned on the TRUE ImageNet class of the source "
-            "image, identically for SDEdit, both MPC methods, PnP-Flow and D-Flow. The "
+            "image, identically for SDEdit, both MPC methods, PnP-Flow, D-Flow and RHSO. The "
             "benchmark therefore measures reconstruction given a known class, not blind "
             "restoration."),
+        "time_schedule_policy": (
+            "Every method places its times on s_k = s0 + (1 - s0)(k/N)^beta. beta = 1 is the "
+            "uniform grid this repository used before the exponent existed, reproduced "
+            "bitwise. The `delta` column is NOMINAL uniform spacing and is null whenever "
+            "beta != 1, because a non-uniform trajectory has no single step size; the "
+            "executed step sizes are bounded by delta_min and delta_max, and MPC-delta_t's "
+            "inverse-delta lambda scaling uses the LOCAL dt_k of each step."),
         "warnings": list(plan.warnings) + list(accel_notes),
     })
     print("\nResults : %s" % csv_path)

@@ -32,6 +32,9 @@ ADAPTED for this repository (documented, never presented as the paper's algorith
     clipping are not implemented, so this is the R == 0 ("implicit regularisation") case.
   * FIDELITY.  The per-measurement normalisation of section 3 (see problems.make_phi), not
     negative PSNR and not 1/(2 sigma^2) ||Hx - y||^2.
+  * TIME DISCRETISATION.  The trajectory follows this repository's universal power-law
+    schedule s_k = s0 + (1 - s0)(k/N)^beta.  beta = 1 is the uniform grid D-Flow has always
+    used, and at steps = 1 beta has no effect; no other D-Flow mathematics changes.
   * MEANFLOW (research extension).  A MeanFlow model has no ODE to solve, so the trajectory
     is a composition of learned finite-interval transitions.  With steps = 1 it is the
     single map T_theta(q ; s0 -> 1), giving a differentiable D-Flow trajectory that costs
@@ -52,30 +55,48 @@ from typing import Any, List, Tuple
 from .config import SOLVER_STAGE_EVALUATIONS
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
 from .problems import make_phi, phi_log_scale
-from .sdedit import ReconstructionStats, _is_finite, canonical_time_grid
+from .schedule import canonical_time_grid, spec_beta
+from .sdedit import ReconstructionStats, _is_finite
 from .utils import MEANFLOW, STANDARD_FLOW
 
 
 def dflow_time_grid(spec) -> List[float]:
-    """The steps + 1 canonical times s0 ... 1 the trajectory is discretised over."""
-    return canonical_time_grid(spec.canonical_start_time, int(spec.steps))
+    """The steps + 1 canonical times s0 ... 1 the trajectory is discretised over.
+
+    Follows the universal power-law schedule: with `beta` = 1 (the default) it is the
+    uniform grid this method has always used, and with steps = 1 beta has no effect at all.
+    """
+    return canonical_time_grid(spec.canonical_start_time, int(spec.steps), spec_beta(spec))
+
+
+def solver_evaluations(adapter: ModelAdapter, solver: str, intervals: int,
+                       reaches_data_endpoint: bool = True) -> int:
+    """Model evaluations for `intervals` consecutive steps of a standard-flow solver.
+
+    A standard-flow step costs the solver's stage count (euler 1, heun 2, rk4 4), minus the
+    one stage JiT's official sampler drops on its final Heun step -- which only applies when
+    the last of these intervals really is the step that lands on s = 1.  A MeanFlow step
+    costs exactly one learned transition regardless of any solver setting.
+
+    Shared with RHSO, whose planning horizon shrinks by one interval per outer stage.
+    """
+    intervals = int(intervals)
+    if adapter.spec.dynamics_family != STANDARD_FLOW:
+        return intervals
+    solver = solver or "euler"
+    if solver not in SOLVER_STAGE_EVALUATIONS:
+        raise ValueError("Unknown solver %r" % solver)
+    evals = intervals * SOLVER_STAGE_EVALUATIONS[solver]
+    if (solver == "heun" and adapter.spec.euler_final_step_for_heun
+            and reaches_data_endpoint and intervals >= 1):
+        evals -= 1
+    return evals
 
 
 def trajectory_evaluations(adapter: ModelAdapter, spec) -> int:
-    """Model evaluations in ONE forward trajectory -- not the same as `steps`.
-
-    A standard-flow step costs the solver's stage count (euler 1, heun 2, rk4 4), minus the
-    one stage JiT's official sampler drops on its final Heun step.  A MeanFlow step costs
-    exactly one learned transition.
-    """
-    steps = int(spec.steps)
-    if adapter.spec.dynamics_family != STANDARD_FLOW:
-        return steps
-    solver = spec.solver or "euler"
-    evals = steps * SOLVER_STAGE_EVALUATIONS[solver]
-    if solver == "heun" and adapter.spec.euler_final_step_for_heun:
-        evals -= 1
-    return evals
+    """Model evaluations in ONE forward trajectory -- not the same as `steps`."""
+    return solver_evaluations(adapter, spec.solver or "euler", int(spec.steps),
+                              reaches_data_endpoint=True)
 
 
 def _require_adam(spec) -> None:
@@ -89,41 +110,64 @@ def _require_adam(spec) -> None:
 # =====================================================================================
 # Standard flow (JiT, SiT): differentiable fixed-step integration
 # =====================================================================================
-def _integrate_flow(adapter: StandardFlowAdapter, cond: Conditioning, q, spec,
-                    grid: List[float]):
-    """G(q ; s0 -> 1) by fixed-step integration, kept INSIDE the autograd graph.
+def flow_step(adapter: StandardFlowAdapter, cond: Conditioning, x, s: float, s_next: float,
+              solver: str, apply_final_euler_policy: bool = False):
+    """ONE solver step over [s, s_next], using the ACTUAL local dt = s_next - s.
+
+    `apply_final_euler_policy` is the model's own Heun-to-Euler rule for the step that
+    lands on the data endpoint (JiT's official sampler drops that stage).  It is a MODEL
+    property read from the adapter by the caller, never a name check, and it is passed
+    explicitly because a receding-horizon method executes single intervals that are usually
+    NOT the terminal one.
+
+    Kept inside whatever autograd graph the caller is building: no no_grad, no detach.
+    """
+    solver = solver or "euler"
+    if solver not in SOLVER_STAGE_EVALUATIONS:
+        raise ValueError("Unknown solver %r" % solver)
+    dt = s_next - s
+    if solver == "heun" and apply_final_euler_policy:
+        solver = "euler"
+
+    v1 = adapter.velocity(x, s, cond)
+    if solver == "euler":
+        return x + dt * v1
+    if solver == "heun":
+        v2 = adapter.velocity(x + dt * v1, s_next, cond)
+        return x + 0.5 * dt * (v1 + v2)
+    s_mid = 0.5 * (s + s_next)                                           # rk4
+    v2 = adapter.velocity(x + 0.5 * dt * v1, s_mid, cond)
+    v3 = adapter.velocity(x + 0.5 * dt * v2, s_mid, cond)
+    v4 = adapter.velocity(x + dt * v3, s_next, cond)
+    return x + (dt / 6.0) * (v1 + 2 * v2 + 2 * v3 + v4)
+
+
+def integrate_flow(adapter: StandardFlowAdapter, cond: Conditioning, q, spec,
+                   grid: List[float], reaches_data_endpoint: bool = True):
+    """G(q ; grid[0] -> grid[-1]) by fixed-step integration, INSIDE the autograd graph.
 
     No torch.no_grad, no detach, no NumPy or PIL conversion anywhere on this path: the
     whole chain q -> trajectory -> to_pixels -> A(x) -> fidelity has to stay differentiable
     with respect to q.  Model parameters remain frozen; only q is optimised.
+
+    The grid may be non-uniform (see `schedule.py`); every step uses its own dt.
+    `reaches_data_endpoint` says whether the last interval is the one that lands on s = 1,
+    which is the only place the adapter's final-Euler policy applies.
     """
     solver = spec.solver or "euler"
-    if solver not in SOLVER_STAGE_EVALUATIONS:
-        raise ValueError("Unknown solver %r" % solver)
     final_euler = bool(adapter.spec.euler_final_step_for_heun)
     steps = len(grid) - 1
 
     x = q
     for k in range(steps):
-        s, s_next = grid[k], grid[k + 1]
-        dt = s_next - s
-        step_solver = solver
-        if solver == "heun" and final_euler and k == steps - 1:
-            step_solver = "euler"
-
-        v1 = adapter.velocity(x, s, cond)
-        if step_solver == "euler":
-            x = x + dt * v1
-        elif step_solver == "heun":
-            v2 = adapter.velocity(x + dt * v1, s_next, cond)
-            x = x + 0.5 * dt * (v1 + v2)
-        else:                                                            # rk4
-            s_mid = 0.5 * (s + s_next)
-            v2 = adapter.velocity(x + 0.5 * dt * v1, s_mid, cond)
-            v3 = adapter.velocity(x + 0.5 * dt * v2, s_mid, cond)
-            v4 = adapter.velocity(x + dt * v3, s_next, cond)
-            x = x + (dt / 6.0) * (v1 + 2 * v2 + 2 * v3 + v4)
+        x = flow_step(adapter, cond, x, grid[k], grid[k + 1], solver,
+                      apply_final_euler_policy=(final_euler and reaches_data_endpoint
+                                                and k == steps - 1))
     return x
+
+
+# The private name predates the public one and is imported by checks.py and the tests.
+_integrate_flow = integrate_flow
 
 
 def flow_dflow(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
@@ -192,7 +236,8 @@ def _transition_trajectory(adapter: MeanFlowAdapter, cond: Conditioning, q,
     """G(q ; s0 -> 1) as a composition of learned finite-interval transitions.
 
     With a single interval this is exactly T_theta(q ; s0 -> 1).  No ODE is constructed and
-    no instantaneous velocity is inferred: a MeanFlow model does not have one.
+    no instantaneous velocity is inferred: a MeanFlow model does not have one.  `beta`
+    moves the interval ENDPOINTS and nothing else.
     """
     x = q
     for i in range(len(grid) - 1):
@@ -269,3 +314,6 @@ def dflow_reconstruct(adapter: ModelAdapter, cond: Conditioning, x0, problem,
     if spec.dynamics_family == MEANFLOW:
         return meanflow_dflow(adapter, cond, x0, problem, spec)
     raise ValueError("No D-Flow strategy for dynamics family %r" % spec.dynamics_family)
+
+
+

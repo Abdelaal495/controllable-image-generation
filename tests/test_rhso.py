@@ -1,0 +1,586 @@
+"""Execute Receding-Horizon State Optimization against synthetic adapters.
+
+No checkpoint, no GPU, no download.  Three toy "models":
+
+    ToyMeanFlow        pixel-space analytic learned transition T(x; a -> b), which records
+                       every (s_from, s_to) it is asked for -- that trace is what proves the
+                       receding-horizon structure rather than a plausible-looking output;
+    ToyLatentMeanFlow  the same dynamics on a smaller "latent", with a linear differentiable
+                       decoder, so the latent gradient path is exercised too;
+    ToyFlow            a nonlinear standard-flow velocity field.
+
+`rhso.meanflow_rhso` runs end to end here.  `rhso.flow_rhso` CANNOT: it calls
+torch.optim.Adam, torch.no_grad and Tensor.backward, and PyTorch is not installable in this
+container (the same limitation the existing tests document).  Everything in the
+standard-flow path that is not torch-specific IS executed: the planning suffix, the
+evaluation counts, the shared one-interval step, the differentiable suffix integration and
+its gradient -- against an independent transcription of the reference integrator.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import dataclasses
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+
+from spec_support import build_plan, make_spec, source_banner, spec_source   # noqa: E402
+from src.models.base import (AdapterSpec, Conditioning, MeanFlowAdapter,               # noqa: E402
+                             StandardFlowAdapter)
+from src.problems import InverseProblem                               # noqa: E402
+from src.utils import (FLOW_ASCENDING, MEANFLOW, MEANFLOW_DESCENDING,  # noqa: E402
+                       STANDARD_FLOW)
+
+RES = 16
+BATCH = 2
+
+
+class _ProbeProblem:
+    """The one attribute `run.warmup_key` reads off a problem."""
+    class measurement:
+        shape = (BATCH, 256, 256, 3)
+
+
+class ToyMeanFlow(MeanFlowAdapter):
+    """Analytic learned transition, plus a trace of the intervals it was asked for."""
+
+    def __init__(self, target, name="pmf"):
+        super().__init__(name, {})
+        self.target = jnp.asarray(target)
+        self.calls = []                       # [(s_from, s_to)] in order
+        self.spec = AdapterSpec(
+            name=name, display_name="pMF", dynamics_family=MEANFLOW, framework="jax",
+            state_space="pixel", native_shape=(RES, RES, 3), layout="BHWC",
+            pixel_resolution=RES, prediction_kind="mean_velocity",
+            native_time_mapping=MEANFLOW_DESCENDING, batch_size=BATCH,
+            fixed_batch_shape=True, num_classes=1000, null_label=1000, guidance={},
+            checkpoint={})
+
+    def to_native_noise(self, noise):
+        return jnp.asarray(noise, jnp.float32)
+
+    def encode_pixels(self, pixels):
+        return jnp.asarray(pixels, jnp.float32)
+
+    def to_pixels(self, state, differentiable=False):
+        return state if differentiable else np.asarray(jax.device_get(state), np.float32)
+
+    def _lerp(self, guide, noise, keep, add):
+        return keep * guide + add * noise
+
+    def transition(self, state, s_from, s_to, conditioning):
+        self.count_forwards(1)
+        self.calls.append((round(float(s_from), 12), round(float(s_to), 12)))
+        dt = float(s_to) - float(s_from)
+        return state + dt * (0.7 * (self.target - state) + 0.2 * jnp.sin(3.0 * state))
+
+
+class ToyLatentMeanFlow(ToyMeanFlow):
+    """The same dynamics on an 8x8x4 'latent', decoded by a fixed linear map.
+
+    The decoder is the point: a latent model's RHSO objective has to differentiate through
+    it, and no separate latent RHSO mathematics may exist.
+    """
+
+    def __init__(self, target_pixels):
+        super().__init__(jnp.zeros((BATCH, RES // 2, RES // 2, 4), jnp.float32), name="imf")
+        self.spec = dataclasses.replace(self.spec, name="imf", display_name="iMF",
+                                        state_space="latent",
+                                        native_shape=(RES // 2, RES // 2, 4))
+        rng = np.random.default_rng(5)
+        self._decoder = jnp.asarray(rng.standard_normal((4, 3)).astype(np.float32) * 0.5)
+        self.target = jnp.asarray(rng.standard_normal(
+            (BATCH, RES // 2, RES // 2, 4)).astype(np.float32) * 0.3)
+        self._target_pixels = target_pixels
+
+    def to_pixels(self, state, differentiable=False):
+        # (B, 8, 8, 4) -> (B, 16, 16, 3): nearest-neighbour upsample then a channel mix.
+        up = jnp.repeat(jnp.repeat(state, 2, axis=1), 2, axis=2)
+        pixels = jnp.tanh(up @ self._decoder)
+        return pixels if differentiable else np.asarray(jax.device_get(pixels), np.float32)
+
+    def encode_pixels(self, pixels):
+        return jnp.zeros((pixels.shape[0], RES // 2, RES // 2, 4), jnp.float32)
+
+
+class ToyFlow(StandardFlowAdapter):
+    """A nonlinear, time-dependent velocity field; records the times it is evaluated at."""
+
+    def __init__(self, euler_final_step_for_heun=False):
+        super().__init__("jit", {})
+        self.times = []
+        self.spec = AdapterSpec(
+            name="jit", display_name="JiT", dynamics_family=STANDARD_FLOW, framework="jax",
+            state_space="pixel", native_shape=(RES, RES, 3), layout="BHWC",
+            pixel_resolution=RES, prediction_kind="velocity",
+            native_time_mapping=FLOW_ASCENDING, batch_size=BATCH, fixed_batch_shape=False,
+            num_classes=1000, null_label=1000, guidance={}, checkpoint={},
+            euler_final_step_for_heun=euler_final_step_for_heun)
+
+    def to_native_noise(self, noise):
+        return jnp.asarray(noise, jnp.float32)
+
+    def encode_pixels(self, pixels):
+        return jnp.asarray(pixels, jnp.float32)
+
+    def to_pixels(self, state, differentiable=False):
+        return state if differentiable else np.asarray(jax.device_get(state), np.float32)
+
+    def _lerp(self, guide, noise, keep, add):
+        return keep * guide + add * noise
+
+    def velocity(self, state, s, conditioning):
+        self.count_forwards(1)
+        self.times.append(round(float(s), 12))
+        return jnp.sin(2.0 * state) + float(s) * state * 0.5 + 0.3
+
+
+def make_problem(sigma=0.05):
+    rng = np.random.default_rng(3)
+    gt = rng.standard_normal((BATCH, RES, RES, 3), np.float32) * 0.3
+    mask = np.ones((BATCH, RES, RES, 1), np.float32)
+    mask[:, 4:10, 4:10, :] = 0.0
+    return InverseProblem(name="box_inpaint", key="k", sigma=sigma, params={},
+                          ground_truth=gt, measurement=gt * mask, display_measurement=gt,
+                          initialization_guide=gt * mask, guide_mode="zero_fill", mask=mask,
+                          image_ids=("img0", "img1"))
+
+
+def reference_integrate(adapter, cond, x, grid, solver, final_euler):
+    """Independent transcription of the reference integrator, for comparison."""
+    steps = len(grid) - 1
+    for k in range(steps):
+        s, s_next = grid[k], grid[k + 1]
+        dt = s_next - s
+        step = "euler" if (solver == "heun" and final_euler and k == steps - 1) else solver
+        v1 = adapter.velocity(x, s, cond)
+        if step == "euler":
+            x = x + dt * v1
+        elif step == "heun":
+            v2 = adapter.velocity(x + dt * v1, s_next, cond)
+            x = x + 0.5 * dt * (v1 + v2)
+        else:
+            s_mid = 0.5 * (s + s_next)
+            v2 = adapter.velocity(x + 0.5 * dt * v1, s_mid, cond)
+            v3 = adapter.velocity(x + 0.5 * dt * v2, s_mid, cond)
+            v4 = adapter.velocity(x + dt * v3, s_next, cond)
+            x = x + (dt / 6.0) * (v1 + 2 * v2 + 2 * v3 + v4)
+    return x
+
+
+def report(name, ok, detail):
+    print("  [%s] %-32s %s" % ("PASS" if ok else "FAIL", name, detail))
+    return bool(ok)
+
+
+def main():
+    from src.dflow import integrate_flow, meanflow_dflow, solver_evaluations
+    from src.problems import make_phi, phi_log_scale
+    from src.reconstruction import registered_methods, select_reconstructor
+    from src.rhso import (flow_rhso, meanflow_rhso, rhso_cost_estimate,
+                          rhso_planning_grid, rhso_planning_evaluations,
+                          rhso_execution_evaluations, rhso_time_grid)
+    from src.schedule import canonical_time_grid
+    from src.sdedit import sdedit_meanflow
+
+    print("\n%s" % source_banner())
+    problem = make_problem()
+    cond = Conditioning(labels=np.zeros((BATCH,), np.int32), guidance={})
+    results = []
+
+    # ---------------------------------------------------------------- 1. registration
+    print("\nRegistry")
+    families = registered_methods().get("rhso", ())
+    results.append(report(
+        "registered for both families",
+        set(families) == {STANDARD_FLOW, MEANFLOW}
+        and select_reconstructor(MEANFLOW, "rhso") is meanflow_rhso
+        and select_reconstructor(STANDARD_FLOW, "rhso") is flow_rhso,
+        "(%s) -> rhso resolves to the two family implementations"
+        % ", ".join(sorted(families))))
+
+    # ---------------------------------------------------------------- MeanFlow RHSO
+    print("\nMeanFlow RHSO -- structure")
+    adapter = ToyMeanFlow(problem.ground_truth)
+    eps = adapter.prior_sample(problem.image_ids)
+    guide = adapter.encode_pixels(problem.initialization_guide)
+    spec = make_spec("rhso", num_rhso_steps=3, num_opt_steps=4, lr=0.05, beta=0.5)
+    x0 = adapter.initial_state(guide, spec.t0, eps)
+    grid = rhso_time_grid(spec)
+    N, M = spec.num_rhso_steps, spec.num_opt_steps
+
+    x0_before = np.asarray(x0).copy()
+    adapter.calls = []
+    state, stats = meanflow_rhso(adapter, cond, x0, problem, spec)
+    trace = list(adapter.calls)
+
+    # 2. the shared initial state is used as given, never rebuilt or mutated
+    other_spec = make_spec("dflow", steps=1)
+    x0_other = adapter.initial_state(guide, other_spec.t0, eps)
+    results.append(report(
+        "shared z_t0 is used as given",
+        np.array_equal(np.asarray(x0), x0_before)
+        and np.array_equal(np.asarray(x0_other), x0_before)
+        and np.array_equal(np.asarray(adapter.prior_sample(problem.image_ids)),
+                           np.asarray(eps)),
+        "x0 is unchanged by the run and identical to the state another method gets at the "
+        "same (model, t0, images, replicate); epsilon does not depend on the method"))
+
+    # 7 / 9 / 10. the call trace IS the receding-horizon structure
+    expected = []
+    for k in range(N):
+        expected += [(round(grid[k], 12), 1.0)] * M            # M planning transitions
+        expected += [(round(grid[k], 12), round(grid[k + 1], 12))]   # ONE execution
+    results.append(report(
+        "planner is ONE direct s_k -> 1",
+        all(call == (round(grid[k], 12), 1.0)
+            for k in range(N) for call in trace[k * (M + 1):k * (M + 1) + M]),
+        "every inner objective is a single learned transition to the clean endpoint, not a "
+        "composition of the %d remaining outer intervals" % N))
+    results.append(report(
+        "executes exactly one interval", trace == expected,
+        "the full trace is %d x (%d planning + 1 execution): %s"
+        % (N, M, " ".join("%.3f->%.3f" % c for c in trace[:M + 2]) + " ...")))
+    results.append(report(
+        "replans at the state it reached",
+        [c[0] for c in trace[::(M + 1)]] == [round(g, 12) for g in grid[:-1]],
+        "stage k starts a NEW optimisation at s_k = %s"
+        % ["%.4f" % g for g in grid[:-1]]))
+
+    # 12. counters
+    results.append(report(
+        "counters",
+        stats.model_evals_planning == N * M and stats.backprops_through_model == N * M
+        and stats.optimizer_iterations == N * M and stats.objective_evals == N * M
+        and stats.data_gradient_evals == N * M
+        and stats.model_evals_total == N * (M + 1)
+        and stats.network_forwards == N * (M + 1),
+        "N*M = %d planning evals / backprops / objectives, N*(M+1) = %d evaluations total"
+        % (N * M, stats.model_evals_total)))
+    predicted = rhso_cost_estimate({"num_rhso_steps": N, "num_opt_steps": M}, MEANFLOW)
+    results.append(report(
+        "planner cost model == measured",
+        predicted["model_evals"] == stats.model_evals_total
+        and predicted["backprops"] == stats.backprops_through_model
+        and predicted["planning_evals"] == stats.model_evals_planning
+        and predicted["optimizer_iterations"] == stats.optimizer_iterations,
+        "dry-run estimate %d evals / %d backprops matches the measured %d / %d"
+        % (predicted["model_evals"], predicted["backprops"], stats.model_evals_total,
+           stats.backprops_through_model)))
+
+    # 14. finite output
+    results.append(report("finite output", stats.finite
+                          and bool(np.isfinite(np.asarray(state)).all()),
+                          "final state finite, shape %s" % (tuple(state.shape),)))
+
+    # 13. determinism
+    again = meanflow_rhso(adapter, cond, x0, problem, spec)[0]
+    results.append(report("determinism",
+                          bool(np.array_equal(np.asarray(state), np.asarray(again))),
+                          "a repeated run is bitwise identical"))
+
+    # ---------------------------------------------------------------- optimisation
+    print("\nMeanFlow RHSO -- optimisation")
+    B = adapter.backend()
+    phi = make_phi(problem, B, spec.phi_normalization)
+    scale = phi_log_scale(problem, spec.phi_normalization)
+
+    # 3. q^(0) = x_k: with lr = 0 no update happens, so RHSO degenerates EXACTLY to
+    #    successive execution of the scheduled intervals -- i.e. SDEdit on the same grid.
+    frozen = dataclasses.replace(spec, lr=0.0)
+    frozen_state = meanflow_rhso(adapter, cond, x0, problem, frozen)[0]
+    sdedit_state = sdedit_meanflow(adapter, cond, x0,
+                                   dataclasses.replace(spec, steps=N))[0]
+    results.append(report(
+        "q is initialised from x_k",
+        bool(np.allclose(np.asarray(frozen_state), np.asarray(sdedit_state), atol=1e-6)),
+        "with lr = 0 the run reproduces plain successive execution along the same beta "
+        "grid, so each stage really does start from the current state"))
+
+    # 4. gradients wrt q
+    def terminal_loss(q, s):
+        return phi(adapter.to_pixels(adapter.transition(q, s, 1.0, cond),
+                                     differentiable=True))
+    g = np.asarray(jax.grad(lambda q: terminal_loss(q, grid[0]))(x0))
+    results.append(report("gradient wrt q",
+                          bool(np.isfinite(g).all()) and np.abs(g).max() > 0,
+                          "|d loss / d q|max = %.4e through the direct transition"
+                          % float(np.abs(g).max())))
+
+    # 5. the terminal fidelity falls during the inner optimisation
+    first_stage = stats.loss_history[:M]
+    results.append(report("inner optimisation descends",
+                          first_stage[-1] < first_stage[0]
+                          and stats.loss_history[-1] < stats.loss_history[0],
+                          "stage 0: %.6f -> %.6f; whole run: %.6f -> %.6f"
+                          % (first_stage[0], first_stage[-1], stats.loss_history[0],
+                             stats.loss_history[-1])))
+
+    # 6. the executed interval belongs to the FINAL q, not the pre-update one
+    single = dataclasses.replace(spec, num_rhso_steps=1)
+    single_state, single_stats = meanflow_rhso(adapter, cond, x0, problem, single)
+    final_loss = float(phi(adapter.to_pixels(single_state, differentiable=True))) * scale
+    results.append(report(
+        "output is the FINAL q",
+        final_loss <= single_stats.loss_history[-1] + 1e-9,
+        "N=1: the returned state scores %.6f <= the last recorded objective %.6f, which "
+        "was computed before the last Adam update"
+        % (final_loss, single_stats.loss_history[-1])))
+
+    # 11. Adam moments are rebuilt at every outer stage
+    def manual(reset_each_stage: bool):
+        q_state = None
+        x = x0
+        tx = optax.adam(float(spec.lr))
+        for k in range(N):
+            s_k, s_next = grid[k], grid[k + 1]
+            loss_fn = lambda q, _s=s_k: terminal_loss(q, _s)
+            q = x
+            if reset_each_stage or q_state is None:
+                q_state = tx.init(q)
+            vg = jax.value_and_grad(loss_fn)
+            for _ in range(M):
+                _loss, grads = vg(q)
+                updates, q_state = tx.update(grads, q_state, q)
+                q = optax.apply_updates(q, updates)
+            x = jax.lax.stop_gradient(adapter.transition(q, s_k, s_next, cond))
+        return np.asarray(x)
+
+    fresh, carried = manual(True), manual(False)
+    results.append(report(
+        "Adam state is fresh per stage",
+        np.array_equal(np.asarray(state), fresh) and not np.array_equal(fresh, carried),
+        "matches a reference that re-initialises the optimiser at every stage; carrying "
+        "the moments instead changes the result by %.3e, so the reset is real"
+        % float(np.max(np.abs(fresh - carried)))))
+
+    # RHSO is not D-Flow: same budget, different algorithm, different answer
+    dflow_state = meanflow_dflow(adapter, cond, x0, problem,
+                                 dataclasses.replace(spec, steps=N,
+                                                     num_opt_steps=N * M))[0]
+    results.append(report(
+        "distinct from D-Flow",
+        not np.allclose(np.asarray(state), np.asarray(dflow_state), atol=1e-6),
+        "D-Flow optimises one state and then executes the whole trajectory; RHSO commits "
+        "one interval and re-optimises, and the two do not coincide (max diff %.3e)"
+        % float(np.max(np.abs(np.asarray(state) - np.asarray(dflow_state))))))
+
+    # ---------------------------------------------------------------- 15. latent path
+    print("\nMeanFlow RHSO -- latent model (differentiable decoder)")
+    latent = ToyLatentMeanFlow(problem.ground_truth)
+    lat_eps = latent.prior_sample(problem.image_ids)
+    lat_x0 = latent.initial_state(latent.encode_pixels(problem.initialization_guide),
+                                  spec.t0, lat_eps)
+    lat_phi = make_phi(problem, latent.backend(), spec.phi_normalization)
+    lat_grad = np.asarray(jax.grad(lambda q: lat_phi(latent.to_pixels(
+        latent.transition(q, grid[0], 1.0, cond), differentiable=True)))(lat_x0))
+    lat_spec = dataclasses.replace(spec, num_rhso_steps=2, num_opt_steps=3)
+    lat_state, lat_stats = meanflow_rhso(latent, cond, lat_x0, problem, lat_spec)
+    results.append(report(
+        "gradient survives the decoder",
+        bool(np.isfinite(lat_grad).all()) and np.abs(lat_grad).max() > 0
+        and lat_grad.shape == (BATCH, RES // 2, RES // 2, 4),
+        "|d loss / d q|max = %.4e, taken in latent shape %s through the decoder and the "
+        "measurement operator" % (float(np.abs(lat_grad).max()), lat_grad.shape)))
+    results.append(report(
+        "same code path as the pixel model",
+        lat_stats.model_evals_total == 2 * (3 + 1) and lat_stats.finite
+        and tuple(lat_state.shape)[1:] == (RES // 2, RES // 2, 4)
+        and lat_stats.loss_history[-1] < lat_stats.loss_history[0],
+        "%d evaluations, latent state kept native, loss %.6f -> %.6f -- no separate "
+        "pixel/latent RHSO mathematics" % (lat_stats.model_evals_total,
+                                           lat_stats.loss_history[0],
+                                           lat_stats.loss_history[-1])))
+
+    # ---------------------------------------------------------------- standard flow
+    print("\nStandard-flow RHSO -- planner, counts and the differentiable suffix")
+    print("  (rhso.flow_rhso itself needs PyTorch and is NOT executed here)")
+    flow_spec = make_spec("rhso", model="jit", num_rhso_steps=4, num_opt_steps=2,
+                          solver="heun", beta=0.5)
+    assert flow_spec.dynamics_family == STANDARD_FLOW
+    flow_grid = rhso_time_grid(flow_spec)
+
+    # 8. the planner is the remaining suffix of the SAME grid
+    suffix_ok = all(rhso_planning_grid(flow_grid, k) == list(flow_grid[k:])
+                    for k in range(4))
+    results.append(report(
+        "planner uses the remaining suffix", suffix_ok
+        and rhso_planning_grid(flow_grid, 3) == [flow_grid[3], 1.0],
+        "stage k integrates [s_k, ..., 1] -- 4, 3, 2, 1 intervals -- with no second "
+        "planning-resolution hyperparameter"))
+
+    for final_euler in (False, True):
+        toy = ToyFlow(final_euler)
+        counts_ok, exec_ok = [], []
+        for k in range(4):
+            predicted_plan = rhso_planning_evaluations(toy, flow_spec, k, flow_grid)
+            toy.reset_counters()
+            toy.times = []
+            integrate_flow(toy, cond, jnp.zeros((BATCH, RES, RES, 3), jnp.float32),
+                           flow_spec, rhso_planning_grid(flow_grid, k),
+                           reaches_data_endpoint=True)
+            counts_ok.append(toy.forward_counter == predicted_plan)
+            predicted_exec = rhso_execution_evaluations(toy, flow_spec, k, flow_grid)
+            exec_ok.append(predicted_exec == solver_evaluations(
+                toy, "heun", 1, reaches_data_endpoint=(k == 3)))
+        results.append(report(
+            "eval counts%s" % (" + final-Euler" if final_euler else ""),
+            all(counts_ok) and all(exec_ok),
+            "measured planning evaluations match the predicted counts at all four stages, "
+            "and the final-step policy applies only to the interval that lands on s = 1"))
+
+    toy = ToyFlow(True)
+    estimate = rhso_cost_estimate({"num_rhso_steps": 4, "num_opt_steps": 2,
+                                   "solver": "heun"}, STANDARD_FLOW,
+                                  euler_final_step_for_heun=True)
+    measured_plan = sum(2 * rhso_planning_evaluations(toy, flow_spec, k, flow_grid)
+                        for k in range(4))
+    measured_exec = sum(rhso_execution_evaluations(toy, flow_spec, k, flow_grid)
+                        for k in range(4))
+    results.append(report(
+        "planner cost model (standard flow)",
+        estimate["planning_evals"] == measured_plan
+        and estimate["model_evals"] == measured_plan + measured_exec
+        and estimate["objective_evals"] == 4 * 2,
+        "%d planning + %d execution evaluations -- shrinking suffixes, not a crude N*M "
+        "estimate" % (measured_plan, measured_exec)))
+
+    # the inner objective itself: arithmetic and gradient, without torch
+    toy = ToyFlow(False)
+    rng = np.random.default_rng(11)
+    q0 = jnp.asarray(rng.standard_normal((BATCH, RES, RES, 3), np.float32) * 0.4)
+    suffix = rhso_planning_grid(flow_grid, 1)
+    mine = integrate_flow(toy, cond, q0, flow_spec, suffix, reaches_data_endpoint=True)
+    ref = reference_integrate(toy, cond, q0, suffix, "heun", False)
+    flow_phi = make_phi(problem, toy.backend(), flow_spec.phi_normalization)
+    loss_fn = lambda q: flow_phi(toy.to_pixels(
+        integrate_flow(toy, cond, q, flow_spec, suffix, reaches_data_endpoint=True),
+        differentiable=True))
+    value, grad = jax.value_and_grad(loss_fn)(q0)
+    gnp = np.asarray(grad)
+    results.append(report(
+        "suffix integration is exact",
+        float(np.max(np.abs(np.asarray(mine) - np.asarray(ref)))) == 0.0,
+        "matches an independent transcription of the reference integrator bitwise over the "
+        "non-uniform suffix %s" % ["%.4f" % s for s in suffix]))
+    results.append(report(
+        "terminal gradient wrt q",
+        bool(np.isfinite(gnp).all()) and np.abs(gnp).max() > 0
+        and float(loss_fn(q0 - 0.05 * grad)) < float(value),
+        "loss %.5f, |d loss / d q|max = %.4e, and a descent step reduces it"
+        % (float(value), float(np.abs(gnp).max()))))
+
+    # the one-interval execution step, shared with SDEdit's arithmetic
+    from src.dflow import flow_step
+    toy = ToyFlow(True)
+    one = flow_step(toy, cond, q0, flow_grid[0], flow_grid[1], "heun",
+                    apply_final_euler_policy=False)
+    ref_one = reference_integrate(toy, cond, q0, [flow_grid[0], flow_grid[1]], "heun", False)
+    last = flow_step(toy, cond, q0, flow_grid[3], 1.0, "heun",
+                     apply_final_euler_policy=True)
+    ref_last = reference_integrate(toy, cond, q0, [flow_grid[3], 1.0], "heun", True)
+    results.append(report(
+        "one-interval execution",
+        float(np.max(np.abs(np.asarray(one) - np.asarray(ref_one)))) == 0.0
+        and float(np.max(np.abs(np.asarray(last) - np.asarray(ref_last)))) == 0.0,
+        "a mid-trajectory interval executes a full Heun step; only the interval landing on "
+        "s = 1 takes the adapter's Euler fallback"))
+
+    # beta really does change the executed grid
+    beta_one = rhso_time_grid(dataclasses.replace(flow_spec, beta=1.0))
+    results.append(report(
+        "beta drives the outer schedule",
+        beta_one == canonical_time_grid(flow_spec.canonical_start_time, 4, 1.0)
+        and flow_grid != beta_one,
+        "beta=1 gives the uniform grid %s; beta=0.5 gives %s"
+        % (["%.3f" % s for s in beta_one], ["%.3f" % s for s in flow_grid])))
+
+    # ---------------------------------------------------------------- configuration
+    if spec_source() == "real":
+        print("\nConfiguration: RHSO in the declaration, validation and planning machinery")
+        from src.config import (COMPARED_METHODS, ConfigError, MODEL_CAPABILITIES,
+                                METHOD_DECLARATIONS, _estimate_cost)
+
+        decl = METHOD_DECLARATIONS.get("rhso")
+        results.append(report(
+            "declared with the intended fields",
+            decl is not None and not decl.is_mpc and not decl.uses_K
+            and set(decl.fields) == {"t0", "beta", "num_rhso_steps", "num_opt_steps", "lr",
+                                     "optimizer", "phi_normalization", "solver"}
+            and all("rhso" in c.supported_methods for c in MODEL_CAPABILITIES.values())
+            and "rhso" in COMPARED_METHODS,
+            "shared t0/beta plus N, M, lr, optimizer, phi and solver -- no lambda, no K, no "
+            "control-cost normalisation; supported by every model and compared against "
+            "SDEdit"))
+
+        rejected = {}
+        for field, value in (("lam", 1.0), ("K", 2), ("control_cost_normalization",
+                                                      "sum_squared"),
+                             ("optimizer", "sgd")):
+            try:
+                build_plan({"rhso": {"num_rhso_steps": 2, field: value}})
+            except ConfigError as exc:
+                rejected[field] = str(exc).splitlines()[0]
+        results.append(report(
+            "meaningless fields are rejected", len(rejected) == 4,
+            "lam, K, control_cost_normalization and a non-Adam optimizer are all refused "
+            "with an explanation rather than silently ignored"))
+
+        try:
+            build_plan({"rhso": {"num_rhso_steps": 2, "solver": "heun"}}, model="pmf")
+            solver_rejected = False
+        except ConfigError:
+            solver_rejected = True
+        jit_plan, _w = build_plan({"rhso": {"num_rhso_steps": 2, "solver": "rk4"}},
+                                  model="jit")
+        results.append(report(
+            "solver is standard-flow only",
+            solver_rejected and jit_plan.specs[0].solver == "rk4",
+            "a MeanFlow RHSO job refuses `solver`; a standard-flow one accepts the same "
+            "values as the other standard-flow methods"))
+
+        plan, _w = build_plan({"rhso": {"num_rhso_steps": [2, 4], "num_opt_steps": 3,
+                                        "beta": [0.5, 1.0]}})
+        results.append(report(
+            "sweeps and job identity",
+            len(plan.specs) == 4 and len({s.job_id for s in plan.specs}) == 4
+            and len({s.leaf_dir for s in plan.specs}) == 4
+            and {(s.num_rhso_steps, s.beta) for s in plan.specs}
+            == {(2, 0.5), (2, 1.0), (4, 0.5), (4, 1.0)},
+            "num_rhso_steps x beta expands to 4 jobs with 4 distinct ids and directories"))
+
+        estimate = _estimate_cost("rhso", {"num_rhso_steps": 3, "num_opt_steps": 4,
+                                           "solver": None}, MEANFLOW)
+        spec3 = dataclasses.replace(make_spec("rhso", num_rhso_steps=3, num_opt_steps=4,
+                                              lr=0.05), record_loss_history=True)
+        _state3, stats3 = meanflow_rhso(adapter, cond, x0, problem, spec3)
+        results.append(report(
+            "planner cost == measured (through config)",
+            estimate["model_evals"] == stats3.model_evals_total
+            == spec3.expected_model_evals
+            and estimate["backprops"] == stats3.backprops_through_model
+            and spec3.expected_objective_evals == stats3.objective_evals,
+            "the dry-run plan predicts %d evaluations and %d backprops; the run measured "
+            "%d and %d" % (spec3.expected_model_evals, estimate["backprops"],
+                           stats3.model_evals_total, stats3.backprops_through_model)))
+
+        import run as runner
+        keys = {runner.warmup_key(s, _ProbeProblem()) for s in plan.specs}
+        results.append(report(
+            "warm-up key and results columns",
+            len(keys) == 4 and "num_rhso_steps" in runner.RESULT_COLUMNS
+            and runner.METHOD_ORDER.get("rhso") == 5,
+            "each (N, beta) traces its own computation and gets its own warm-up; the horizon "
+            "is a results column and RHSO has its place in the summary ordering"))
+
+    print("\n%d/%d checks passed" % (sum(results), len(results)))
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

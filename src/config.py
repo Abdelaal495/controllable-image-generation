@@ -10,11 +10,16 @@ Carried over from the MPC-Flow notebook (sections 2-4) with two deliberate chang
 Unknown keys are errors rather than silent no-ops, and everything here runs *before* any
 checkpoint is downloaded.
 
-Five reconstruction strategies are declared here: SDEdit, MPC-RHC, MPC-delta_t, PnP-Flow
-and D-Flow.  The last two were added later; see `docs/methods_pnp_dflow.md` for what is
-published and what is a research extension.  MPC's defaults are deliberately untouched by
-that addition: `phi_normalization` still defaults to `half_sum_squared` for MPC, so every
-Table E2 lambda keeps the meaning it had.
+Six reconstruction strategies are declared here: SDEdit, MPC-RHC, MPC-delta_t, PnP-Flow,
+D-Flow and RHSO.  PnP and D-Flow were added later; see `docs/methods_pnp_dflow.md` for what
+is published and what is a research extension, and `docs/schedule_and_rhso.md` for RHSO.
+MPC's defaults are deliberately untouched by those additions: `phi_normalization` still
+defaults to `half_sum_squared` for MPC, so every Table E2 lambda keeps the meaning it had.
+
+`beta` is a SHARED field alongside `t0`: it is the exponent of the universal power-law time
+schedule s_k = s0 + (1 - s0)(k/N)^beta (see src/schedule.py).  It defaults to 1.0, which is
+the legacy uniform grid bitwise, so a configuration that never mentions it resolves exactly
+as it did before.
 """
 
 from __future__ import annotations
@@ -27,6 +32,8 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .schedule import (DEFAULT_BETA, canonical_time_grid, grid_intervals,
+                       nominal_uniform_delta, resolve_beta)
 from .utils import (FLOW_ASCENDING, MEANFLOW, MEANFLOW_DESCENDING, STANDARD_FLOW,
                     SEED_RECIPES, as_sweep_list, canonical_params_key, canonical_start_time,
                     deep_merge, native_time, stable_hash)
@@ -193,7 +200,8 @@ class ModelCapabilities:
     fixed_batch_shape: bool
     native_time_mapping: str
     supported_solvers: Tuple[Optional[str], ...] = (None,)
-    supported_methods: Tuple[str, ...] = ("sdedit", "mpc_rhc", "mpc_delta_t", "pnp", "dflow")
+    supported_methods: Tuple[str, ...] = ("sdedit", "mpc_rhc", "mpc_delta_t", "pnp",
+                                          "dflow", "rhso")
 
     def describe(self) -> str:
         solvers = [s for s in self.supported_solvers if s]
@@ -283,7 +291,9 @@ class MethodDeclaration:
     description: str
 
 
-SHARED_FIELDS: Tuple[str, ...] = ("t0",)
+# `beta` is shared exactly like `t0`: every method places its times on the same power-law
+# grid, and beta = 1 reproduces the uniform schedule bitwise.
+SHARED_FIELDS: Tuple[str, ...] = ("t0", "beta")
 SDEDIT_FIELDS: Tuple[str, ...] = ("steps", "solver")
 MPC_COMMON_FIELDS: Tuple[str, ...] = (
     "num_mpc_steps", "lam", "n_ctrl", "lr", "optimizer", "warm_start", "grad_clip",
@@ -292,6 +302,12 @@ PNP_FIELDS: Tuple[str, ...] = (
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "phi_normalization")
 DFLOW_FIELDS: Tuple[str, ...] = (
     "steps", "solver", "num_opt_steps", "lr", "optimizer", "phi_normalization")
+# RHSO has NO lambda, NO control-cost normalisation, NO K and no warm start: the optimised
+# variable is the state itself, so there is nothing to trade the fidelity off against.
+# `solver` is meaningful only for standard-flow models; the MeanFlow capability table has no
+# solver, so the validator rejects it there exactly as it does for the other methods.
+RHSO_FIELDS: Tuple[str, ...] = (
+    "num_rhso_steps", "num_opt_steps", "lr", "optimizer", "phi_normalization", "solver")
 
 METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
     "sdedit": MethodDeclaration(
@@ -314,6 +330,14 @@ METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
         "onto the flow path -> denoising).  Never backpropagates through the generative "
         "model.  MeanFlow models use the learned transition T(x; s -> 1) as the denoiser, "
         "which is a research extension."),
+    "rhso": MethodDeclaration(
+        "rhso", "RHSO", False, False, SHARED_FIELDS + RHSO_FIELDS,
+        "Receding-Horizon State Optimization: at every scheduled time, optimise the CURRENT "
+        "generative state against its own terminal prediction, execute exactly ONE scheduled "
+        "interval, then discard the problem and re-optimise from the state actually reached. "
+        "No control variable, no control penalty, no lambda and no K. For a standard flow "
+        "the terminal planner integrates the remaining suffix of the outer grid; for a "
+        "MeanFlow it is the single learned transition T(q; s_k -> 1)."),
     "dflow": MethodDeclaration(
         "dflow", "D-Flow", False, False, SHARED_FIELDS + DFLOW_FIELDS,
         "Optimises the starting generative state q by differentiating the terminal "
@@ -326,18 +350,20 @@ METHOD_NAMES: Tuple[str, ...] = tuple(METHOD_DECLARATIONS)
 
 # Strategies that are compared AGAINST SDEdit; each wants a paired SDEdit job at the same t0.
 BASELINE_METHOD: str = "sdedit"
-COMPARED_METHODS: Tuple[str, ...] = ("mpc_rhc", "mpc_delta_t", "pnp", "dflow")
+COMPARED_METHODS: Tuple[str, ...] = ("mpc_rhc", "mpc_delta_t", "pnp", "dflow", "rhso")
 
 # The closed set of sweepable fields.  A list in ANY OTHER field is a literal value
 # (e.g. guidance.interval, which is one interval and never a sweep).
 SWEEPABLE_FIELDS: Tuple[str, ...] = (
-    "t0", "steps", "solver", "K", "num_mpc_steps", "lam", "n_ctrl", "lr",
+    "t0", "beta", "steps", "solver", "K", "num_mpc_steps", "lam", "n_ctrl", "lr",
     "optimizer", "warm_start", "grad_clip",
     "phi_normalization", "control_cost_normalization", "delta_t_lambda_scaling",
     # PnP-Flow
     "num_pnp_steps", "gamma0", "alpha", "noise_samples",
     # D-Flow
     "num_opt_steps",
+    # RHSO
+    "num_rhso_steps",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -350,6 +376,9 @@ VALID_DELTA_T_LAMBDA_SCALINGS = ("none", "inverse_delta")
 VALID_OPTIMIZERS = ("adam", "sgd")
 # D-Flow is deliberately Adam-only in this iteration (no LBFGS, no line search).
 VALID_DFLOW_OPTIMIZERS = ("adam",)
+# RHSO likewise: its optimisation problem is rebuilt at every outer stage, so a stateful
+# alternative would need its own reset semantics before it could be reported honestly.
+VALID_RHSO_OPTIMIZERS = ("adam",)
 VALID_SOLVERS = ("euler", "heun", "rk4")
 SOLVER_STAGE_EVALUATIONS: Dict[str, int] = {"euler": 1, "heun": 2, "rk4": 4}
 VALID_DATA_SOURCES = ("hf_imagenet_val", "local_folder")
@@ -408,6 +437,14 @@ PNP_DEFAULTS: Dict[str, Any] = {
 }
 DFLOW_DEFAULTS: Dict[str, Any] = {
     "steps": 1,
+    "num_opt_steps": 10,
+    "lr": 0.01,
+    "optimizer": "adam",
+}
+# RHSO is this repository's own strategy: it has no published hyperparameters at all, so
+# every value below is a starting point recorded as `repository_default_untuned`.
+RHSO_DEFAULTS: Dict[str, Any] = {
+    "num_rhso_steps": 4,
     "num_opt_steps": 10,
     "lr": 0.01,
     "optimizer": "adam",
@@ -547,6 +584,18 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                 raise ConfigError(
                     "%s: t0=%r must lie in (0, 1]. t0 is the canonical corruption strength, "
                     "not a model-native time; t0=0 leaves nothing to generate." % (tag, v))
+        elif field_name == "beta":
+            try:
+                resolve_beta(v)
+            except ValueError as exc:
+                raise ConfigError(
+                    "%s: %s beta is the exponent of the time schedule "
+                    "s_k = s0 + (1 - s0)(k/N)^beta, so it must be a finite positive number. "
+                    "beta = 1 is the uniform (legacy) grid." % (tag, exc))
+            if float(v) != DEFAULT_BETA and float(v) > 8.0:
+                warnings_.append(
+                    "%s: beta=%g concentrates almost every step near the noisy start; at "
+                    "large N the first intervals become numerically tiny." % (tag, float(v)))
         elif field_name == "steps":
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                 raise ConfigError("%s: steps must be an integer >= 1, got %r." % (tag, v))
@@ -592,6 +641,12 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                     "LBFGS with line search; that is deliberately NOT implemented here, so "
                     "asking for %r would silently give you something else."
                     % (tag, list(VALID_DFLOW_OPTIMIZERS), v))
+            if method == "rhso" and v not in VALID_RHSO_OPTIMIZERS:
+                raise ConfigError(
+                    "%s: RHSO supports only %s in this iteration, got %r. Its optimisation "
+                    "problem is rebuilt from scratch at every outer stage, so any other "
+                    "optimiser needs its own documented reset semantics first."
+                    % (tag, list(VALID_RHSO_OPTIMIZERS), v))
         elif field_name == "warm_start":
             if not isinstance(v, bool):
                 raise ConfigError("%s: warm_start must be a boolean, got %r." % (tag, v))
@@ -606,7 +661,7 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                 warnings_.append("%s = %r changes the numerical scale of Phi, so Table E2's "
                                  "lambda values no longer mean what they meant in the paper. "
                                  "Retune lambda." % (tag, v))
-            if method in ("pnp", "dflow") and v != PER_MEASUREMENT_NORMALIZATION:
+            if method in ("pnp", "dflow", "rhso") and v != PER_MEASUREMENT_NORMALIZATION:
                 warnings_.append(
                     "%s = %r departs from the per-measurement fidelity these methods default "
                     "to, so gamma0 / lr have to be retuned: %r changes the objective's scale "
@@ -646,6 +701,10 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
         elif field_name == "num_opt_steps":
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                 raise ConfigError("%s: num_opt_steps must be an integer >= 1, got %r." % (tag, v))
+        elif field_name == "num_rhso_steps":
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ConfigError("%s: num_rhso_steps must be an integer >= 1, got %r."
+                                  % (tag, v))
         else:                                                       # pragma: no cover
             raise ConfigError("Sweepable field %r has no validation rule." % field_name)
 
@@ -942,6 +1001,13 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
                     "%s: 'solver' does not apply to PnP-Flow. Its prior step is a SINGLE "
                     "denoiser evaluation D_s(q) = q + (1 - s) v(q, s), not an ODE solve; there "
                     "is no trajectory to integrate." % where)
+            if key in ("lam", "control_cost_normalization") and method_name == "rhso":
+                raise ConfigError(
+                    "%s: %r is meaningless for RHSO and is rejected.\n"
+                    "    RHSO optimises the generative STATE itself; it has no control "
+                    "variable, so there is no control cost for lambda to trade the fidelity "
+                    "off against.\n    Use 'mpc_rhc' or 'mpc_delta_t' if you want explicit "
+                    "control optimisation." % (where, key))
             raise ConfigError(
                 "%s: %r does not apply to method %r.\n    Fields for %s: %s"
                 % (where, key, method_name, method_decl.title, sorted(allowed)))
@@ -991,6 +1057,23 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
                    ", ".join("t0=%.2f->delta=%.4g" % (t, t / float(n_steps[0]))
                              for t in sorted(set(t0_values)))))
 
+    # beta on a single-interval trajectory is a no-op: warn rather than fail, because a
+    # sweep that includes such a point is usually deliberate (it is its own control).
+    beta_values = [float(v) for v in as_sweep_list(
+        entry.get("beta", inherited_model_entry.get("beta", DEFAULT_BETA)))]
+    if any(b != DEFAULT_BETA for b in beta_values):
+        interval_field = {"sdedit": "steps", "dflow": "steps", "rhso": "num_rhso_steps",
+                          "mpc_rhc": "num_mpc_steps", "mpc_delta_t": "num_mpc_steps",
+                          "pnp": "num_pnp_steps"}[method_name]
+        intervals = as_sweep_list(entry.get(
+            interval_field, inherited_model_entry.get(interval_field, None)))
+        if method_name != "pnp" and intervals and all(
+                isinstance(n, int) and not isinstance(n, bool) and n <= 1 for n in intervals):
+            warnings_.append(
+                "%s sweeps beta over %s, but %s = 1 leaves a single interval [s0, 1], where "
+                "beta has NO mathematical effect. Those jobs will differ only by their "
+                "recorded beta." % (where, sorted(set(beta_values)), interval_field))
+
     # D-Flow at t0 < 1 is an extension, not the published setup.  Say so once per entry.
     if method_name == "dflow" and any(t < 1.0 for t in t0_values):
         warnings_.append(
@@ -1025,11 +1108,12 @@ class JobSpec:
     guidance: Dict[str, Any]
 
     # -- method -----------------------------------------------------------------------
-    method: str                          # sdedit | mpc_rhc | mpc_delta_t | pnp | dflow
+    method: str                          # sdedit | mpc_rhc | mpc_delta_t | pnp | dflow | rhso
     K: Optional[int]                     # mpc_rhc only
 
     # -- initialisation / time --------------------------------------------------------
     t0: float
+    beta: float                          # power-law time exponent; 1.0 = the uniform grid
     canonical_start_time: float          # s_start = 1 - t0
     native_start_time: float
     native_end_time: float
@@ -1043,7 +1127,10 @@ class JobSpec:
 
     # -- MPC --------------------------------------------------------------------------
     num_mpc_steps: Optional[int]
-    delta: Optional[float]               # = t0 / num_mpc_steps
+    # NOMINAL uniform spacing t0/num_mpc_steps, and None whenever beta != 1: a non-uniform
+    # trajectory has no single physical step size.  Never use it as a per-step dt -- the real
+    # values are s_{k+1} - s_k (see delta_min / delta_max below and src/schedule.py).
+    delta: Optional[float]
     lam: Optional[float]
     n_ctrl: Optional[int]
     lr: Optional[float]
@@ -1072,8 +1159,18 @@ class JobSpec:
     alpha: Optional[float] = None
     noise_samples: Optional[int] = None
 
-    # -- D-Flow -----------------------------------------------------------------------
+    # -- D-Flow / RHSO ----------------------------------------------------------------
     num_opt_steps: Optional[int] = None
+
+    # -- RHSO ---------------------------------------------------------------------------
+    num_rhso_steps: Optional[int] = None
+
+    # -- resolved schedule metadata (derived; see src/schedule.py) ----------------------
+    # delta_nominal_uniform is (1 - s0)/N for this method's own trajectory and is reported
+    # for EVERY method; delta_min / delta_max are the true extreme step sizes.
+    delta_nominal_uniform: Optional[float] = None
+    delta_min: Optional[float] = None
+    delta_max: Optional[float] = None
 
     # -- further cost estimates (new methods) -----------------------------------------
     expected_objective_evals: int = 0
@@ -1099,6 +1196,8 @@ class JobSpec:
             return "PnP-Flow"
         if self.method == "dflow":
             return "D-Flow"
+        if self.method == "rhso":
+            return "RHSO"
         return "SDEdit"
 
     @property
@@ -1115,6 +1214,8 @@ class JobSpec:
             return int(self.steps)
         if self.method == "pnp":
             return int(self.num_pnp_steps)
+        if self.method == "rhso":
+            return int(self.num_rhso_steps)
         return int(self.num_mpc_steps)
 
     @property
@@ -1137,6 +1238,13 @@ class JobSpec:
             parts += ["opt=%d" % self.num_opt_steps, "lr=%g" % self.lr, self.optimizer]
             if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
                 parts.append("phi=%s" % self.phi_normalization)
+        elif self.method == "rhso":
+            parts += ["N=%d" % self.num_rhso_steps]
+            if self.solver:
+                parts.append(self.solver)
+            parts += ["opt=%d" % self.num_opt_steps, "lr=%g" % self.lr, self.optimizer]
+            if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
+                parts.append("phi=%s" % self.phi_normalization)
         else:
             parts += ["N=%d" % self.num_mpc_steps]
             if self.K is not None:
@@ -1153,6 +1261,10 @@ class JobSpec:
                 parts.append("cc=%s" % self.control_cost_normalization)
             if self.delta_t_lambda_scaling not in (None, "none"):
                 parts.append("lamscale=%s" % self.delta_t_lambda_scaling)
+        # beta changes the executed trajectory, so it belongs in the directory name; it is
+        # omitted at the default so existing paths are unchanged.
+        if float(self.beta) != DEFAULT_BETA:
+            parts.append("beta=%g" % float(self.beta))
         if self.replicate:
             parts.append("rep=%d" % self.replicate)
         return "__".join(parts) + "__" + self.job_id[:8]
@@ -1160,21 +1272,34 @@ class JobSpec:
     @property
     def label(self) -> str:
         if self.method == "sdedit":
-            return "%s | %s/%s | SDEdit | t0=%.2f steps=%d %s" % (
+            return "%s | %s/%s | SDEdit | t0=%.2f steps=%d %s%s" % (
                 self.experiment, self.model, self.problem, self.t0, self.steps,
-                self.solver or "")
+                self.solver or "", self._beta_suffix)
         if self.method == "pnp":
-            return ("%s | %s/%s | PnP-Flow | t0=%.2f N=%d gamma0=%g alpha=%g M=%d"
+            return ("%s | %s/%s | PnP-Flow | t0=%.2f N=%d gamma0=%g alpha=%g M=%d%s"
                     % (self.experiment, self.model, self.problem, self.t0, self.num_pnp_steps,
-                       self.gamma0, self.alpha, self.noise_samples))
+                       self.gamma0, self.alpha, self.noise_samples, self._beta_suffix))
         if self.method == "dflow":
-            return ("%s | %s/%s | D-Flow | t0=%.2f steps=%d%s opt=%d lr=%g"
+            return ("%s | %s/%s | D-Flow | t0=%.2f steps=%d%s opt=%d lr=%g%s"
                     % (self.experiment, self.model, self.problem, self.t0, self.steps,
                        (" %s" % self.solver) if self.solver else "", self.num_opt_steps,
-                       self.lr))
-        return ("%s | %s/%s | %s | t0=%.2f N=%d delta=%.4g lam=%g nctrl=%d lr=%g"
+                       self.lr, self._beta_suffix))
+        if self.method == "rhso":
+            return ("%s | %s/%s | RHSO | t0=%.2f N=%d%s opt=%d lr=%g%s"
+                    % (self.experiment, self.model, self.problem, self.t0,
+                       self.num_rhso_steps, (" %s" % self.solver) if self.solver else "",
+                       self.num_opt_steps, self.lr, self._beta_suffix))
+        return ("%s | %s/%s | %s | t0=%.2f N=%d %s=%.4g lam=%g nctrl=%d lr=%g%s"
                 % (self.experiment, self.model, self.problem, self.method_title, self.t0,
-                   self.num_mpc_steps, self.delta, self.lam, self.n_ctrl, self.lr))
+                   self.num_mpc_steps,
+                   "delta" if self.delta is not None else "dt_max",
+                   self.delta if self.delta is not None else (self.delta_max or 0.0),
+                   self.lam, self.n_ctrl, self.lr, self._beta_suffix))
+
+    @property
+    def _beta_suffix(self) -> str:
+        """' beta=...' only when the schedule is NOT the legacy uniform one."""
+        return "" if float(self.beta) == DEFAULT_BETA else " beta=%g" % float(self.beta)
 
     def figure_title(self) -> str:
         """Compact multi-line label for comparison grids (section 40 of the brief)."""
@@ -1196,10 +1321,17 @@ class JobSpec:
             lines.append("D-Flow")
             lines.append("t0=%.2g n=%d" % (self.t0, self.steps))
             lines.append("opt=%d lr=%g" % (self.num_opt_steps, self.lr))
+        elif self.method == "rhso":
+            lines.append("RHSO")
+            lines.append("t0=%.2g N=%d" % (self.t0, self.num_rhso_steps))
+            lines.append("opt=%d lr=%g" % (self.num_opt_steps, self.lr))
         else:
             lines.append("MPC-dt")
             lines.append("t0=%.2g N=%d" % (self.t0, self.num_mpc_steps))
             lines.append("lam=%g" % self.lam)
+        # Never merge beta-distinct configurations into one panel label.
+        if float(self.beta) != DEFAULT_BETA:
+            lines.append("beta=%g" % float(self.beta))
         return "\n".join(lines)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1278,6 +1410,7 @@ class RunPlan:
 # =====================================================================================
 BUILTIN_DEFAULTS: Dict[str, Any] = {
     "t0": 0.8,
+    "beta": DEFAULT_BETA,                        # 1.0 -> the legacy uniform time grid
     "steps": 50,
     "solver": None,                              # -> the model's default_solver
     "num_mpc_steps": 4,
@@ -1298,16 +1431,22 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "dflow_steps": DFLOW_DEFAULTS["steps"],
     "dflow_lr": DFLOW_DEFAULTS["lr"],
     "dflow_optimizer": DFLOW_DEFAULTS["optimizer"],
+    # RHSO
+    "num_rhso_steps": RHSO_DEFAULTS["num_rhso_steps"],
+    "rhso_num_opt_steps": RHSO_DEFAULTS["num_opt_steps"],
+    "rhso_lr": RHSO_DEFAULTS["lr"],
+    "rhso_optimizer": RHSO_DEFAULTS["optimizer"],
 }
 
 # Every field a JobSpec can carry from the sweep grid.  Fields a method does not use are
 # resolved to None with source "not_applicable", so a result row never implies a value that
 # played no part in the run.
 SWEEP_ORDER: Tuple[str, ...] = (
-    "t0", "steps", "solver", "K", "num_mpc_steps", "lam", "n_ctrl", "lr",
+    "t0", "beta", "steps", "solver", "K", "num_mpc_steps", "lam", "n_ctrl", "lr",
     "optimizer", "warm_start", "grad_clip", "phi_normalization",
     "control_cost_normalization", "delta_t_lambda_scaling",
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps",
+    "num_rhso_steps",
 )
 
 
@@ -1338,6 +1477,11 @@ def _estimate_cost(method: str, values: Dict[str, Any], dynamics_family: str,
     D-Flow:   num_opt_steps objective evaluations plus ONE final terminal evaluation with
               the optimised q, each costing a whole trajectory; the backward pass traverses
               the same model calls again, which is what `backprops` counts.
+    RHSO:     delegated to `rhso.rhso_cost_estimate`, which lives next to the loop it
+              describes so the two cannot drift apart.  MeanFlow: N*M planning evaluations
+              and N*(M+1) in total.  Standard flow: the solver's stage counts over each
+              SHRINKING remaining suffix, plus one executed interval per stage -- never a
+              crude N*M estimate.
     """
     def solver_evals(steps: int) -> int:
         if dynamics_family != STANDARD_FLOW:
@@ -1358,6 +1502,14 @@ def _estimate_cost(method: str, values: Dict[str, Any], dynamics_family: str,
         m = int(values["noise_samples"])
         return dict(empty, model_evals=1 + n * m, objective_evals=n, data_gradients=n,
                     denoiser_samples=1 + n * m)
+
+    if method == "rhso":
+        from .rhso import rhso_cost_estimate       # local: rhso imports config at module scope
+        est = rhso_cost_estimate(values, dynamics_family, euler_final_step_for_heun)
+        return dict(empty, control_iterations=est["optimizer_iterations"],
+                    model_evals=est["model_evals"], backprops=est["backprops"],
+                    objective_evals=est["objective_evals"],
+                    data_gradients=est["objective_evals"])
 
     if method == "dflow":
         per_objective = solver_evals(values["steps"])
@@ -1458,12 +1610,23 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     axis_sources[name] = source
 
                 axis("t0", BUILTIN_DEFAULTS["t0"])
+                # Shared with t0: every method discretises time, so every method has a beta.
+                axis("beta", BUILTIN_DEFAULTS["beta"])
                 if method_name == "sdedit":
                     axis("steps", BUILTIN_DEFAULTS["steps"])
                     axis("solver", reg.get("default_solver"), "model_registry")
                 elif method_name == "pnp":
                     for name in ("num_pnp_steps", "gamma0", "alpha", "noise_samples"):
                         axis(name, BUILTIN_DEFAULTS[name], UNTUNED)
+                    axis("phi_normalization", BUILTIN_DEFAULTS["pnp_phi_normalization"])
+                elif method_name == "rhso":
+                    axis("num_rhso_steps", BUILTIN_DEFAULTS["num_rhso_steps"], UNTUNED)
+                    axis("num_opt_steps", BUILTIN_DEFAULTS["rhso_num_opt_steps"], UNTUNED)
+                    axis("lr", BUILTIN_DEFAULTS["rhso_lr"], UNTUNED)
+                    axis("optimizer", BUILTIN_DEFAULTS["rhso_optimizer"])
+                    # MeanFlow adapters have default_solver None, so a MeanFlow RHSO job
+                    # resolves to no solver and the validator rejects any explicit one.
+                    axis("solver", reg.get("default_solver"), "model_registry")
                     axis("phi_normalization", BUILTIN_DEFAULTS["pnp_phi_normalization"])
                 elif method_name == "dflow":
                     axis("steps", BUILTIN_DEFAULTS["dflow_steps"], UNTUNED)
@@ -1507,12 +1670,16 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                 for combo in itertools.product(*grids):
                     values = dict(zip(SWEEP_ORDER, combo))
                     t0 = float(values["t0"])
+                    beta = resolve_beta(values["beta"])
+                    values["beta"] = beta
                     s_start = canonical_start_time(t0)
                     sources = dict(axis_sources)
 
                     if mdecl.is_mpc:
                         n_steps = int(values["num_mpc_steps"])
-                        delta = t0 / n_steps
+                        # NOMINAL only: with beta != 1 there is no single step size, so the
+                        # scalar is dropped rather than left to be misread as one.
+                        delta = (t0 / n_steps) if beta == DEFAULT_BETA else None
                         fallback, label, hp_warn = resolve_mpc_hyperparameters(
                             problem, method_name, values["K"])
                         for w in hp_warn:
@@ -1531,10 +1698,29 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     else:
                         n_steps = None
                         delta = None
-                        # D-Flow uses lr; SDEdit and PnP do not.
+                        # D-Flow and RHSO use lr; SDEdit and PnP do not.
                         hp = {"lam": None, "n_ctrl": None, "lr": values["lr"]}
                     values["lam"], values["n_ctrl"], values["lr"] = \
                         hp["lam"], hp["n_ctrl"], hp["lr"]
+
+                    # The ACTUAL resolved schedule of this job's own trajectory: the real
+                    # per-step sizes, for metadata and for the structural checks.  PnP's N
+                    # corrections sit inside a grid of N + 1 intervals.
+                    trajectory_intervals = {
+                        "sdedit": values["steps"], "dflow": values["steps"],
+                        "mpc_rhc": n_steps, "mpc_delta_t": n_steps,
+                        "rhso": values["num_rhso_steps"],
+                        "pnp": (int(values["num_pnp_steps"]) + 1)
+                        if values["num_pnp_steps"] is not None else None,
+                    }[method_name]
+                    if trajectory_intervals:
+                        dts = grid_intervals(canonical_time_grid(
+                            s_start, int(trajectory_intervals), beta))
+                        delta_nominal = nominal_uniform_delta(s_start,
+                                                              int(trajectory_intervals))
+                        delta_min, delta_max = min(dts), max(dts)
+                    else:
+                        delta_nominal = delta_min = delta_max = None
 
                     cost = _estimate_cost(method_name, values, reg["dynamics_family"],
                                           bool(reg.get("euler_final_step_for_heun", False)))
@@ -1549,7 +1735,10 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                          values["delta_t_lambda_scaling"],
                                          values["num_pnp_steps"], values["gamma0"],
                                          values["alpha"], values["noise_samples"],
-                                         values["num_opt_steps"], num_images,
+                                         values["num_opt_steps"],
+                                         # beta and the RHSO horizon change what runs, so two
+                                         # jobs differing only in them can never collide.
+                                         values["num_rhso_steps"], beta, num_images,
                                          replicate, size=6)
 
                     specs.append(JobSpec(
@@ -1562,7 +1751,7 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         guidance=dict(guidance),
                         method=method_name,
                         K=(int(values["K"]) if values["K"] is not None else None),
-                        t0=t0, canonical_start_time=s_start,
+                        t0=t0, beta=beta, canonical_start_time=s_start,
                         native_start_time=native_time(s_start, reg["native_time_mapping"]),
                         native_end_time=native_time(1.0, reg["native_time_mapping"]),
                         native_time_mapping=reg["native_time_mapping"],
@@ -1598,6 +1787,10 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                        if values["noise_samples"] is not None else None),
                         num_opt_steps=(int(values["num_opt_steps"])
                                        if values["num_opt_steps"] is not None else None),
+                        num_rhso_steps=(int(values["num_rhso_steps"])
+                                        if values["num_rhso_steps"] is not None else None),
+                        delta_nominal_uniform=delta_nominal,
+                        delta_min=delta_min, delta_max=delta_max,
                         expected_objective_evals=cost["objective_evals"],
                         expected_data_gradients=cost["data_gradients"],
                         expected_denoiser_samples=cost["denoiser_samples"]))
@@ -1766,6 +1959,14 @@ def check_accelerator_compatibility(plan: RunPlan, accel: Dict[str, Any]) -> Lis
                          "job in this plan chains %d model evaluations per objective, and "
                          "activation memory scales with that depth. There is no gradient "
                          "checkpointing in this implementation." % deepest)
+    rhso = [s for s in plan.specs if s.method == "rhso"]
+    if rhso and any(s.dynamics_family == STANDARD_FLOW for s in rhso):
+        deepest = max((s.num_rhso_steps or 1) for s in rhso
+                      if s.dynamics_family == STANDARD_FLOW)
+        notes.append("Standard-flow RHSO differentiates the whole REMAINING suffix at every "
+                     "outer stage: its first stage chains up to %d intervals in the autograd "
+                     "graph (cost then falls stage by stage). MeanFlow RHSO plans with ONE "
+                     "learned transition regardless of the horizon." % deepest)
     if any(s.method == "pnp" and (s.noise_samples or 1) > 1 for s in plan.specs):
         notes.append("PnP with noise_samples > 1 evaluates the denoiser M times per "
                      "correction; the M realisations run sequentially here, so runtime scales "
@@ -1825,7 +2026,8 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                 print("    %s %s %d jobs"
                       % (title, "." * max(2, 20 - len(title)), len(sel)))
                 if detail:
-                    print("      t0 %s" % _axis(sel, "t0", "%.2f"))
+                    print("      t0 %s | beta %s" % (_axis(sel, "t0", "%.2f"),
+                                                     _axis(sel, "beta", "%g")))
                     if method == "sdedit":
                         print("      steps %s | solver %s"
                               % (_axis(sel, "steps", "%s"), _axis(sel, "solver")))
@@ -1845,11 +2047,20 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                               % (_axis(sel, "phi_normalization"),
                                  ", ".join(sorted({s.hyperparameter_sources.get("lr", "?")
                                                    for s in sel}))))
+                    elif method == "rhso":
+                        print("      outer stages %s | solver %s | opt steps %s | lr %s"
+                              % (_axis(sel, "num_rhso_steps", "%s"), _axis(sel, "solver"),
+                                 _axis(sel, "num_opt_steps", "%s"), _axis(sel, "lr", "%g")))
+                        print("      executed dt %s | phi %s | source %s"
+                              % (_dt_axis(sel), _axis(sel, "phi_normalization"),
+                                 ", ".join(sorted({s.hyperparameter_sources.get("lr", "?")
+                                                   for s in sel}))))
                     else:
                         if method == "mpc_rhc":
                             print("      K %s" % _axis(sel, "K", "%s"))
-                        print("      N %s | delta %s" % (_axis(sel, "num_mpc_steps", "%s"),
-                                                         _axis(sel, "delta", "%.4g")))
+                        print("      N %s | delta %s | executed dt %s"
+                              % (_axis(sel, "num_mpc_steps", "%s"),
+                                 _axis(sel, "delta", "%.4g"), _dt_axis(sel)))
                         print("      lam %s | n_ctrl %s | lr %s | source %s"
                               % (_axis(sel, "lam", "%g"), _axis(sel, "n_ctrl", "%s"),
                                  _axis(sel, "lr", "%g"),
@@ -1884,8 +2095,13 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
         print("No warnings.")
     print("-" * 94)
     print("REMINDERS")
-    print("  * delta = t0 / num_mpc_steps. Equal num_mpc_steps at different t0 does NOT mean")
-    print("    equal execution resolution; the delta line above shows what each job will use.")
+    print("  * delta = t0 / num_mpc_steps ONLY when beta = 1. Equal num_mpc_steps at different")
+    print("    t0 does NOT mean equal execution resolution; the dt range above is what each")
+    print("    job actually executes, and `delta` is null wherever beta != 1.")
+    print("  * beta is the exponent of s_k = s0 + (1-s0)(k/N)^beta and applies to EVERY")
+    print("    method. beta < 1 refines near clean space, beta = 1 is the legacy uniform grid")
+    print("    (bitwise), beta > 1 refines near the noisy start. It is not PnP's alpha, and")
+    print("    for MPC-RHC it shapes only the OUTER replanning grid, never the K-step plan.")
     print("  * MPC-Flow Table E2 hyperparameters were tuned for a CelebA 128x128 pixel-space")
     print("    U-Net. Here they are STARTING VALUES, never claims of optimality for JiT/pMF on")
     print("    ImageNet-256; every row records where its lam/n_ctrl/lr came from.")
@@ -1893,9 +2109,32 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
     print("    these checkpoints either: their provenance reads %r until you sweep them." % UNTUNED)
     print("  * 'steps' means different compute per family: a D-Flow standard-flow step costs")
     print("    solver stage evaluations, a MeanFlow step costs ONE learned transition.")
+    print("  * RHSO has no published hyperparameters at all: num_rhso_steps, num_opt_steps")
+    print("    and lr are this repository's starting values, recorded as %r." % UNTUNED)
     print("  * All methods share one epsilon per (model, image, replicate), so SDEdit, MPC,")
-    print("    PnP and D-Flow start from a bit-identical z_t0 at equal t0.")
+    print("    PnP, D-Flow and RHSO start from a bit-identical z_t0 at equal t0.")
     print(RULE_)
+
+
+def _dt_axis(specs, limit=6):
+    """The ACTUAL executed step-size range of each distinct schedule in `specs`.
+
+    Printed as min-max pairs rather than two independent lists: with a beta sweep the
+    minima and the maxima do not correspond position by position, and two separate lists
+    would invite exactly the wrong reading.
+    """
+    seen, out = set(), []
+    for s in specs:
+        if s.delta_min is None:
+            continue
+        pair = "%.4g-%.4g" % (s.delta_min, s.delta_max)
+        if pair not in seen:
+            seen.add(pair)
+            out.append(pair)
+    if not out:
+        return "-"
+    return ", ".join(out[:limit]) + (" ... (+%d)" % (len(out) - limit)
+                                     if len(out) > limit else "")
 
 
 def _axis(specs, attr, fmt="%s", limit=8):

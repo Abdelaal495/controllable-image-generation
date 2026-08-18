@@ -9,10 +9,18 @@ s = 1 data).  A job starts at
 and performs N receding-horizon replans over [s_start, 1].  With t0 = 1 this is
 s_start = 0, delta = 1/N -- the paper's setting.
 
+TIME DISCRETISATION.  The OUTER execution times now follow this repository's universal
+power-law schedule s_k = s_start + (1 - s_start)(k/N)^beta.  beta = 1 is the uniform grid
+above, bit for bit.  For beta != 1 there is no single delta: every place that needs a step
+size uses the ACTUAL dt_k = s_{k+1} - s_k, including MPC-delta_t's `inverse_delta` lambda
+scaling, which becomes lambda_eff,k = lambda / dt_k.  RHC's INTERNAL K-step planning
+discretisation is deliberately left uniform over the remaining horizon: beta says how often
+the controller replans, K says how finely it plans.
+
 Standard flows (JiT, SiT), explicit Euler as in the paper
     RHC (Alg. 1/3)   x_{k+1} = x_k + h [ v(x_k, s_k) + u_k ],   h = (1-s)/K
                      J(U)    = sum_k h ||u_k||^2 + lambda Phi(x_K)
-                     execute x <- x + delta [ v(x, s) + u_0* ]
+                     execute x <- x + dt_k [ v(x, s) + u_0* ]
     MPC-dt (Alg. 2)  x_{s+dt}(u) = x_s + delta [ v(x_s, s) + u ]
                      V_hat(s, x)  = Phi( x + (1-s) v(x, s) )              <- eq. (9)
                      J(u)         = ||u||^2 + lambda V_hat(s+delta, x_{s+dt}(u))
@@ -43,13 +51,51 @@ import numpy as np
 
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
 from .problems import make_control_cost, make_phi
-from .sdedit import ReconstructionStats, canonical_time_grid
+from .schedule import canonical_time_grid, grid_intervals, spec_beta
+from .sdedit import ReconstructionStats
 from .utils import MEANFLOW, STANDARD_FLOW
 
 
 def mpc_time_grid(spec) -> list:
-    """The N+1 canonical execution times s_start, s_start+delta, ..., 1."""
-    return canonical_time_grid(spec.canonical_start_time, int(spec.num_mpc_steps))
+    """The N+1 canonical OUTER execution times s_start, ..., 1.
+
+    Follows the universal power-law schedule with N = num_mpc_steps:
+
+        s_k = s_start + (1 - s_start) * (k / N)^beta
+
+    beta therefore controls how often the controller replans and how much of the horizon
+    each replan commits to.  It does NOT touch RHC's INTERNAL K-step planning
+    discretisation, which keeps dividing the remaining horizon 1 - s_k into K equal
+    planning intervals -- those two roles are deliberately not confounded.
+    """
+    return canonical_time_grid(spec.canonical_start_time, int(spec.num_mpc_steps),
+                               spec_beta(spec))
+
+
+def mpc_step_sizes(spec) -> list:
+    """The ACTUAL executed step sizes dt_k = s_{k+1} - s_k.
+
+    With beta != 1 there is no single physical delta, so nothing may use `spec.delta` (the
+    nominal uniform spacing t0/N) as a step size.  These are the real values.
+    """
+    return grid_intervals(mpc_time_grid(spec))
+
+
+def inverse_delta_lambda(spec, dt: float) -> float:
+    """lambda for ONE MPC-delta_t step, honouring `delta_t_lambda_scaling`.
+
+    With `inverse_delta` the effective weight is lambda / dt_k, evaluated at the LOCAL step
+    size: on a non-uniform schedule a single global lambda/delta would silently mis-weight
+    every step but one.  When the schedule is uniform and the planner supplied the legacy
+    scalar `spec.delta`, that scalar is used verbatim so beta = 1 reproduces old runs
+    bitwise rather than to within a rounding error.
+    """
+    if spec.delta_t_lambda_scaling != "inverse_delta":
+        return spec.lam
+    legacy = getattr(spec, "delta", None)
+    if legacy is not None and abs(float(legacy) - float(dt)) <= 1e-12:
+        return spec.lam / float(legacy)
+    return spec.lam / float(dt)
 
 
 def _record_loss(stats: ReconstructionStats, loss, spec) -> None:
@@ -150,8 +196,6 @@ def flow_mpc_delta_t(adapter: StandardFlowAdapter, cond: Conditioning, x0, probl
     phi = make_phi(problem, B, spec.phi_normalization)
     ctrl_cost = make_control_cost(B, spec.control_cost_normalization)
     grid = mpc_time_grid(spec)
-    lam_eff = (spec.lam / spec.delta if spec.delta_t_lambda_scaling == "inverse_delta"
-               else spec.lam)
 
     stats = ReconstructionStats()
     t_start = time.perf_counter()
@@ -161,6 +205,9 @@ def flow_mpc_delta_t(adapter: StandardFlowAdapter, cond: Conditioning, x0, probl
     for step in range(int(spec.num_mpc_steps)):
         s, s_next = grid[step], grid[step + 1]
         dt = s_next - s
+        # Step-dependent: on a non-uniform grid lambda/delta is not one number (see
+        # `inverse_delta_lambda`).  With beta = 1 this is the old global value exactly.
+        lam_eff = inverse_delta_lambda(spec, dt)
 
         adapter.reset_counters()
         with torch.no_grad():
@@ -334,8 +381,6 @@ def meanflow_mpc_delta_t(adapter: MeanFlowAdapter, cond: Conditioning, x0, probl
     phi = make_phi(problem, B, spec.phi_normalization)
     ctrl_cost = make_control_cost(B, spec.control_cost_normalization)
     grid = mpc_time_grid(spec)
-    lam_eff = (spec.lam / spec.delta if spec.delta_t_lambda_scaling == "inverse_delta"
-               else spec.lam)
 
     stats = ReconstructionStats()
     t_start = time.perf_counter()
@@ -345,6 +390,7 @@ def meanflow_mpc_delta_t(adapter: MeanFlowAdapter, cond: Conditioning, x0, probl
     for step in range(int(spec.num_mpc_steps)):
         s, s_next = grid[step], grid[step + 1]
         dt = s_next - s
+        lam_eff = inverse_delta_lambda(spec, dt)        # LOCAL dt, never a global delta
 
         # The short nominal transition is independent of u AND is exactly what the execution
         # step applies, so it is computed once and reused for both.
@@ -356,11 +402,12 @@ def meanflow_mpc_delta_t(adapter: MeanFlowAdapter, cond: Conditioning, x0, probl
         at_terminal = s_next >= 1.0 - 1e-9
         init = warm if (spec.warm_start and warm is not None) else jnp.zeros_like(x)
 
-        def loss_fn(u, _nom=nominal_next, _sn=s_next, _terminal=at_terminal, _dt=dt):
+        def loss_fn(u, _nom=nominal_next, _sn=s_next, _terminal=at_terminal, _dt=dt,
+                    _lam=lam_eff):
             x_next = _nom + _dt * u
             # T(x; 1 -> 1) is the identity by construction (t - r = 0), so it is skipped.
             x_terminal = x_next if _terminal else adapter.transition(x_next, _sn, 1.0, cond)
-            return ctrl_cost(u) + lam_eff * phi(
+            return ctrl_cost(u) + _lam * phi(
                 adapter.to_pixels(x_terminal, differentiable=True))
 
         adapter.reset_counters()
@@ -400,3 +447,6 @@ def select_reconstructor(dynamics_family: str, method: str):
     """Deprecated alias for `reconstruction.select_reconstructor`."""
     from .reconstruction import select_reconstructor as _select
     return _select(dynamics_family, method)
+
+
+

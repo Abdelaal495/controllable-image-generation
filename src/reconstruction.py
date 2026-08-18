@@ -8,6 +8,7 @@ signature; each strategy lives in its own module:
     mpc.py      MPC-RHC and MPC-delta_t                  (trajectory control)
     pnp.py      PnP-Flow                                 (gradient / reproject / denoise)
     dflow.py    D-Flow                                   (source-state optimisation)
+    rhso.py     Receding-Horizon State Optimization      (state optimisation + replanning)
 
 Every reconstructor has the same signature (see docs/extending.md):
 
@@ -57,6 +58,7 @@ def _build_registry() -> None:
     from .dflow import flow_dflow, meanflow_dflow
     from .mpc import flow_mpc_delta_t, flow_mpc_rhc, meanflow_mpc_delta_t, meanflow_mpc_rhc
     from .pnp import flow_pnp, meanflow_pnp
+    from .rhso import flow_rhso, meanflow_rhso
     from .sdedit import sdedit_flow, sdedit_meanflow
 
     register_reconstructor(STANDARD_FLOW, "sdedit", _drop_problem(sdedit_flow))
@@ -72,6 +74,9 @@ def _build_registry() -> None:
 
     register_reconstructor(STANDARD_FLOW, "dflow", flow_dflow)
     register_reconstructor(MEANFLOW, "dflow", meanflow_dflow)
+
+    register_reconstructor(STANDARD_FLOW, "rhso", flow_rhso)
+    register_reconstructor(MEANFLOW, "rhso", meanflow_rhso)
 
 
 def _drop_problem(fn):
@@ -106,3 +111,6 @@ def registered_methods() -> Dict[str, Tuple[str, ...]]:
     for family, method in RECONSTRUCTORS:
         out[method] = tuple(sorted(set(out.get(method, ())) | {family}))
     return out
+
+
+

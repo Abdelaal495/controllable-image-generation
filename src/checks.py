@@ -277,21 +277,128 @@ def check_stroke_gradient(problem: InverseProblem,
 
 
 def check_time_grid(plan) -> Tuple[bool, str]:
-    """s_start = 1 - t0, delta = t0/N, and the terminal time is exactly 1."""
+    """s_start = 1 - t0, terminal time exactly 1, strictly increasing, correct spacing.
+
+    This check deliberately no longer asserts that every step equals t0/N.  With the
+    universal power-law schedule that identity holds ONLY at beta = 1, which is exactly
+    what is verified below; for beta != 1 the grid must instead be strictly monotone with
+    intervals that shrink (beta < 1) or grow (beta > 1) towards the clean endpoint, and no
+    scalar `delta` may describe it.
+    """
     from .mpc import mpc_time_grid
+    from .rhso import rhso_time_grid
+    from .schedule import DEFAULT_BETA, grid_intervals, spec_beta
     problems = []
+    counted = 0
     for spec in plan.specs:
-        if not spec.is_mpc:
+        if spec.is_mpc:
+            grid = mpc_time_grid(spec)
+        elif spec.method == "rhso":
+            grid = rhso_time_grid(spec)
+        else:
             continue
-        grid = mpc_time_grid(spec)
+        counted += 1
+        beta = spec_beta(spec)
+        intervals = grid_intervals(grid)
+        tag = spec.job_id[:8]
         if abs(grid[0] - (1.0 - spec.t0)) > 1e-9:
-            problems.append("%s: s_start" % spec.job_id[:8])
+            problems.append("%s: s_start" % tag)
         if abs(grid[-1] - 1.0) > 1e-12:
-            problems.append("%s: terminal" % spec.job_id[:8])
-        if abs((grid[1] - grid[0]) - spec.delta) > 1e-9:
-            problems.append("%s: delta" % spec.job_id[:8])
-    return not problems, ("s_start = 1 - t0, delta = t0/N, terminal time exactly 1 for every "
-                          "MPC job" if not problems else "; ".join(problems[:5]))
+            problems.append("%s: terminal" % tag)
+        if any(dt <= 0.0 for dt in intervals):
+            problems.append("%s: not strictly increasing" % tag)
+        if beta == DEFAULT_BETA:
+            # The legacy identity delta = t0/N, still asserted where it is still true.
+            nominal = getattr(spec, "delta", None)
+            nominal = (spec.t0 / len(intervals)) if nominal is None else float(nominal)
+            if max(abs(dt - nominal) for dt in intervals) > 1e-9:
+                problems.append("%s: beta=1 grid is not uniform at delta=t0/N" % tag)
+        elif len(intervals) > 1:
+            shrinking = all(intervals[i + 1] < intervals[i]
+                            for i in range(len(intervals) - 1))
+            growing = all(intervals[i + 1] > intervals[i]
+                          for i in range(len(intervals) - 1))
+            if beta < DEFAULT_BETA and not shrinking:
+                problems.append("%s: beta<1 must shrink towards s=1" % tag)
+            if beta > DEFAULT_BETA and not growing:
+                problems.append("%s: beta>1 must grow towards s=1" % tag)
+    if not counted:
+        return True, "no scheduled-execution job (MPC / RHSO) in this plan"
+    return not problems, ("%d scheduled job(s): s_start = 1 - t0, terminal time exactly 1, "
+                          "strictly increasing, uniform at delta = t0/N only where beta = 1"
+                          % counted if not problems else "; ".join(problems[:5]))
+
+
+def check_beta_schedule() -> Tuple[bool, str]:
+    """The universal power-law grid itself: validation, endpoints, legacy regression.
+
+    Pure arithmetic, so it runs with no plan, no problem and no checkpoint.
+    """
+    from .schedule import canonical_time_grid, interior_time_grid, resolve_beta
+    notes = []
+
+    for bad in (0.0, -1.0, float("inf"), float("nan"), "x", True):
+        try:
+            resolve_beta(bad)
+            notes.append("beta=%r was accepted" % (bad,))
+        except ValueError:
+            pass
+
+    legacy = [0.0 + (1.0 - 0.0) * (k / 4) for k in range(5)]
+    legacy[-1] = 1.0
+    if canonical_time_grid(0.0, 4, 1.0) != legacy:
+        notes.append("beta=1 does not reproduce the old uniform grid bitwise")
+    if canonical_time_grid(0.2, 5, 1.0) != [0.2 + 0.8 * (k / 5) for k in range(5)] + [1.0]:
+        notes.append("beta=1 deviates from the legacy expression at s0=0.2")
+
+    half = canonical_time_grid(0.0, 4, 0.5)
+    if max(abs(a - b) for a, b in zip(half, [0.0, 0.5, 0.5 ** 0.5, 0.75 ** 0.5, 1.0])) > 1e-12:
+        notes.append("beta=0.5 values are wrong")
+    two = canonical_time_grid(0.0, 4, 2.0)
+    if max(abs(a - b) for a, b in zip(two, [0.0, 0.0625, 0.25, 0.5625, 1.0])) > 1e-12:
+        notes.append("beta=2 values are wrong")
+
+    for beta in (0.4, 0.5, 1.0, 1.5, 2.0, 3.0):
+        grid = canonical_time_grid(0.3, 6, beta)
+        if grid[0] != 0.3 or grid[-1] != 1.0:
+            notes.append("beta=%g endpoints" % beta)
+        if any(grid[i] >= grid[i + 1] for i in range(len(grid) - 1)):
+            notes.append("beta=%g is not strictly increasing" % beta)
+        dts = [grid[i + 1] - grid[i] for i in range(len(grid) - 1)]
+        if beta < 1.0 and not all(dts[i + 1] < dts[i] for i in range(len(dts) - 1)):
+            notes.append("beta=%g should shrink towards s=1" % beta)
+        if beta > 1.0 and not all(dts[i + 1] > dts[i] for i in range(len(dts) - 1)):
+            notes.append("beta=%g should grow towards s=1" % beta)
+        interior = interior_time_grid(0.3, 5, beta)
+        if len(interior) != 5 or not all(0.3 < s < 1.0 for s in interior):
+            notes.append("beta=%g interior grid escaped (s0, 1)" % beta)
+
+    return not notes, ("s_k = s0 + (1-s0)(k/N)^beta: beta > 0 enforced, endpoints exact, "
+                       "strictly increasing, direction correct, PnP's times strictly inside "
+                       "(s0, 1), and beta=1 reproduces the legacy grid bitwise"
+                       if not notes else "; ".join(notes[:5]))
+
+
+def check_delta_t_lambda_scaling(plan) -> Tuple[bool, str]:
+    """MPC-delta_t's inverse-delta scaling must use the LOCAL dt_k, not a global delta."""
+    from .mpc import inverse_delta_lambda, mpc_step_sizes
+    from .schedule import DEFAULT_BETA, spec_beta
+    specs = [s for s in plan.specs
+             if s.method == "mpc_delta_t" and s.delta_t_lambda_scaling == "inverse_delta"]
+    if not specs:
+        return True, "no MPC-delta_t job uses inverse-delta lambda scaling"
+    notes = []
+    for spec in specs:
+        dts = mpc_step_sizes(spec)
+        lams = [inverse_delta_lambda(spec, dt) for dt in dts]
+        if any(abs(lam - spec.lam / dt) > 1e-9 * max(1.0, abs(lam))
+               for lam, dt in zip(lams, dts)):
+            notes.append("%s: lambda_eff != lambda / dt_k" % spec.job_id[:8])
+        if spec_beta(spec) != DEFAULT_BETA and len(set(round(l, 12) for l in lams)) == 1:
+            notes.append("%s: a non-uniform grid produced one global lambda"
+                         % spec.job_id[:8])
+    return not notes, ("%d job(s): lambda_eff,k = lambda / dt_k at the ACTUAL local step "
+                       "size" % len(specs) if not notes else "; ".join(notes[:5]))
 
 
 def check_plan_uniqueness(plan) -> Tuple[bool, str]:
@@ -386,13 +493,14 @@ def check_method_registry(plan) -> Tuple[bool, str]:
 def check_pnp_time_grid(plan) -> Tuple[bool, str]:
     """PnP corrects strictly inside (s0, 1): never at s0, never at s = 1."""
     from .pnp import pnp_step_sizes, pnp_time_grid
+    from .schedule import spec_beta
     specs = [s for s in plan.specs if s.method == "pnp"]
     if not specs:
         return True, "no PnP job in this plan"
     problems_ = []
     for spec in specs:
         s0 = spec.canonical_start_time
-        grid = pnp_time_grid(s0, spec.num_pnp_steps)
+        grid = pnp_time_grid(s0, spec.num_pnp_steps, spec_beta(spec))
         if len(grid) != int(spec.num_pnp_steps):
             problems_.append("%s: %d times for N=%d" % (spec.job_id[:8], len(grid),
                                                         spec.num_pnp_steps))
@@ -523,7 +631,10 @@ def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manage
         print("Structural checks (no checkpoint required). Backends: %s"
               % ", ".join(sorted(backends)))
     report.run("plan", "unique_jobs", lambda: check_plan_uniqueness(plan), verbose)
+    report.run("schedule", "beta_schedule", check_beta_schedule, verbose)
     report.run("plan", "time_grid", lambda: check_time_grid(plan), verbose)
+    report.run("plan", "delta_t_lambda_scaling",
+               lambda: check_delta_t_lambda_scaling(plan), verbose)
     report.run("plan", "pnp_time_grid", lambda: check_pnp_time_grid(plan), verbose)
     report.run("plan", "method_registry", lambda: check_method_registry(plan), verbose)
     report.run("plan", "paired_fairness", lambda: check_paired_fairness(plan), verbose)
@@ -565,8 +676,8 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                      specs: Optional[Sequence] = None) -> CheckReport:
     """Shape, time-convention, initialisation and one-tiny-trajectory checks.
 
-    `methods` lists the methods this model will actually run, so the PnP and D-Flow probes
-    below are skipped entirely for a plan that contains neither -- they cost real model
+    `methods` lists the methods this model will actually run, so the PnP, D-Flow and RHSO
+    probes below are skipped entirely for a plan that contains none of them -- they cost real model
     evaluations (and, for D-Flow, a backward pass) and should not be charged to a run that
     does not use them.  `specs` supplies a real resolved spec per method so the probe uses
     the job's own solver and hyperparameters rather than invented ones.
@@ -761,6 +872,45 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                final * (1.0 / max(1, len(sub_problem.image_ids))), stats.model_evals_total,
                stats.backprops_through_model))
 
+    def rhso_receding_horizon():
+        """RHSO optimises the current state, executes ONE interval, and replans.
+
+        Verified on the real model at the smallest meaningful size: the counters must show
+        M planning evaluations per outer stage plus exactly one execution, and the returned
+        state must be the executed interval of the FINAL post-Adam q.
+        """
+        from .rhso import (rhso_execution_evaluations, rhso_planning_evaluations,
+                           rhso_reconstruct, rhso_time_grid)
+        tiny = _probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2,
+                           record_loss_history=True)
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        state, stats = rhso_reconstruct(adapter, cond, x0, sub_problem, tiny)
+        grid = rhso_time_grid(tiny)
+        expected_planning = sum(2 * rhso_planning_evaluations(adapter, tiny, k, grid)
+                                for k in range(2))
+        expected_execution = sum(rhso_execution_evaluations(adapter, tiny, k, grid)
+                                 for k in range(2))
+        history = list(stats.loss_history)
+        ok = (stats.finite
+              and stats.optimizer_iterations == 2 * 2
+              and stats.objective_evals == 2 * 2
+              and stats.model_evals_planning == expected_planning
+              and stats.backprops_through_model == expected_planning
+              and stats.model_evals_total == expected_planning + expected_execution
+              and len(history) == 4
+              and bool(np.isfinite(adapter.to_pixels(state)).all()))
+        return ok, ("N=2, M=2: %d optimizer iteration(s), %d planning evaluation(s) "
+                    "(predicted %d), %d execution evaluation(s) (predicted %d), loss "
+                    "%.4g -> %.4g" % (stats.optimizer_iterations,
+                                      stats.model_evals_planning, expected_planning,
+                                      stats.model_evals_total - stats.model_evals_planning,
+                                      expected_execution,
+                                      history[0] if history else float("nan"),
+                                      history[-1] if history else float("nan")))
+
     if verbose:
         print("Model checks for %s" % adapter.spec.name.upper())
     report.run(scope, "shapes", shapes, verbose)
@@ -775,6 +925,8 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     if "dflow" in wanted:
         report.run(scope, "dflow_gradient", dflow_gradient, verbose)
         report.run(scope, "dflow_optimisation", dflow_optimisation, verbose)
+    if "rhso" in wanted:
+        report.run(scope, "rhso_receding_horizon", rhso_receding_horizon, verbose)
     for name, fn in adapter.sanity_checks().items():
         report.run(scope, name, lambda f=fn: f(ctx), verbose)
     return report
@@ -793,3 +945,6 @@ def check_shared_initial_state(adapter, problem, specs: Sequence, manager,
     ok = len(set(prints)) == 1
     return ok, ("%d job(s) sharing (model, t0, images) start from a bit-identical z_t0: %s"
                 % (len(specs), prints[0][:12] if ok else sorted(set(prints))))
+
+
+

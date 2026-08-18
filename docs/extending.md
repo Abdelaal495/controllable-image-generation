@@ -4,7 +4,8 @@ The repository is organised so that these three axes are independent:
 
 ```
         a problem instance  ×  a generative model  ×  a reconstruction strategy
-             problems.py            models/          sdedit.py, mpc.py, pnp.py, dflow.py
+             problems.py            models/          sdedit.py, mpc.py, pnp.py, dflow.py,
+                                                     rhso.py
 ```
 
 Anything you add on one axis works with everything already present on the other two,
@@ -33,13 +34,21 @@ def my_strategy(adapter, cond, x0, problem, spec) -> Tuple[Any, ReconstructionSt
     """
 ```
 
-Two rules that keep comparisons fair:
+Three rules that keep comparisons fair:
 
 * **Never re-draw noise or rebuild `x0`.** It arrives already built from the shared
   epsilon. Drawing your own would silently unpair your method from every baseline.
 * **Never touch NumPy inside a differentiable objective.** Use `make_phi(problem, backend,
   normalization)` and `adapter.to_pixels(state, differentiable=True)`. That keeps one
   measurement operator serving both frameworks and both state spaces.
+* **Never write your own time grid.** Call
+  `schedule.canonical_time_grid(spec.canonical_start_time, steps, schedule.spec_beta(spec))`
+  (or `interior_time_grid` if, like PnP, you need times strictly inside the interval). That
+  is the single implementation of the universal power-law schedule
+  `s_k = s0 + (1 − s0)(k/N)^beta`; duplicating `(k/N)^beta` locally is how a method silently
+  stops honouring `beta`. Use the actual `dt_k = s_{k+1} − s_k` everywhere a step size is
+  needed — `t0/N` is only the real step size when `beta = 1`. See
+  [`schedule_and_rhso.md`](schedule_and_rhso.md).
 
 Fill in `ReconstructionStats` honestly — `model_evals_total`, `network_forwards`,
 `backprops_through_model`, `control_iterations`, and, where they apply, `objective_evals`,
@@ -76,6 +85,8 @@ from .my_strategy import my_strategy_flow, my_strategy_meanflow
 register_reconstructor(STANDARD_FLOW, "my_strategy", my_strategy_flow)
 register_reconstructor(MEANFLOW,      "my_strategy", my_strategy_meanflow)
 ```
+
+`rhso.py` is the most recent worked example of all six steps end to end.
 
 (Dispatch used to live in `src/mpc.py`, which made that module the owner of unrelated
 methods. `mpc.py` now declares only MPC's own entries; `src.mpc.select_reconstructor`
@@ -176,3 +187,6 @@ These invariants are what make the numbers comparable. Each is asserted by a che
 If you add a strategy that genuinely cannot honour one of these — a method that needs its
 own noise schedule, say — record the deviation in the result metadata rather than quietly
 letting the comparison drift.
+
+
+

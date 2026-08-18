@@ -47,28 +47,34 @@ import numpy as np
 
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
 from .problems import make_phi, phi_log_scale
+from .schedule import DEFAULT_BETA, interior_time_grid, spec_beta
 from .sdedit import ReconstructionStats, _is_finite
 from .utils import MEANFLOW, STANDARD_FLOW, gaussian_noise, pnp_reprojection_parts
 
 
-def pnp_time_grid(s_start: float, num_steps: int) -> List[float]:
+def pnp_time_grid(s_start: float, num_steps: int,
+                  beta: float = DEFAULT_BETA) -> List[float]:
     """The N correction times, strictly inside (s_start, 1).
 
-        s_k = s0 + [k / (N + 1)] * (1 - s0),      k = 1 .. N
+        s_k = s0 + (1 - s0) * [k / (N + 1)]^beta,      k = 1 .. N
 
     The offset by one interval is deliberate.  Correcting AT s0 would repeat the state the
     initial prior projection already consumed, and correcting AT s = 1 would apply a
     denoiser with a factor (1 - s) = 0, i.e. an identity step that costs a full network
-    evaluation and changes nothing.
+    evaluation and changes nothing.  That property is preserved for EVERY beta: this is the
+    universal power-law grid with N + 1 intervals, with both endpoints removed.
+
+    beta = 1 is the legacy schedule, bit for bit.  It changes WHERE the corrections happen
+    and nothing else -- in particular it is unrelated to `alpha`, which shapes the step
+    sizes gamma_k at those times, and the two are never coupled.
     """
     n = int(num_steps)
     if n < 1:
         raise ValueError("num_pnp_steps must be >= 1, got %r" % (num_steps,))
-    s0 = float(s_start)
-    if not 0.0 <= s0 < 1.0:
+    if not 0.0 <= float(s_start) < 1.0:
         raise ValueError("PnP needs a start time in [0, 1), got %r" % (s_start,))
-    grid = [s0 + (k / float(n + 1)) * (1.0 - s0) for k in range(1, n + 1)]
-    assert all(s0 < s < 1.0 for s in grid)
+    grid = interior_time_grid(s_start, n, beta)
+    assert all(float(s_start) < s < 1.0 for s in grid)
     return grid
 
 
@@ -111,7 +117,7 @@ def flow_pnp(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
     phi = make_phi(problem, B, spec.phi_normalization)
     log_scale = phi_log_scale(problem, spec.phi_normalization)
     s0 = float(spec.canonical_start_time)
-    grid = pnp_time_grid(s0, int(spec.num_pnp_steps))
+    grid = pnp_time_grid(s0, int(spec.num_pnp_steps), spec_beta(spec))
     gammas = pnp_step_sizes(spec, grid)
     M = int(spec.noise_samples or 1)
     image_ids = list(problem.image_ids)
@@ -203,7 +209,7 @@ def meanflow_pnp(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
     phi = make_phi(problem, B, spec.phi_normalization)
     log_scale = phi_log_scale(problem, spec.phi_normalization)
     s0 = float(spec.canonical_start_time)
-    grid = pnp_time_grid(s0, int(spec.num_pnp_steps))
+    grid = pnp_time_grid(s0, int(spec.num_pnp_steps), spec_beta(spec))
     gammas = pnp_step_sizes(spec, grid)
     M = int(spec.noise_samples or 1)
     image_ids = list(problem.image_ids)
@@ -271,3 +277,6 @@ def pnp_reconstruct(adapter: ModelAdapter, cond: Conditioning, x0, problem,
     if spec.dynamics_family == MEANFLOW:
         return meanflow_pnp(adapter, cond, x0, problem, spec)
     raise ValueError("No PnP strategy for dynamics family %r" % spec.dynamics_family)
+
+
+

@@ -7,10 +7,13 @@ A research repository that attempts to explore one question:
 To tackle that inquiry, we adapt multiple different methods to the MeanFlow paradigm, and examine how much a given reconstruction strategy improves the result over an ordinary SDEdit-like strategy, and at what cost. When making comparisons, we use the **same** degraded observation, the **same** generative model, the **same**
 corruption strength `t0` and the **same** sampled generative noise.
 
-The strategies are pluggable. Five ship today: **SDEdit**, **MPC-RHC**, **MPC-Δt**,
-**PnP-Flow** and **D-Flow**. The layout is designed so that adding a sixth is a new function
-plus a registry entry, with every fairness guarantee inherited automatically (see
-[`docs/extending.md`](docs/extending.md)).
+The strategies are pluggable. Six ship today: **SDEdit**, **MPC-RHC**, **MPC-Δt**,
+**PnP-Flow**, **D-Flow** and **RHSO**. The layout is designed so that adding a seventh is a
+new function plus a registry entry, with every fairness guarantee inherited automatically
+(see [`docs/extending.md`](docs/extending.md)).
+
+Every strategy also shares one time-discretisation knob, `beta`
+(see [`docs/schedule_and_rhso.md`](docs/schedule_and_rhso.md)).
 
 PnP-Flow and D-Flow had to be adapted before they could join the comparison — both papers
 initialise in ways that would break the invariant below.
@@ -144,6 +147,32 @@ notebooks' rather than merely numerically close.
   on every such job. The reported reconstruction is the trajectory of the **final** `q`,
   and that extra evaluation is counted.
 
+- **`rhso`** (Receding-Horizon State Optimization, this repository): at each scheduled
+  time it optimises the **current generative state** against its own terminal prediction,
+  executes **one** interval, then throws the problem away and re-optimises from the state it
+  reached. `q` is initialised to the current `x_k` and Adam is **reset at every outer
+  stage**. For a standard flow the terminal planner integrates the remaining suffix
+  `[s_k, …, 1]` of the same grid; for a MeanFlow it is the single learned transition
+  `T(q; s_k → 1)`, which is what makes MeanFlow models cheap here. No control variable, no
+  control penalty, no `λ`, no `K`. It differs from D-Flow, which optimises **one** state and
+  then executes the **whole** trajectory, and from MPC, which optimises explicit controls —
+  see [`docs/schedule_and_rhso.md`](docs/schedule_and_rhso.md).
+
+### Time discretisation: `beta`
+
+Every method above places its times on one shared power-law grid
+
+```
+s_k = s0 + (1 − s0)·(k/N)^beta
+```
+
+`beta < 1` puts more resolution near clean space, `beta = 1` **is** the legacy uniform
+schedule (bitwise), `beta > 1` puts more resolution near the noisy start. It is a shared
+field like `t0`, sweepable, recorded in every row, and it is **not** PnP's `alpha`. For
+MPC-RHC it shapes only the outer replanning grid, never the internal `K`-step planning
+problem. Because a non-uniform trajectory has no single step size, `δ = t0/N` is nominal
+metadata only, and `MPC-Δt`'s `inverse_delta` scaling is now `λ_eff,k = λ/dt_k`.
+
 The MPC terminal objective is always evaluated in canonical pixel space,
 
 ```
@@ -213,11 +242,14 @@ Every sweepable field accepts a scalar or a list; lists expand as a Cartesian pr
 
 | scope | fields |
 |---|---|
-| shared | `t0` |
+| shared | `t0`, `beta` |
 | `sdedit` | `steps`, `solver` |
 | MPC | `num_mpc_steps`, `lam`, `n_ctrl`, `lr`, `optimizer`, `warm_start`, `grad_clip`, `phi_normalization`, `control_cost_normalization` |
 | `mpc_rhc` only | `K` |
 | `mpc_delta_t` only | `delta_t_lambda_scaling` |
+| `pnp` | `num_pnp_steps`, `gamma0`, `alpha`, `noise_samples`, `phi_normalization` |
+| `dflow` | `steps`, `solver`, `num_opt_steps`, `lr`, `optimizer`, `phi_normalization` |
+| `rhso` | `num_rhso_steps`, `num_opt_steps`, `lr`, `optimizer`, `phi_normalization`, `solver` (standard flow only) |
 
 The sweepable set is **closed**: any other list (e.g. `guidance.interval`) is a literal
 value, never a sweep.
@@ -366,8 +398,11 @@ Four further columns distinguish work that used to be one number:
 | `denoiser_samples` | logical prior applications, including PnP's initial projection and each of its `M` realisations |
 
 `backprops_through_model` stays what it always was — backward passes through *generative*
-evaluations. It is **0** for SDEdit, RHC `K=1` and every PnP job, and
-`trajectory × iterations` for D-Flow.
+evaluations. It is **0** for SDEdit, RHC `K=1` and every PnP job,
+`trajectory × iterations` for D-Flow, and `N·M` for MeanFlow RHSO (a shrinking
+suffix-dependent count for standard-flow RHSO). One outer RHSO stage is never reported as
+one model evaluation: MeanFlow RHSO costs `N·(M+1)` evaluations in total, the `+1` per stage
+being the interval actually executed with the final `q*`.
 
 ### GPU memory
 
@@ -443,8 +478,12 @@ model — that jobs differing only by method start from a **bit-identical** `z_t
 
 If the trajectory from `t0` is divided into `N` intervals, `δ = t0/N` changes when `t0`
 changes at fixed `num_mpc_steps`. The planner warns about this, and every result row records
-`t0`, `num_mpc_steps` **and** `delta`. Equal step counts do not mean equal execution
+`t0`, `num_mpc_steps`, `beta` **and** `delta`. Equal step counts do not mean equal execution
 resolution.
+
+With `beta ≠ 1` there is no single `δ` at all: `delta` is nominal uniform spacing only, the
+real values are `dt_k = s_{k+1} − s_k`, and no algorithm may substitute one for the other.
+The job-defining triple is `t0`, `N`, `beta`.
 
 ### Trajectory-discretisation matching
 
@@ -515,19 +554,23 @@ Everything else was preserved; these are the changes, with reasons:
 configs/experiments.yaml   the only file you normally edit
 notebooks/colab_demo.ipynb end-to-end Colab walkthrough
 docs/                      quickstart_cluster.md, troubleshooting.md, extending.md,
-                           methods_pnp_dflow.md (published vs adapted vs extension)
+                           methods_pnp_dflow.md (published vs adapted vs extension),
+                           schedule_and_rhso.md (the beta schedule and RHSO)
 src/
   config.py                registries, validation, sweeps, planner, Table E2 provenance
+                           (beta is a shared field; RHSO is a declared method)
   data.py                  the shared ImageNet pool, stable image ids
   problems.py              ALL six degradations, guides, stroke geometry + renderer, Φ
   models/
     base.py                the one adapter interface, registry, ModelManager
     jit.py  pmf.py  sit.py  imf.py
   reconstruction.py        the neutral (family, method) -> reconstructor registry
+  schedule.py              the ONE power-law time grid s_k = s0 + (1-s0)(k/N)^beta
   sdedit.py                ordinary reconstruction only (no degradation logic)
   mpc.py                   RHC and Δt, both families
   pnp.py                   PnP-Flow, both families
   dflow.py                 D-Flow, both families (its own differentiable trajectory)
+  rhso.py                  Receding-Horizon State Optimization, both families
   memory.py                per-job GPU peak memory, Torch allocator / NVML sampling
   metrics.py               PSNR, SSIM, LPIPS, measurement consistency, masked metrics
   visualization.py         paginated comparison grids, summary plots
@@ -616,5 +659,13 @@ columns in `results.csv`; neither is inside `runtime`.
 - `t0 < 1` is a measurement-informed initialisation and an extension of MPC-Flow, which
   evaluates the pure-noise (`t0 = 1`) setting. Both are available; the initialisation kind
   is recorded in every row.
+- RHSO is this repository's own strategy, not a published method: it has no paper defaults
+  and no tuned hyperparameters, so `num_rhso_steps`, `num_opt_steps` and `lr` are starting
+  values to sweep, recorded as such in every row.
+- The power-law `beta` family is inspired by Flower's time-discretisation ablation; applying
+  it to every strategy here is a generalisation of that idea, not a result from that paper.
 - The curated ImageNet list holds 32 classes. Use `data.source: local_folder` for a larger
   pool (with `labels.json`, or files named `<classid>_<name>.png`).
+
+
+

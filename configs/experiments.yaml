@@ -18,7 +18,7 @@
 # SiT are standard flows and that pMF and iMF are MeanFlows.
 #
 # SWEEPS.  These fields accept a scalar or a list; lists expand as a Cartesian product:
-#   shared      t0
+#   shared      t0, beta
 #   sdedit      steps, solver
 #   mpc         num_mpc_steps, lam, n_ctrl, lr, optimizer, warm_start, grad_clip,
 #               phi_normalization, control_cost_normalization
@@ -26,7 +26,20 @@
 #   mpc_delta_t delta_t_lambda_scaling
 #   pnp         num_pnp_steps, gamma0, alpha, noise_samples, phi_normalization
 #   dflow       steps, solver, num_opt_steps, lr, optimizer, phi_normalization
+#   rhso        num_rhso_steps, num_opt_steps, lr, optimizer, phi_normalization,
+#               solver (standard-flow models only)
 # Any other list (e.g. models.jit.guidance.interval) is a literal value, never a sweep.
+#
+# TIME DISCRETISATION.  Every method places its times on the shared power-law grid
+#
+#     s_k = s0 + (1 - s0) * (k / N)^beta
+#
+# beta < 1 gives more resolution near clean space, beta = 1 IS the legacy uniform schedule
+# (bitwise), beta > 1 more resolution near the noisy start.  It defaults to 1.0, so a config
+# that never mentions it behaves exactly as before.  Suggested sweep: beta: [0.5, 1.0, 2.0].
+# beta is NOT PnP's alpha (which scales gamma_k), and for MPC-RHC it shapes only the outer
+# replanning grid, never the internal K-step planning problem.
+# See docs/schedule_and_rhso.md.
 #
 # Unknown keys are ERRORS, not silent no-ops.  Check the plan first:
 #   python run.py --config configs/experiments.yaml --dry-run
@@ -125,6 +138,11 @@ experiments:
           # the Adam budget.  Cost is roughly steps x solver stages x (num_opt_steps + 1)
           # model evaluations, and the whole trajectory stays in the autograd graph.
           dflow:       {t0: 0.8, steps: 4, num_opt_steps: 10, lr: 0.01}
+          # RHSO: optimise the CURRENT state against its terminal prediction, execute one
+          # scheduled interval, replan.  For a standard flow the inner objective integrates
+          # the remaining suffix [s_k, ..., 1], so cost falls as k grows.  Uncomment to run:
+          # it is fully declared, validated and costed like any other method.
+          # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01, solver: heun}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -134,6 +152,11 @@ experiments:
           # steps: 1 means the single learned map T(q; s0 -> 1) -- one forward and one
           # backward network evaluation per objective, not a one-step Euler approximation.
           dflow:       {t0: 0.8, steps: 4, num_opt_steps: 10, lr: 0.01}
+          # RHSO on a MeanFlow: each inner objective is ONE direct transition T(q; s_k -> 1),
+          # so N*M planning evaluations and N*(M+1) in total.  `solver` is meaningless here
+          # and is rejected.  A beta sweep is cheap and is where this method is interesting:
+          # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01,
+          #               beta: [0.5, 1.0, 2.0]}
 
   # ------------------------------------------------------------------- 2. deblurring
   deblurring:
@@ -301,3 +324,15 @@ experiments:
 # To sweep lambda explicitly rather than inheriting Table E2:
 #
 #   mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, lam: [1.0, 5.0, 10.0], n_ctrl: 20, lr: 0.1}
+#
+# To sweep the time discretisation itself, on ANY method (beta is a shared field like t0):
+#
+#   sdedit: {t0: 0.8, steps: 4, beta: [0.5, 1.0, 2.0]}
+#   rhso:   {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01, beta: [0.5, 1.0, 2.0]}
+#
+# beta = 1 reproduces existing results exactly, so a beta sweep always contains its own
+# control.  Sweeping beta where the trajectory has a single interval (steps: 1) has no
+# mathematical effect and warns.
+
+
+

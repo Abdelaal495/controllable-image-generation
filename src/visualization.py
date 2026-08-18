@@ -5,7 +5,9 @@ Two rules from the brief drive the design:
   * every requested reconstruction is shown -- if a task has more configurations than fit in
     one readable figure, the grid PAGINATES rather than silently dropping the tail;
   * every panel is labelled with the model, the method, t0, K, the MPC step count and
-    lambda, so a figure can never be misattributed.
+    lambda, so a figure can never be misattributed.  `beta` joins that list whenever it
+    differs from the uniform default, so beta-distinct configurations can never be merged
+    into one bar or one legend entry.
 
 Nothing here is a dashboard; they are matplotlib figures written to disk and, in a notebook,
 displayed inline.
@@ -105,7 +107,7 @@ def plot_comparison_grid(experiment: str, model: str, records: Sequence[Dict[str
     plt = _setup()
     if not records:
         return []
-    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2}
+    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4, "rhso": 5}
     records = sorted(records, key=lambda r: (order.get(r.get("method", ""), 9),
                                              r.get("t0", 0.0), r.get("sort_key", "")))
     n_images = min(max_rows, len(problem.ground_truth))
@@ -140,7 +142,20 @@ def plot_comparison_grid(experiment: str, model: str, records: Sequence[Dict[str
 
 
 CONFIG_COLORS = {"sdedit": "#4C72B0", "mpc_rhc": "#DD8452", "mpc_delta_t": "#55A868",
-                 "pnp": "#8172B3", "dflow": "#C44E52"}
+                 "pnp": "#8172B3", "dflow": "#C44E52", "rhso": "#937860"}
+
+
+def _beta_suffix(row: Dict[str, Any]) -> List[str]:
+    """`b=<beta>`, but only when beta is not the uniform default.
+
+    Two configurations that differ only in beta are DIFFERENT configurations and must never
+    share a bar, a colour slot or a legend entry; a run that leaves beta at 1 everywhere
+    gets no extra label clutter.
+    """
+    beta = row.get("beta")
+    if beta is None or float(beta) == 1.0:
+        return []
+    return ["b=%g" % float(beta)]
 
 
 def config_label(row: Dict[str, Any]) -> str:
@@ -161,9 +176,12 @@ def config_label(row: Dict[str, Any]) -> str:
     elif method == "dflow":
         parts = ["D-Flow", "n=%s" % row.get("steps"), "opt=%s" % row.get("num_opt_steps"),
                  "lr=%g" % (row.get("lr") or 0)]
+    elif method == "rhso":
+        parts = ["RHSO", "N=%s" % row.get("num_rhso_steps"),
+                 "opt=%s" % row.get("num_opt_steps"), "lr=%g" % (row.get("lr") or 0)]
     else:
         parts = ["MPC-dt", "N=%s" % row.get("num_mpc_steps"), "lam=%g" % (row.get("lam") or 0)]
-    return " ".join(parts)
+    return " ".join(parts + _beta_suffix(row))
 
 
 def group_label(row: Dict[str, Any]) -> str:
@@ -174,26 +192,33 @@ def group_label(row: Dict[str, Any]) -> str:
     on each bar, and the tables and the paired-delta plot use the full label.
     """
     method = row["method"]
+    suffix = "".join(" " + p for p in _beta_suffix(row))
     if method == "sdedit":
         parts = ["SDEdit", "n=%s" % row.get("steps")]
         if row.get("solver"):
             parts.append(str(row["solver"]))
-        return " ".join(parts)
+        return " ".join(parts) + suffix
     if method == "mpc_rhc":
-        return "RHC K=%s N=%s" % (row.get("K"), row.get("num_mpc_steps"))
+        return "RHC K=%s N=%s%s" % (row.get("K"), row.get("num_mpc_steps"), suffix)
     if method == "pnp":
         # gamma0/alpha play the role lambda plays for MPC (they scale the data term), so
         # they are dropped here for the same reason and annotated on the bar instead.
-        return "PnP N=%s%s" % (row.get("num_pnp_steps"),
-                               "" if (row.get("noise_samples") or 1) == 1
-                               else " M=%s" % row.get("noise_samples"))
+        return "PnP N=%s%s%s" % (row.get("num_pnp_steps"),
+                                 "" if (row.get("noise_samples") or 1) == 1
+                                 else " M=%s" % row.get("noise_samples"), suffix)
     if method == "dflow":
-        return "D-Flow n=%s opt=%s" % (row.get("steps"), row.get("num_opt_steps"))
-    return "MPC-dt N=%s" % row.get("num_mpc_steps")
+        return "D-Flow n=%s opt=%s%s" % (row.get("steps"), row.get("num_opt_steps"), suffix)
+    if method == "rhso":
+        # beta is NOT dropped here: it changes the executed trajectory, unlike lambda, which
+        # only reweights an objective.
+        return "RHSO N=%s opt=%s%s" % (row.get("num_rhso_steps"),
+                                       row.get("num_opt_steps"), suffix)
+    return "MPC-dt N=%s%s" % (row.get("num_mpc_steps"), suffix)
 
 
 def _method_rank(method: str) -> int:
-    return {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4}.get(method, 9)
+    return {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4,
+            "rhso": 5}.get(method, 9)
 
 
 def _shade(base_hex: str, index: int, total: int):
@@ -331,7 +356,11 @@ def step_matched_baseline(row: Dict[str, Any],
     if not pool:
         return None
     target = row.get("num_mpc_steps") or row.get("reconstruction_steps") or 1
+    # Among equally step-matched candidates, prefer the SDEdit job on the SAME time
+    # schedule: beta does not break the pairing invariant (same problem, model, t0 and
+    # epsilon), but comparing like with like is still the better default.
     return min(pool, key=lambda c: (abs((c.get("reconstruction_steps") or 0) - target),
+                                    (c.get("beta") != row.get("beta")),
                                     c.get("reconstruction_steps") or 0))
 
 
@@ -432,7 +461,7 @@ def plot_quality_vs_cost(rows: Sequence[Dict[str, Any]], path: Path,
     if not usable:
         return None
     markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D",
-               "dflow": "P"}
+               "dflow": "P", "rhso": "*"}
     colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -478,7 +507,8 @@ def plot_quality_vs_memory(rows: Sequence[Dict[str, Any]], path: Path,
             and r.get("gpu_incremental_peak_gib") is not None]
     if not rows:
         return None
-    markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D", "dflow": "P"}
+    markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D", "dflow": "P",
+               "rhso": "*"}
     colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
     batches = sorted({r.get("batch_size") for r in rows if r.get("batch_size")})
 
@@ -535,3 +565,6 @@ def plot_stroke_parity(reference: np.ndarray, rendered: np.ndarray, truth: np.nd
     fig.suptitle("Stroke operator parity", fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return _finish(fig, path, show)
+
+
+
