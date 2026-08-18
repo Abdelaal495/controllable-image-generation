@@ -124,7 +124,7 @@ experiments:
           # D-Flow: `steps` is the trajectory it differentiates through, `num_opt_steps`
           # the Adam budget.  Cost is roughly steps x solver stages x (num_opt_steps + 1)
           # model evaluations, and the whole trajectory stays in the autograd graph.
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -152,7 +152,7 @@ experiments:
           # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -179,7 +179,7 @@ experiments:
           # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -207,7 +207,7 @@ experiments:
           # m_b counts only the OBSERVED entries here, so the fidelity scale of an
           # inpainting task is comparable with a denoising one.
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -230,7 +230,7 @@ experiments:
           # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -260,7 +260,7 @@ experiments:
           # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
-          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
