@@ -1,7 +1,12 @@
-# Running on Alliance (Compute Canada) clusters
+# Running Controllable Image Generation for Inverse Problems on Alliance clusters
 
 Tested on **Narval**; the same procedure applies to **Nibi** and **Rorqual**, and to any
-other Alliance cluster with the same software stack.
+other Digital Research Alliance of Canada cluster with the same software stack.
+
+This repository benchmarks several reconstruction/control strategies — **SDEdit, MPC-RHC,
+MPC-Δt, PnP-Flow, and D-Flow** — across standard Flow Matching and MeanFlow models. The
+cluster workflow is therefore described here in method-neutral terms rather than as an
+"MPC-Flow" workflow.
 
 Two parts: [first-time setup](#part-1--first-time-setup) (once per cluster, ~30 minutes)
 and [everyday use](#part-2--everyday-use) (once set up).
@@ -9,13 +14,23 @@ and [everyday use](#part-2--everyday-use) (once set up).
 Replace `<user>` with your Alliance username and `<account>` with your allocation
 (`def-…`, `rrg-…` or `ctb-…`) throughout.
 
+> **Compatibility note.** Some shell scripts still use legacy internal environment-variable
+> names beginning with `MPCFLOW_`. Those names are part of the current script interface, so this
+> guide leaves them intact where they are technically required. They should be read as legacy
+> implementation identifiers, not as a description of the repository's present scope.
+>
+> This guide uses the neutral storage root
+> `$SCRATCH/controllable-image-generation` and the virtualenv
+> `~/controllable-image-generation-env`. The setup commands below explicitly pass those paths,
+> so they remain consistent with the existing scripts.
+
 ---
 
 ## The one fact that explains everything
 
 **Compute nodes have no internet access.** Login nodes do.
 
-```
+```text
   login node                        compute node
   narval1, narval2, …               ng10202, ng30604, …
   internet   YES                    internet   NO
@@ -52,11 +67,11 @@ diskusage_report
 regenerable, so they belong on `$SCRATCH`.
 
 ```bash
-mkdir -p $SCRATCH/mpcflow
-cd $SCRATCH/mpcflow
+mkdir -p "$SCRATCH/controllable-image-generation"
+cd "$SCRATCH/controllable-image-generation"
 git clone <your-repo-url> repo
 cd repo
-pwd        # $SCRATCH/mpcflow/repo
+pwd        # $SCRATCH/controllable-image-generation/repo
 ```
 
 > `$SCRATCH` is **purged** after ~60 days without access. Copy finished runs to
@@ -94,29 +109,39 @@ If `arrow/25.0.0` does not exist, run `module spider arrow` and pick an availabl
 
 ## 1.5 Build the environment and stage every asset
 
+Set neutral cache/output paths, then run the repository's setup script:
+
 ```bash
-bash setup_cluster.sh
+export MPCFLOW_CACHE_ROOT="$SCRATCH/controllable-image-generation/cache"
+export MPCFLOW_OUTPUT_ROOT="$SCRATCH/controllable-image-generation/outputs"
+
+bash setup_cluster.sh --venv "$HOME/controllable-image-generation-env"
 ```
 
-This builds a virtualenv from Alliance wheels (`pip install --no-index`, so torch and JAX
-link against the cluster's own CUDA), installs the rest from PyPI, then downloads
-everything the config needs. Expect **15–25 minutes**, mostly the ~2 GB of checkpoints.
+`MPCFLOW_CACHE_ROOT` and `MPCFLOW_OUTPUT_ROOT` are the current legacy environment-variable
+names expected by the scripts; the actual paths above are method-neutral.
+
+The setup script builds a virtualenv from Alliance wheels (`pip install --no-index`, so
+PyTorch and JAX link against the cluster's own CUDA), installs the remaining dependencies
+from PyPI, then downloads everything required by the current experiment configuration.
+Expect **15–25 minutes**, mostly checkpoint transfer.
 
 It also writes two files for you:
 
-* `activate_cluster.sh` — modules + venv + all environment variables. Job scripts source it.
-* `cluster.env` — your account and GPU type. Gitignored, so `git pull` never conflicts.
+* `activate_cluster.sh` — modules + venv + environment variables. Job scripts source it.
+* `cluster.env` — allocation/GPU/submission defaults. It is gitignored, so `git pull` does
+  not conflict with local cluster settings.
 
 **Verify before submitting anything.** A failure here is fixable; the same failure inside a
 job wastes an allocation:
 
 ```bash
-python -c "import json; r=json.load(open('$SCRATCH/mpcflow/cache/prefetch_report.json')); \
+python -c "import json; r=json.load(open('$SCRATCH/controllable-image-generation/cache/prefetch_report.json')); \
 print('models:', {k: v['status'] for k, v in r['models'].items()}); \
 print('data:  ', r['data']); print('lpips: ', r['lpips'])"
 ```
 
-You want every model `ok`, a `data` entry with a `count`, and `lpips: ok`.
+You want every requested model `ok`, a `data` entry with a `count`, and `lpips: ok`.
 
 ## 1.6 Confirm the GPU stack
 
@@ -130,7 +155,7 @@ salloc --account=<account> --gpus-per-node=a100:1 --cpus-per-task=8 --mem=48G --
 (`a100:1` on Narval; `h100:1` on Nibi and Rorqual.) Then:
 
 ```bash
-cd $SCRATCH/mpcflow/repo
+cd "$SCRATCH/controllable-image-generation/repo"
 source activate_cluster.sh
 
 python -c "import torch; print('torch cuda:', torch.cuda.is_available())"
@@ -158,10 +183,15 @@ python run.py --config configs/experiments.yaml --num-images 1 --experiments den
 exit
 ```
 
-The header should read `Accelerator : gpu (…)` and `Environment : slurm_compute [narval] |
-offline=True`. You want `ok=8 failed=0 skipped=0` and LPIPS as a number, not `n/a`.
+The header should report a GPU accelerator and a SLURM compute-node environment with
+`offline=True`. Check that the structural/model checks complete successfully and that LPIPS
+is reported as a number rather than `n/a`.
 
-Setup is now complete and never needs repeating.
+Because the repository now contains five reconstruction strategies, the exact number of
+individual checks/jobs may differ from older MPC-only documentation. Treat the resolved
+`--dry-run` plan as the source of truth.
+
+Setup is now complete and normally does not need repeating.
 
 ---
 
@@ -174,25 +204,34 @@ not need an interactive session, and you can close your laptop afterwards.
 
 ```bash
 ssh <user>@narval.alliancecan.ca
-cd $SCRATCH/mpcflow/repo
+cd "$SCRATCH/controllable-image-generation/repo"
 source activate_cluster.sh
 ```
 
 ## 2.2 Edit the experiment
 
-`configs/experiments.yaml` is the only file you normally touch. Check the size of any change
-before spending GPU time:
+`configs/experiments.yaml` is the main file you normally edit. It controls the participating
+models, inverse problems, methods, and method-specific hyperparameter sweeps.
+
+Check the resolved workload before spending GPU time:
 
 ```bash
 python run.py --config configs/experiments.yaml --dry-run
 ```
 
+This is especially important now that lists may sweep parameters for SDEdit, MPC, PnP-Flow,
+and D-Flow and expand as a Cartesian product.
+
 ## 2.3 Stage anything new
 
-Only needed when you increase `num_images` or add a model. It is a no-op otherwise:
+Only needed when the current configuration requests an asset that has not already been
+staged — for example, more ImageNet examples or an additional model:
 
 ```bash
-python run.py --config configs/experiments.yaml --cache-root $SCRATCH/mpcflow/cache --prefetch
+python run.py \
+  --config configs/experiments.yaml \
+  --cache-root "$SCRATCH/controllable-image-generation/cache" \
+  --prefetch
 ```
 
 An image pool of N covers every run of N or fewer, so stage the largest you intend to use.
@@ -202,12 +241,14 @@ An image pool of N covers every run of N or fewer, so stage the largest you inte
 ```bash
 bash submit.sh --dry-run        # print the sbatch command, submit nothing
 bash submit.sh                  # one GPU, whole config
-bash submit.sh --array 8        # 8 GPUs in parallel
+bash submit.sh --array 8        # 8 shards in parallel
 ```
 
-`submit.sh` reads `cluster.env` and passes the account, GPU type and shard count as sbatch
+`submit.sh` reads `cluster.env` and passes the account, GPU type and shard count as `sbatch`
 flags, which override the `#SBATCH` defaults — so **no tracked file is ever edited** and
-`git pull` never conflicts. Override anything for one submission:
+`git pull` never conflicts.
+
+Override resources for one submission when needed:
 
 ```bash
 bash submit.sh --time 6:00:00 --mem 96G
@@ -215,61 +256,101 @@ bash submit.sh --array 16 --time 1:00:00
 ```
 
 GPU type is auto-detected (`narval` → `a100:1`, `nibi`/`rorqual` → `h100:1`), and the
-account from `~/projects` when you have exactly one.
+allocation is auto-detected from `~/projects` when you have exactly one.
+
+If auto-detection cannot identify your allocation, either pass it explicitly:
+
+```bash
+bash submit.sh --account <account>
+```
+
+or set the legacy variable expected by the current submission script in `cluster.env`:
+
+```bash
+echo 'MPCFLOW_ACCOUNT=<account>' >> cluster.env
+```
 
 ## 2.5 Watch it
 
 ```bash
-squeue -u $USER                          # PD = pending, R = running, empty = done
-tail -f logs/mpcflow-<JOBID>.out         # Ctrl+C stops watching, not the job
-tail -f logs/mpcflow-<JOBID>.err
-grep "\->" logs/mpcflow-<JOBID>.out      # just the per-job results
+squeue -u "$USER"                         # PD = pending, R = running, empty = done
+tail -f logs/*<JOBID>*.out               # Ctrl+C stops watching, not the job
+tail -f logs/*<JOBID>*.err
+grep "\->" logs/*<JOBID>*.out            # concise per-job result lines, when present
 sacct -j <JOBID> --format=JobID,State,Elapsed,MaxRSS
 scancel <JOBID>
 ```
 
-The log file does not exist until the job starts. The first thing a job does is copy the
-~2 GB cache to node-local NVMe (`staging cache -> …`); that is a single silent `cp` and
-takes 1–4 minutes. Confirm progress with
-`du -sh $SLURM_TMPDIR/cache` from another shell.
+The wildcard form deliberately avoids depending on the current legacy SLURM log prefix.
 
-Milestones, in order: plan → structural checks → first model loads → its jobs → released →
-next model → summary tables → figures.
+The log file does not exist until the job starts. The first thing a job may do is copy the
+cache to node-local NVMe (`staging cache -> …`); that is a single silent `cp` and can take a
+few minutes. Confirm progress with:
+
+```bash
+du -sh "$SLURM_TMPDIR/cache"
+```
+
+from another shell on the allocated node.
+
+Typical milestones are: plan → structural checks → first model loads → its reconstruction
+jobs → model release → next model → summary tables → figures.
+
+Depending on the configuration, the job list can now include SDEdit, MPC-RHC, MPC-Δt,
+PnP-Flow, and D-Flow.
 
 ## 2.6 Collect results
 
 ```bash
-ls $SCRATCH/mpcflow/outputs/run_<JOBID>/
+ls "$SCRATCH/controllable-image-generation/outputs/run_<JOBID>/"
 ```
 
-If you used `--array`, merge the shards first (login node, seconds, no GPU):
+If you used `--array`, merge the shards first on a login node (seconds, no GPU):
 
 ```bash
-python run.py --config configs/experiments.yaml --run-id run_<ARRAY_JOB_ID> --aggregate
+python run.py \
+  --config configs/experiments.yaml \
+  --run-id run_<ARRAY_JOB_ID> \
+  --aggregate
 ```
 
-`<ARRAY_JOB_ID>` is the `%A` number shared by all tasks, visible in the log filenames
-`logs/mpcflow-<A>_<a>.out`.
+`<ARRAY_JOB_ID>` is the `%A` number shared by all tasks. You can find the matching files with:
 
-Preserve before `$SCRATCH` is purged:
+```bash
+ls logs/*<ARRAY_JOB_ID>*
+```
+
+Preserve important runs before `$SCRATCH` is purged:
 
 ```bash
 mkdir -p ~/projects/<account>/$USER/results
-cp -r $SCRATCH/mpcflow/outputs/run_<JOBID> ~/projects/<account>/$USER/results/
+cp -r "$SCRATCH/controllable-image-generation/outputs/run_<JOBID>" \
+      ~/projects/<account>/$USER/results/
 ```
 
 ## 2.7 View figures
 
 **Browser (no copying).** Alliance runs JupyterHub, e.g.
 <https://jupyterhub.narval.alliancecan.ca>. Log in, request a small CPU-only session, then
-browse to `scratch/mpcflow/outputs/` and click any PNG.
+browse to:
+
+```text
+scratch/controllable-image-generation/outputs/
+```
+
+and open the generated PNGs.
+
+The repository may produce comparison grids, method summaries, quality-vs-cost plots, and
+quality-vs-memory plots depending on the completed jobs.
 
 **Copy to your machine.** Tar first — one transfer beats hundreds of small files:
 
 ```bash
 # on the cluster
-cd $SCRATCH/mpcflow/outputs && tar czf ~/run_<JOBID>.tar.gz run_<JOBID>
+cd "$SCRATCH/controllable-image-generation/outputs"
+tar czf ~/run_<JOBID>.tar.gz run_<JOBID>
 ```
+
 ```bash
 # on your machine
 scp <user>@narval.alliancecan.ca:~/run_<JOBID>.tar.gz .
@@ -283,17 +364,17 @@ scp <user>@narval.alliancecan.ca:~/run_<JOBID>.tar.gz .
 ```
 
 **Globus** (<https://www.globus.org>, collection `computecanada#narval`) is better for large
-transfers; it resumes on failure.
+transfers because it resumes interrupted copies.
 
 ---
 
-## Optional: skip the Duo prompt with an SSH key
+## Optional: skip repeated Duo prompts with an SSH key
 
-Every `scp` otherwise costs a password plus a Duo passcode. A CCDB-registered key satisfies
+Every `scp` otherwise costs a password plus a Duo passcode. A CCDB-registered key can satisfy
 the MFA requirement on its own.
 
 ```bash
-ssh-keygen -t ed25519 -C "alliance" -f ~/.ssh/id_ed25519    # -f avoids a misplaced key
+ssh-keygen -t ed25519 -C "alliance" -f ~/.ssh/id_ed25519
 cat ~/.ssh/id_ed25519.pub
 ```
 
@@ -307,21 +388,25 @@ Get-Content $HOME\.ssh\id_ed25519.pub
 Paste the public key at <https://ccdb.alliancecan.ca/ssh_authorized_keys>. It propagates in
 a few minutes.
 
-How it works: the pair is mathematically linked. CCDB copies the **public** key to
-`~/.ssh/authorized_keys` on every cluster. On connect, the server sends a fresh random
-challenge; your client signs it with the **private** key; the server verifies the signature
-against the public key. The private key is never transmitted — the server only ever sees
-signatures over random challenges, which only the matching private key could produce. That
-is strictly stronger than a password, which is why it is accepted in place of Duo.
+The public/private key pair is mathematically linked. CCDB copies the **public** key to
+`~/.ssh/authorized_keys` on the clusters. On connection, the server asks the client to sign
+a fresh challenge; the signature is verified against the public key. The private key is
+never transmitted.
 
-Only ever share the `.pub` file. If you set a passphrase, load it once per session:
+Only ever share the `.pub` file. If you set a passphrase, load the key once per session:
 
 ```powershell
-Start-Service ssh-agent; ssh-add $HOME\.ssh\id_ed25519
+Start-Service ssh-agent
+ssh-add $HOME\.ssh\id_ed25519
 ```
 
-Verify: `ssh -v <user>@narval.alliancecan.ca 2>&1 | grep -i "Authenticated"` should mention
-`publickey`.
+Verify with:
+
+```bash
+ssh -v <user>@narval.alliancecan.ca 2>&1 | grep -i "Authenticated"
+```
+
+and confirm that authentication mentions `publickey`.
 
 ---
 
@@ -329,11 +414,11 @@ Verify: `ssh -v <user>@narval.alliancecan.ca 2>&1 | grep -i "Authenticated"` sho
 
 | Path | Contents |
 |---|---|
-| `$SCRATCH/mpcflow/repo` | the repository |
-| `$SCRATCH/mpcflow/cache` | checkpoints, model repos, images, JAX compile cache |
-| `$SCRATCH/mpcflow/outputs` | run directories |
-| `$SCRATCH/mpcflow/repo/logs` | SLURM logs |
-| `~/mpcflow-env` | virtualenv |
+| `$SCRATCH/controllable-image-generation/repo` | repository checkout |
+| `$SCRATCH/controllable-image-generation/cache` | checkpoints, model repositories, images, JAX compilation cache |
+| `$SCRATCH/controllable-image-generation/outputs` | run directories |
+| `$SCRATCH/controllable-image-generation/repo/logs` | SLURM logs |
+| `~/controllable-image-generation-env` | virtualenv |
 
 | Task | Command |
 |---|---|
@@ -345,5 +430,13 @@ Verify: `ssh -v <user>@narval.alliancecan.ca 2>&1 | grep -i "Authenticated"` sho
 | Queue | `squeue -u $USER` |
 | Cancel | `scancel <JOBID>` |
 
-Anything unexpected: see [`troubleshooting.md`](troubleshooting.md), which lists every
-failure encountered while bringing this up on Narval, with its cause and fix.
+### Legacy script identifiers
+
+The current shell layer still uses several `MPCFLOW_*` variables internally, including
+`MPCFLOW_CACHE_ROOT`, `MPCFLOW_OUTPUT_ROOT`, `MPCFLOW_ACCOUNT`, and `MPCFLOW_CONFIG`.
+They are retained for backward compatibility. Renaming those variables properly requires a
+coordinated update to `setup_cluster.sh`, `submit.sh`, the SLURM scripts, `cluster.env.example`,
+and the relevant environment-detection code — not a documentation-only change.
+
+Anything unexpected: see [`troubleshooting.md`](troubleshooting.md), which records the
+cluster/environment failures encountered while bringing this repository up and their fixes.
