@@ -69,7 +69,7 @@ regenerable, so they belong on `$SCRATCH`.
 ```bash
 mkdir -p "$SCRATCH/controllable-image-generation"
 cd "$SCRATCH/controllable-image-generation"
-git clone <your-repo-url> repo
+git clone https://github.com/Abdelaal495/controllable-image-generation repo
 cd repo
 pwd        # $SCRATCH/controllable-image-generation/repo
 ```
