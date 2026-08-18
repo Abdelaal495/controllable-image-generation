@@ -115,8 +115,8 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           # PnP-Flow: N corrections AFTER one initial prior projection.  gamma0 and alpha
           # have no published value for this checkpoint -- sweep them before concluding
           # anything; results.csv records `repository_default_untuned` until you do.
@@ -128,8 +128,8 @@ experiments:
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
           pnp:         {t0: 0.8, num_pnp_steps: 5, gamma0: 1.0, alpha: 1.0}
           # steps: 1 means the single learned map T(q; s0 -> 1) -- one forward and one
           # backward network evaluation per objective, not a one-step Euler approximation.
@@ -149,13 +149,17 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
 
   # ------------------------------------------------------------------- 3. super-resolution
   # A is a REAL low-resolution measurement operator (keep every second pixel), so y is
@@ -172,13 +176,17 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
 
   # ------------------------------------------------------------------- 4. box inpainting
   # The guide is the zero-filled masked observation.  No Telea / Navier-Stokes / RePaint
@@ -194,8 +202,8 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
           # m_b counts only the OBSERVED entries here, so the fidelity scale of an
           # inpainting task is comparable with a denoising one.
           pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
@@ -203,9 +211,10 @@ experiments:
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
-
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
   # ------------------------------------------------------------------- 5. random inpainting
   random_inpainting:
     enabled: true
@@ -218,13 +227,17 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
           mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
           mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
 
   # ------------------------------------------------------------------- 6. stroke painting
   # The SLIC stroke geometry is extracted from the source image with the original SDEdit
@@ -244,13 +257,17 @@ experiments:
       jit:
         methods:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
-          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
-          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          # mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
+          # mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
 
 # =====================================================================================
 # Enabling SiT / iMF, and larger sweeps
