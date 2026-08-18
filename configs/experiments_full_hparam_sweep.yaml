@@ -1,0 +1,334 @@
+# =====================================================================================
+# Full overnight hyperparameter sweep -- all five methods, t0 = 1
+# =====================================================================================
+#
+# Goal:
+#   Tune the method-specific guidance/control hyperparameters from a pure-prior start.
+#   Every method uses t0 = 1.0, so there is no measurement-informed content in the shared
+#   initialization; successful reconstruction must come from the reconstruction strategy.
+#
+# Methods:
+#   SDEdit | MPC-RHC | MPC-delta_t | PnP-Flow | D-Flow
+#
+# Models:
+#   JiT (standard Flow Matching, PyTorch)
+#   pMF (MeanFlow, JAX)
+#
+# Sweep sizes PER task/model:
+#
+#   SDEdit        1 configuration
+#   MPC-RHC       3 K x 3 n_ctrl x 3 lambda       = 27
+#   MPC-delta_t   3 delta values x 3 lambda       =  9
+#   PnP-Flow      5 N x 2 gamma0                  = 10
+#   D-Flow        3 trajectory steps x 3 opt steps = 9
+#                                                    --
+#                                                    56
+#
+# Six tasks x two models x 56 = 672 atomic jobs.
+#
+# `delta` is not a literal config field in this repository.  For MPC-delta_t the canonical
+# interval is delta = t0 / num_mpc_steps.  Because t0 = 1 here, sweeping
+# `num_mpc_steps = [2,4,8]` means delta = [0.5,0.25,0.125], etc.  The comments below state
+# the corresponding delta values explicitly.
+#
+# This intentionally exceeds the repository's old 256-job guard, so max_atomic_jobs is
+# raised to 1024.  Always run --dry-run before submitting.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 1024
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 2
+  pmf:
+    batch_size: 2
+
+# Preserve the repository's method-specific fidelity defaults:
+#   MPC        -> half_sum_squared
+#   PnP/D-Flow -> half_mean_squared_per_measurement
+#
+# No gradient clipping in this iteration.
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+# =====================================================================================
+# Hyperparameter rationale
+# =====================================================================================
+#
+# MPC-RHC
+# -------
+# JiT:
+#   K      = [1, 3, 5]
+#       K=1 is the cheap/no-generative-backprop edge case; K=3 is the paper-supported
+#       nontrivial horizon; K=5 tests whether a deeper look-ahead helps enough to justify cost.
+#   n_ctrl = [5, 20, 50]
+#       coarse / standard-ish / strongly optimized control budgets.
+#
+# pMF:
+#   K      = [1, 2, 3]
+#       MeanFlow transitions are learned finite-interval maps; keeping the longest horizon
+#       at 3 avoids turning the sweep into an extreme chain of expensive learned transitions.
+#   n_ctrl = [5, 15, 30]
+#       broad enough to expose optimization-budget sensitivity without making every pMF
+#       RHC point prohibitively expensive.
+#
+# Both:
+#   lambda = [0.5, 5.0, 15.0]
+#       low / medium / high data-fidelity pressure on the legacy MPC half-sum-squared scale.
+#
+# MPC-delta_t
+# -----------
+# JiT:
+#   num_mpc_steps = [2, 4, 8] -> delta = [0.5, 0.25, 0.125]
+# pMF:
+#   num_mpc_steps = [1, 2, 4] -> delta = [1.0, 0.5, 0.25]
+#       pMF can directly learn a long finite-interval transition, so delta=1 is meaningful.
+# Both:
+#   lambda = [0.5, 5.0, 15.0]
+#
+# PnP-Flow
+# --------
+# JiT:
+#   N = [10, 25, 50, 100, 200]
+# pMF:
+#   N = [5, 10, 20, 50, 100]
+#       pMF gets a slightly smaller grid because each correction invokes a learned
+#       finite-interval transition; the sweep still spans a 20x range.
+#
+# Both:
+#   gamma0 = [10000, 50000]
+#       The PnP fidelity is F = (1/(2m)) ||A(x)-y||^2, so its raw pixel gradient carries
+#       a 1/m factor.  For a 256x256x3 measurement, these correspond roughly to an initial
+#       identity-problem correction coefficient gamma0/m of about 0.05 and 0.25.
+#   alpha = 1.0 and noise_samples = 1 are held fixed to isolate N and gamma0.
+#
+# D-Flow
+# ------
+# Both:
+#   trajectory steps = [1, 2, 4]
+#   Adam opt steps   = [5, 10, 20]
+#   lr               = 0.01
+#
+# For pMF, steps=1 is the central experiment: one direct learned T(q;0->1) transition.
+# steps=2/4 test whether composing shorter MeanFlow transitions improves the differentiable
+# map.  For JiT, [1,2,4] tests increasingly resolved differentiable ODE trajectories.
+# =====================================================================================
+
+experiments:
+
+  # ------------------------------------------------------------------- 1. denoising
+  denoising:
+    enabled: true
+    problem: denoising
+    num_images: 2
+    degradation:
+      sigma: 0.20
+    models:
+      jit:
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 25
+            solver: heun
+          mpc_rhc:
+            t0: 1.0
+            num_mpc_steps: 4
+            K: [1, 3, 5]
+            n_ctrl: [5, 20, 50]
+            lam: [0.5, 5.0, 15.0]
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: [2, 4, 8]       # delta = [0.5, 0.25, 0.125]
+            lam: [0.5, 5.0, 15.0]
+          pnp:
+            t0: 1.0
+            num_pnp_steps: [10, 25, 50, 100, 200]
+            gamma0: [10000.0, 50000.0]
+            alpha: 1.0
+            noise_samples: 1
+          dflow:
+            t0: 1.0
+            steps: [1, 2, 4]
+            solver: heun
+            num_opt_steps: [5, 10, 20]
+            lr: 0.01
+            optimizer: adam
+
+      pmf:
+        methods:
+          sdedit:
+            t0: 1.0
+            steps: 1
+          mpc_rhc:
+            t0: 1.0
+            num_mpc_steps: 2
+            K: [1, 2, 3]
+            n_ctrl: [5, 15, 30]
+            lam: [0.5, 5.0, 15.0]
+          mpc_delta_t:
+            t0: 1.0
+            num_mpc_steps: [1, 2, 4]       # delta = [1.0, 0.5, 0.25]
+            lam: [0.5, 5.0, 15.0]
+          pnp:
+            t0: 1.0
+            num_pnp_steps: [5, 10, 20, 50, 100]
+            gamma0: [10000.0, 50000.0]
+            alpha: 1.0
+            noise_samples: 1
+          dflow:
+            t0: 1.0
+            steps: [1, 2, 4]
+            num_opt_steps: [5, 10, 20]
+            lr: 0.01
+            optimizer: adam
+
+  # ------------------------------------------------------------------- 2. deblurring
+  deblurring:
+    enabled: true
+    problem: deblur
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 3, 5], n_ctrl: [5, 20, 50], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [2, 4, 8], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 25, 50, 100, 200], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], solver: heun, num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+      pmf:
+        methods:
+          sdedit:      {t0: 1.0, steps: 1}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 2, K: [1, 2, 3], n_ctrl: [5, 15, 30], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [1, 2, 4], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [5, 10, 20, 50, 100], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+
+  # ------------------------------------------------------------------- 3. super-resolution
+  super_resolution:
+    enabled: true
+    problem: super_resolution
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      factor: 2
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 3, 5], n_ctrl: [5, 20, 50], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [2, 4, 8], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 25, 50, 100, 200], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], solver: heun, num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+      pmf:
+        methods:
+          sdedit:      {t0: 1.0, steps: 1}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 2, K: [1, 2, 3], n_ctrl: [5, 15, 30], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [1, 2, 4], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [5, 10, 20, 50, 100], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+
+  # ------------------------------------------------------------------- 4. box inpainting
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 2
+    degradation:
+      sigma: 0.05
+      box: 40
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 3, 5], n_ctrl: [5, 20, 50], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [2, 4, 8], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 25, 50, 100, 200], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], solver: heun, num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+      pmf:
+        methods:
+          sdedit:      {t0: 1.0, steps: 1}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 2, K: [1, 2, 3], n_ctrl: [5, 15, 30], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [1, 2, 4], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [5, 10, 20, 50, 100], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+
+  # ------------------------------------------------------------------- 5. random inpainting
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 2
+    degradation:
+      sigma: 0.01
+      missing_fraction: 0.70
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 3, 5], n_ctrl: [5, 20, 50], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [2, 4, 8], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 25, 50, 100, 200], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], solver: heun, num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+      pmf:
+        methods:
+          sdedit:      {t0: 1.0, steps: 1}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 2, K: [1, 2, 3], n_ctrl: [5, 15, 30], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [1, 2, 4], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [5, 10, 20, 50, 100], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+
+  # ------------------------------------------------------------------- 6. stroke painting
+  stroke_painting:
+    enabled: true
+    problem: stroke_painting
+    num_images: 2
+    degradation:
+      preset: medium
+      sigma: 0.0
+      blur_sigma: 0.8
+    models:
+      jit:
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 3, 5], n_ctrl: [5, 20, 50], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [2, 4, 8], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 25, 50, 100, 200], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], solver: heun, num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
+      pmf:
+        methods:
+          sdedit:      {t0: 1.0, steps: 1}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 2, K: [1, 2, 3], n_ctrl: [5, 15, 30], lam: [0.5, 5.0, 15.0]}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [1, 2, 4], lam: [0.5, 5.0, 15.0]}
+          pnp:         {t0: 1.0, num_pnp_steps: [5, 10, 20, 50, 100], gamma0: [10000.0, 50000.0], alpha: 1.0, noise_samples: 1}
+          dflow:       {t0: 1.0, steps: [1, 2, 4], num_opt_steps: [5, 10, 20], lr: 0.01, optimizer: adam}
