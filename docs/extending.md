@@ -4,7 +4,7 @@ The repository is organised so that these three axes are independent:
 
 ```
         a problem instance  ×  a generative model  ×  a reconstruction strategy
-             problems.py            models/                sdedit.py, mpc.py, …
+             problems.py            models/          sdedit.py, mpc.py, pnp.py, dflow.py
 ```
 
 Anything you add on one axis works with everything already present on the other two,
@@ -42,8 +42,15 @@ Two rules that keep comparisons fair:
   measurement operator serving both frameworks and both state spaces.
 
 Fill in `ReconstructionStats` honestly — `model_evals_total`, `network_forwards`,
-`backprops_through_model`, `control_iterations`. The compute-cost columns are only as good
-as these counts.
+`backprops_through_model`, `control_iterations`, and, where they apply, `objective_evals`,
+`data_gradient_evals`, `optimizer_iterations` and `denoiser_samples`. The compute-cost
+columns are only as good as these counts. Two distinctions the existing methods rely on:
+
+* a gradient of the **data-fidelity term** with respect to the current state is
+  `data_gradient_evals`, even when it differentiates a VAE decoder — it is not a
+  `backprops_through_model`, which counts backward passes through *generative* evaluations;
+* an **optimiser iteration** is not a network evaluation. One D-Flow Adam step traverses a
+  whole trajectory, so `optimizer_iterations` and `model_evals_total` differ by design.
 
 **2. Declare it** in `src/config.py`:
 
@@ -59,24 +66,39 @@ Add any new sweepable hyperparameter to `SWEEPABLE_FIELDS`, give it a validation
 and a fallback in `BUILTIN_DEFAULTS`. The validator is a **closed set**: an undeclared field
 is an error, which is what stops a typo from silently becoming a no-op.
 
-**3. Register it** in `src/mpc.py`:
+**3. Register it** in `src/reconstruction.py` — the neutral registry that owns the global
+`(dynamics family, method) -> reconstructor` dispatch. Add the import and the two lines to
+`_build_registry`:
 
 ```python
-SOLVERS[(STANDARD_FLOW, "my_strategy")] = my_strategy_flow
-SOLVERS[(MEANFLOW,      "my_strategy")] = my_strategy_meanflow
+from .my_strategy import my_strategy_flow, my_strategy_meanflow
+
+register_reconstructor(STANDARD_FLOW, "my_strategy", my_strategy_flow)
+register_reconstructor(MEANFLOW,      "my_strategy", my_strategy_meanflow)
 ```
+
+(Dispatch used to live in `src/mpc.py`, which made that module the owner of unrelated
+methods. `mpc.py` now declares only MPC's own entries; `src.mpc.select_reconstructor`
+survives as a thin alias so old imports keep working.)
 
 If your method is family-agnostic, register the same function for both. If it only makes
 sense for one family, register only that one and list the supported methods in the relevant
 `ModelCapabilities` entry — the validator will then reject the invalid combination with a
 clear message rather than failing at run time.
 
-**4. Estimate its cost** in `_estimate_cost` so `--dry-run` reports a useful workload.
+**4. Estimate its cost** in `_estimate_cost` so `--dry-run` reports a useful workload. It
+receives the whole resolved `values` dict, so a method with its own step semantics returns
+its own counts; anything you leave at zero shows up as zero in the plan rather than as a
+wrong guess.
 
 **5. Give it a figure label** in `JobSpec.figure_title` and
 `visualization.config_label`/`group_label`, and a colour in `CONFIG_COLORS`.
 
-**6. Check the pairing.** Run with your method plus `sdedit` at the same `t0` and confirm
+**6. Add it to the warm-up key** in `run.py` (`warmup_key`) if it introduces a field that
+changes the traced computation or a compiled shape — otherwise a JAX model will compile
+inside your measured region and the runtime column will be wrong.
+
+**7. Check the pairing.** Run with your method plus `sdedit` at the same `t0` and confirm
 the `shared_initial_state` check passes — it asserts that jobs differing only by method
 start from a bit-identical `z_t0`.
 

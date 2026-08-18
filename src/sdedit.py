@@ -36,7 +36,22 @@ from .utils import MEANFLOW, STANDARD_FLOW
 
 @dataclass
 class ReconstructionStats:
-    """Measured compute for one reconstruction (per chunk), never an estimate."""
+    """Measured compute for one reconstruction (per chunk), never an estimate.
+
+    The first block is the original set and keeps its meaning exactly.  The second was
+    added with PnP-Flow and D-Flow, which spend their compute on things MPC does not have:
+
+        data_gradient_evals   gradients of the DATA-FIDELITY term with respect to the
+                              current state.  For a latent model this differentiates the
+                              VAE decoder and the measurement operator -- it is NOT a
+                              generative-trajectory backprop and is never counted as one.
+        objective_evals       evaluations of the fidelity scalar itself.
+        optimizer_iterations  Adam (or other optimiser) updates.  One iteration is NOT one
+                              network evaluation: a D-Flow trajectory contains several.
+        denoiser_samples      LOGICAL prior/denoiser applications, including PnP's initial
+                              projection and every one of its M noise realisations, even if
+                              an implementation later vectorises them into one network call.
+    """
     control_iterations: int = 0
     model_evals_planning: int = 0        # v_theta / T_theta calls inside a control loop
     model_evals_total: int = 0           # every dynamics evaluation
@@ -45,6 +60,12 @@ class ReconstructionStats:
     loss_history: List[float] = field(default_factory=list)
     seconds: float = 0.0
     finite: bool = True
+
+    # -- added with PnP-Flow / D-Flow ------------------------------------------------
+    data_gradient_evals: int = 0
+    objective_evals: int = 0
+    optimizer_iterations: int = 0
+    denoiser_samples: int = 0
 
     def merge(self, other: "ReconstructionStats") -> None:
         self.control_iterations += other.control_iterations
@@ -55,6 +76,10 @@ class ReconstructionStats:
         self.loss_history.extend(other.loss_history)
         self.seconds += other.seconds
         self.finite = self.finite and other.finite
+        self.data_gradient_evals += other.data_gradient_evals
+        self.objective_evals += other.objective_evals
+        self.optimizer_iterations += other.optimizer_iterations
+        self.denoiser_samples += other.denoiser_samples
 
 
 def canonical_time_grid(s_start: float, steps: int) -> List[float]:

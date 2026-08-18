@@ -41,3 +41,11 @@ ml_collections>=0.1.1
 dm-tree>=0.1.8
 cached_property>=1.5
 absl-py>=2.0
+
+# OPTIONAL: NVIDIA management-library bindings, used only to report GPU peak memory for
+# JAX jobs, where the framework's own `peak_bytes_in_use` is a lifetime high-water mark
+# with no reset API and therefore cannot describe a single job.  Nothing depends on it:
+# without it the gpu_* columns read `unavailable` and reconstruction is unaffected.  It is
+# usually already present via the NVIDIA driver packages on a cluster.
+#
+#     pip install nvidia-ml-py

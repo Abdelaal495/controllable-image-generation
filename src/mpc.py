@@ -381,7 +381,12 @@ def meanflow_mpc_delta_t(adapter: MeanFlowAdapter, cond: Conditioning, x0, probl
 
 
 # =====================================================================================
-# Dispatcher -- family selection only.  Makes no experimental decisions.
+# This module's entries in the reconstruction registry -- MPC only.
+#
+# The GLOBAL dispatcher used to live here, which made mpc.py the owner of unrelated
+# methods.  It now lives in `reconstruction.py`; this table declares only what MPC itself
+# implements, and `select_reconstructor` below is a thin alias kept so that older imports
+# (`from src.mpc import select_reconstructor`) keep working.
 # =====================================================================================
 SOLVERS = {
     (STANDARD_FLOW, "mpc_rhc"): flow_mpc_rhc,
@@ -392,11 +397,6 @@ SOLVERS = {
 
 
 def select_reconstructor(dynamics_family: str, method: str):
-    """The whole family/method dispatch, in one lookup."""
-    if method == "sdedit":
-        from .sdedit import sdedit_reconstruct
-        return sdedit_reconstruct
-    try:
-        return SOLVERS[(dynamics_family, method)]
-    except KeyError:
-        raise ValueError("No reconstruction strategy for %r / %r" % (dynamics_family, method))
+    """Deprecated alias for `reconstruction.select_reconstructor`."""
+    from .reconstruction import select_reconstructor as _select
+    return _select(dynamics_family, method)

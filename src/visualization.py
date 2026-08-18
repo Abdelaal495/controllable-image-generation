@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from .config import COMPARED_METHODS
 from .utils import in_ipython, to_uint8
 
 MAX_COLUMNS_PER_PAGE = 6          # reconstruction columns, on top of the 2 reference columns
@@ -138,7 +139,8 @@ def plot_comparison_grid(experiment: str, model: str, records: Sequence[Dict[str
     return paths
 
 
-CONFIG_COLORS = {"sdedit": "#4C72B0", "mpc_rhc": "#DD8452", "mpc_delta_t": "#55A868"}
+CONFIG_COLORS = {"sdedit": "#4C72B0", "mpc_rhc": "#DD8452", "mpc_delta_t": "#55A868",
+                 "pnp": "#8172B3", "dflow": "#C44E52"}
 
 
 def config_label(row: Dict[str, Any]) -> str:
@@ -151,6 +153,14 @@ def config_label(row: Dict[str, Any]) -> str:
     elif method == "mpc_rhc":
         parts = ["RHC", "K=%s" % row.get("K"), "N=%s" % row.get("num_mpc_steps"),
                  "lam=%g" % (row.get("lam") or 0)]
+    elif method == "pnp":
+        parts = ["PnP", "N=%s" % row.get("num_pnp_steps"),
+                 "g0=%g" % (row.get("gamma0") or 0), "a=%g" % (row.get("alpha") or 0)]
+        if (row.get("noise_samples") or 1) != 1:
+            parts.append("M=%s" % row.get("noise_samples"))
+    elif method == "dflow":
+        parts = ["D-Flow", "n=%s" % row.get("steps"), "opt=%s" % row.get("num_opt_steps"),
+                 "lr=%g" % (row.get("lr") or 0)]
     else:
         parts = ["MPC-dt", "N=%s" % row.get("num_mpc_steps"), "lam=%g" % (row.get("lam") or 0)]
     return " ".join(parts)
@@ -171,11 +181,19 @@ def group_label(row: Dict[str, Any]) -> str:
         return " ".join(parts)
     if method == "mpc_rhc":
         return "RHC K=%s N=%s" % (row.get("K"), row.get("num_mpc_steps"))
+    if method == "pnp":
+        # gamma0/alpha play the role lambda plays for MPC (they scale the data term), so
+        # they are dropped here for the same reason and annotated on the bar instead.
+        return "PnP N=%s%s" % (row.get("num_pnp_steps"),
+                               "" if (row.get("noise_samples") or 1) == 1
+                               else " M=%s" % row.get("noise_samples"))
+    if method == "dflow":
+        return "D-Flow n=%s opt=%s" % (row.get("steps"), row.get("num_opt_steps"))
     return "MPC-dt N=%s" % row.get("num_mpc_steps")
 
 
 def _method_rank(method: str) -> int:
-    return {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2}.get(method, 9)
+    return {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4}.get(method, 9)
 
 
 def _shade(base_hex: str, index: int, total: int):
@@ -293,13 +311,19 @@ def plot_configuration_breakdown(rows: Sequence[Dict[str, Any]], model: str, pat
 
 def step_matched_baseline(row: Dict[str, Any],
                           candidates: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The SDEdit job to compare an MPC job against.
+    """The SDEdit job to compare a non-baseline job against.
 
     Restricted to the same task, model and t0 -- so the measurement, the guide and epsilon
     are identical -- and then the SDEdit configuration whose trajectory discretisation is
-    closest to the MPC job's. Comparing against an averaged SDEdit would compare against a
+    closest to this job's own. Comparing against an averaged SDEdit would compare against a
     run that never happened; comparing against the best SDEdit at any step count would
     change the baseline between panels.
+
+    "Closest step count" is a WEAK notion of matched cost across methods: a PnP correction
+    is one denoiser evaluation, an MPC replan is a planning loop, and a D-Flow step is a
+    trajectory that is also differentiated. The baseline is chosen this way so the pairing
+    is defined and reproducible, not because the two jobs cost the same -- which is exactly
+    why the runtime ratio and the GPU memory columns are reported next to every delta.
     """
     pool = [c for c in candidates
             if c["method"] == "sdedit" and c["task"] == row["task"]
@@ -313,14 +337,14 @@ def step_matched_baseline(row: Dict[str, Any],
 
 def plot_paired_deltas(rows: Sequence[Dict[str, Any]], path: Path,
                        show: bool = True) -> Optional[Path]:
-    """Improvement of each MPC configuration over its OWN step-matched SDEdit baseline.
+    """Improvement of each non-baseline configuration over its OWN step-matched SDEdit.
 
     Every bar is one atomic job minus one atomic job, sharing image, measurement, guide,
     t0, epsilon and conditioning.  Nothing is pooled across models or hyperparameters.
     """
     plt = _setup()
     rows = [r for r in rows if r.get("status") == "ok"]
-    mpc = [r for r in rows if r["method"] in ("mpc_rhc", "mpc_delta_t")]
+    mpc = [r for r in rows if r["method"] in COMPARED_METHODS]
     if not mpc:
         return None
 
@@ -407,7 +431,8 @@ def plot_quality_vs_cost(rows: Sequence[Dict[str, Any]], path: Path,
         usable = rows
     if not usable:
         return None
-    markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^"}
+    markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D",
+               "dflow": "P"}
     colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -436,6 +461,58 @@ def plot_quality_vs_cost(rows: Sequence[Dict[str, Any]], path: Path,
     fig.suptitle("MPC buys measurement consistency; the question is what it costs and whether "
                  "perceptual quality follows", fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return _finish(fig, path, show)
+
+
+def plot_quality_vs_memory(rows: Sequence[Dict[str, Any]], path: Path,
+                           show: bool = True) -> Optional[Path]:
+    """Perceptual quality against GPU memory, and memory against runtime.
+
+    The memory axis is the INCREMENTAL peak: what a method added on top of an already
+    resident model, which is the number that differs between strategies.  Each point is one
+    atomic job at its own batch size, and the annotation says so -- a peak measured at
+    batch 2 is not two images' worth of anything, and nothing here divides by the batch.
+    """
+    plt = _setup()
+    rows = [r for r in rows if r.get("status") == "ok"
+            and r.get("gpu_incremental_peak_gib") is not None]
+    if not rows:
+        return None
+    markers = {"sdedit": "o", "mpc_rhc": "s", "mpc_delta_t": "^", "pnp": "D", "dflow": "P"}
+    colors = {"jit": "tab:blue", "pmf": "tab:orange", "sit": "tab:green", "imf": "tab:red"}
+    batches = sorted({r.get("batch_size") for r in rows if r.get("batch_size")})
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    for r in rows:
+        style = dict(marker=markers.get(r["method"], "x"),
+                     color=colors.get(r["model"], "grey"), s=48, alpha=0.85)
+        memory = r["gpu_incremental_peak_gib"]
+        quality = r.get("lpips") if r.get("lpips") is not None else r.get("psnr")
+        if quality is not None:
+            axes[0].scatter(memory, quality, **style)
+        if r.get("runtime_per_image"):
+            axes[1].scatter(r["runtime_per_image"], memory, **style)
+
+    uses_lpips = any(r.get("lpips") is not None for r in rows)
+    axes[0].set_xlabel("incremental GPU peak (GiB above the resident model)")
+    axes[0].set_ylabel("LPIPS (lower is better)" if uses_lpips else "PSNR (dB)")
+    axes[0].set_title("Quality vs the memory the method itself needs")
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel("runtime per image (s, log scale)")
+    axes[1].set_ylabel("incremental GPU peak (GiB)")
+    axes[1].set_title("The two costs, against each other")
+    for ax in axes:
+        ax.grid(alpha=0.25)
+    handles = [plt.Line2D([], [], marker=markers[m], linestyle="", color="black", label=m)
+               for m in markers if any(r["method"] == m for r in rows)]
+    handles += [plt.Line2D([], [], marker="o", linestyle="", color=colors[m], label=m.upper())
+                for m in colors if any(r["model"] == m for r in rows)]
+    axes[0].legend(handles=handles, fontsize=8)
+    sources = sorted({(r.get("gpu_memory_source") or "").split("(")[0] for r in rows})
+    fig.suptitle("Memory is a JOB peak at batch %s, never divided by the batch  |  source: %s"
+                 % ("/".join(str(b) for b in batches) or "?", ", ".join(s for s in sources)),
+                 fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     return _finish(fig, path, show)
 
 

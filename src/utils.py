@@ -121,12 +121,28 @@ def stroke_geometry_parts(params_key: str, image_id: Any) -> Tuple[Any, ...]:
     return ("stroke_geometry", params_key, str(image_id))
 
 
+def pnp_reprojection_parts(model: str, image_id: Any, replicate: int, iteration: int,
+                           sample: int) -> Tuple[Any, ...]:
+    """Identity of ONE PnP stochastic-reprojection noise draw.
+
+    Fresh across iterations and noise realisations, deterministic across runs, and
+    deliberately INDEPENDENT of gamma0, alpha, noise_samples, num_pnp_steps, the fidelity
+    normalisation and call order.  A gamma0/alpha sweep therefore compares the same
+    underlying noise realisations rather than re-rolling them, exactly as the shared
+    generative epsilon does for t0.
+    """
+    return ("pnp_reprojection", model, str(image_id), "rep%d" % int(replicate),
+            "k%d" % int(iteration), "m%d" % int(sample))
+
+
 SEED_RECIPES: Dict[str, str] = {
     "generative_noise": "seed(global_seed, model, 'x0', image_id, replicate)",
     "measurement": "seed(global_seed, 'measurement', problem, problem_params_key, image_id)",
     "mask": "seed(global_seed, 'mask', problem, problem_params_key, image_id)",
     "stroke_geometry": "seed(global_seed, 'stroke_geometry', problem_params_key, image_id)",
     "vae_encode": "seed(global_seed, model, 'vae_encode', guide_fingerprint)",
+    "pnp_reprojection": "seed(global_seed, 'pnp_reprojection', model, image_id, replicate, "
+                        "iteration, noise_sample)",
 }
 
 

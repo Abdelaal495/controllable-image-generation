@@ -12,7 +12,7 @@
 #   experiments.<name>.degradation      the inverse problem's parameters (built ONCE and
 #                                       shared by every model and method below it)
 #   experiments.<name>.models.<model>   which model participates
-#   ....methods.{sdedit,mpc_rhc,mpc_delta_t}
+#   ....methods.{sdedit,mpc_rhc,mpc_delta_t,pnp,dflow}
 #
 # You never write `standard_flow:` or `meanflow:`.  The registry already knows that JiT and
 # SiT are standard flows and that pMF and iMF are MeanFlows.
@@ -24,6 +24,8 @@
 #               phi_normalization, control_cost_normalization
 #   mpc_rhc     K
 #   mpc_delta_t delta_t_lambda_scaling
+#   pnp         num_pnp_steps, gamma0, alpha, noise_samples, phi_normalization
+#   dflow       steps, solver, num_opt_steps, lr, optimizer, phi_normalization
 # Any other list (e.g. models.jit.guidance.interval) is a literal value, never a sweep.
 #
 # Unknown keys are ERRORS, not silent no-ops.  Check the plan first:
@@ -46,6 +48,11 @@ runtime:
   max_atomic_jobs: 256          # sweep-explosion guard; override with --max-jobs
   resume: true                  # reuse finished jobs whose resolved spec matches exactly
   replicate: 0                  # stochastic trial index; changing it changes epsilon
+  gpu_memory_profiling: true    # per-job GPU peak memory (cheap, non-invasive; --no-gpu-memory
+                                # turns it off).  Reported per JOB at its batch size, never
+                                # divided by the batch -- see docs/methods_pnp_dflow.md.
+  nvml_sample_interval: 0.02    # sampling period used only where a framework allocator
+                                # high-water mark is unavailable (the JAX path)
 
 data:
   source: hf_imagenet_val       # hf_imagenet_val | local_folder
@@ -63,8 +70,16 @@ models:
   # imf: {batch_size: 2}
 
 # Method-level defaults inherited by every experiment that does not override them.
+#
+# `phi_normalization` is deliberately NOT set here.  Its per-method builtin default is
+#   MPC            half_sum_squared                    (unchanged; Table E2's lambdas
+#                                                        were tuned against this scale)
+#   PnP / D-Flow   half_mean_squared_per_measurement   (F_b = 1/(2 m_b) * sum of squares,
+#                                                        summed over the batch)
+# Setting it globally here would silently override the second one, so if you want a single
+# fidelity scale for every method, write it under each method instead and retune gamma0,
+# lr and lam accordingly.
 defaults:
-  phi_normalization: half_sum_squared
   control_cost_normalization: sum_squared
   optimizer: adam
   warm_start: false
@@ -102,11 +117,23 @@ experiments:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
           mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # PnP-Flow: N corrections AFTER one initial prior projection.  gamma0 and alpha
+          # have no published value for this checkpoint -- sweep them before concluding
+          # anything; results.csv records `repository_default_untuned` until you do.
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          # D-Flow: `steps` is the trajectory it differentiates through, `num_opt_steps`
+          # the Adam budget.  Cost is roughly steps x solver stages x (num_opt_steps + 1)
+          # model evaluations, and the whole trajectory stays in the autograd graph.
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
           mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1}
           mpc_delta_t: {t0: 0.8, num_mpc_steps: 2}
+          pnp:         {t0: 0.8, num_pnp_steps: 5, gamma0: 1.0, alpha: 1.0}
+          # steps: 1 means the single learned map T(q; s0 -> 1) -- one forward and one
+          # backward network evaluation per objective, not a one-step Euler approximation.
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
 
   # ------------------------------------------------------------------- 2. deblurring
   deblurring:
@@ -169,6 +196,10 @@ experiments:
           sdedit:      {t0: 0.8, steps: [4, 25], solver: heun}
           mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1}
           mpc_delta_t: {t0: 0.8, num_mpc_steps: 4}
+          # m_b counts only the OBSERVED entries here, so the fidelity scale of an
+          # inpainting task is comparable with a denoising one.
+          pnp:         {t0: 0.8, num_pnp_steps: 10, gamma0: 1.0, alpha: 1.0}
+          dflow:       {t0: 0.8, steps: 1, num_opt_steps: 10, lr: 0.01}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}

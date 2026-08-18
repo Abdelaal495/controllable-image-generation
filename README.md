@@ -7,10 +7,16 @@ A research repository that attempts to explore one question:
 To tackle that inquiry, we adapt multiple different methods to the MeanFlow paradigm, and examine how much a given reconstruction strategy improves the result over an ordinary SDEdit-like strategy, and at what cost. When making comparisons, we use the **same** degraded observation, the **same** generative model, the **same**
 corruption strength `t0` and the **same** sampled generative noise.
 
-The strategies are pluggable. Three ship today: **SDEdit**, **MPC-RHC** and **MPC-Δt**.
-The layout is designed so that adding a fourth is a new function plus a registry entry,
-with every fairness guarantee inherited automatically (see
+The strategies are pluggable. Five ship today: **SDEdit**, **MPC-RHC**, **MPC-Δt**,
+**PnP-Flow** and **D-Flow**. The layout is designed so that adding a sixth is a new function
+plus a registry entry, with every fairness guarantee inherited automatically (see
 [`docs/extending.md`](docs/extending.md)).
+
+PnP-Flow and D-Flow had to be adapted before they could join the comparison — both papers
+initialise in ways that would break the invariant below.
+[`docs/methods_pnp_dflow.md`](docs/methods_pnp_dflow.md) states exactly what is published,
+what was adapted, and what is a research extension with no published backing. **Read it
+before quoting any number from those two methods.**
 
 The central invariant:
 
@@ -118,6 +124,25 @@ notebooks' rather than merely numerically close.
   model.
 - **`mpc_delta_t`**: Δt-horizon control with the one-step value surrogate (Algorithm 2).
   `K` is meaningless here and is **rejected** by the validator.
+- **`pnp`** (PnP-Flow, ICLR 2025): one initial prior projection of the shared `z_t0`, then
+  `num_pnp_steps` cycles of *data-fidelity gradient step → stochastic reprojection onto the
+  flow path → denoise*, the denoised output averaged over `noise_samples` realisations.
+  Step sizes follow `γ_k = γ0·(1 − s_k)^α` on the schedule
+  `s_k = s0 + k/(N+1)·(1 − s0)`, strictly inside `(s0, 1)`. It performs **zero** backprop
+  through the generative model — that is the property that makes it the cheap member here.
+  The initial projection is timed and counted but is **not** one of the `N` steps, so the
+  logical prior applications are `1 + N·M`. MeanFlow models use the learned transition
+  `T(q; s → 1)` as the denoiser, which is a **research extension** with none of the paper's
+  conditional-mean guarantees.
+- **`dflow`** (D-Flow, ICML 2024): optimises the starting state `q` itself by
+  differentiating the terminal measurement loss **through** the generative trajectory —
+  the expensive end of the benchmark. Adam only (`num_opt_steps`, `lr`); the paper's LBFGS,
+  its χ^d regulariser and its target-PSNR stopping rule are deliberately not implemented,
+  and the validator rejects any other optimiser rather than running something else under
+  the same name. `q` is initialised to the shared `z_t0`, so at `t0 < 1` this optimises an
+  **intermediate** flow state — an intentional extension, flagged by a validation warning
+  on every such job. The reported reconstruction is the trajectory of the **final** `q`,
+  and that extra evaluation is counted.
 
 The MPC terminal objective is always evaluated in canonical pixel space,
 
@@ -303,9 +328,16 @@ line marks the degraded observation itself, so it is immediately visible whether
 reconstruction beat doing nothing. Bars group on the structural configuration (method,
 steps/`N`/`K`); lambda is task-dependent via Table E2 and is annotated per bar.
 
-`paired_deltas.png` shows each MPC job minus its **step-matched SDEdit baseline** — the
-SDEdit job at the same task, model and t0 whose step count is closest — annotated with the
-runtime multiple. Never against an average of SDEdit runs.
+`paired_deltas.png` shows each non-baseline job (MPC, PnP, D-Flow) minus its **step-matched
+SDEdit baseline** — the SDEdit job at the same task, model and t0 whose step count is
+closest — annotated with the runtime multiple. Never against an average of SDEdit runs.
+"Closest step count" is a *weak* notion of matched cost across methods: a PnP correction is
+one denoiser call, an MPC replan is a planning loop, a D-Flow step is a trajectory that is
+also differentiated. The pairing is defined and reproducible, not equal-cost — which is why
+the runtime ratio and the memory columns sit next to every delta.
+
+`quality_vs_memory.png` plots perceptual quality against the **incremental** GPU peak (what
+a method added on top of an already resident model) and the two costs against each other.
 
 ### Metrics
 
@@ -324,8 +356,47 @@ evaluations, control iterations, backprops through the model, reconstruction ste
 size and padding. The summary prints a paired table so you can say
 *"MPC improved LPIPS by X but required Y× the runtime"*.
 
+Four further columns distinguish work that used to be one number:
+
+| Column | Meaning |
+|---|---|
+| `objective_evaluations` | evaluations of the fidelity scalar |
+| `data_gradient_evaluations` | gradients of the data-fidelity term w.r.t. the state. For a latent model this differentiates the VAE decoder — a measurement-side gradient, **not** a generative backprop |
+| `optimizer_iterations` | Adam updates. One iteration is **not** one network call: a D-Flow iteration traverses a whole trajectory |
+| `denoiser_samples` | logical prior applications, including PnP's initial projection and each of its `M` realisations |
+
+`backprops_through_model` stays what it always was — backward passes through *generative*
+evaluations. It is **0** for SDEdit, RHC `K=1` and every PnP job, and
+`trajectory × iterations` for D-Flow.
+
+### GPU memory
+
+Each atomic job also records `gpu_baseline_gib` (steady state after load and warm-up,
+immediately before the reconstruction), `gpu_peak_gib` (during it),
+`gpu_incremental_peak_gib` (the difference — what the method itself needed on top of a
+resident model) and `gpu_memory_source`.
+
+The measured region is **only** the reconstruction: model loading, dataset preparation,
+metrics, visualisation and the untimed warm-up are outside it, while PnP's initial
+projection and D-Flow's backward pass are inside it. Numbers are **per job at its
+configured batch size and are never divided by the batch** — activation memory has no
+honest per-image decomposition; run the final memory sweep at `batch_size: 1` if you want
+the single-image figure.
+
+`gpu_memory_source` is not decoration. Torch reports a true allocator high-water mark with
+the peak counter reset at the region boundary. The JAX path samples the process's memory
+through NVML, because `peak_bytes_in_use` is a *lifetime* high-water mark with no reset API
+and so cannot answer "what did *this* job peak at". A sampled peak and an allocator
+high-water mark are different measurements and should not be compared blindly; a sampled
+peak can also miss a very brief spike. Nothing in the profiler alters JAX's preallocation
+setting, allocator, compilation-cache policy or device lifecycle. If nothing usable is
+available the columns stay empty and the source reads `unavailable` — they are never filled
+with a guess. Disable the instrumentation entirely with `--no-gpu-memory` or
+`runtime.gpu_memory_profiling: false`.
+
 **Runtime definition.** The reported reconstruction runtime **includes** generative model
-calls, integration, MPC planning, control optimisation, backward passes and controlled
+calls, integration, MPC planning, control optimisation, PnP's initial prior projection and
+its correction cycles, D-Flow's forward trajectories *and* backward passes, and controlled
 execution. It **excludes** checkpoint download, model loading, dataset download, metrics,
 visualisation and image saving — model loading is recorded separately. Before any timed
 measurement, every `model × method × required shape` gets an **untimed warm-up**, so JAX
@@ -443,7 +514,8 @@ Everything else was preserved; these are the changes, with reasons:
 ```
 configs/experiments.yaml   the only file you normally edit
 notebooks/colab_demo.ipynb end-to-end Colab walkthrough
-docs/                      quickstart_cluster.md, troubleshooting.md, extending.md
+docs/                      quickstart_cluster.md, troubleshooting.md, extending.md,
+                           methods_pnp_dflow.md (published vs adapted vs extension)
 src/
   config.py                registries, validation, sweeps, planner, Table E2 provenance
   data.py                  the shared ImageNet pool, stable image ids
@@ -451,8 +523,12 @@ src/
   models/
     base.py                the one adapter interface, registry, ModelManager
     jit.py  pmf.py  sit.py  imf.py
+  reconstruction.py        the neutral (family, method) -> reconstructor registry
   sdedit.py                ordinary reconstruction only (no degradation logic)
-  mpc.py                   RHC and Δt, both families, plus the dispatcher
+  mpc.py                   RHC and Δt, both families
+  pnp.py                   PnP-Flow, both families
+  dflow.py                 D-Flow, both families (its own differentiable trajectory)
+  memory.py                per-job GPU peak memory, Torch allocator / NVML sampling
   metrics.py               PSNR, SSIM, LPIPS, measurement consistency, masked metrics
   visualization.py         paginated comparison grids, summary plots
   checks.py                parity, gradient, stroke and fairness tests

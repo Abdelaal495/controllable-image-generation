@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""SDEdit vs. MPC-Flow -- the experiment orchestrator (this repository's "notebook").
+"""SDEdit vs. MPC-Flow vs. PnP-Flow vs. D-Flow -- the experiment orchestrator.
 
     python run.py --config configs/experiments.yaml --dry-run     # plan only, no models
     python run.py --config configs/experiments.yaml               # full run
@@ -12,16 +12,23 @@ it is released before the next model loads -- which matters because JiT is Torch
 JAX and they should not be resident simultaneously.
 
 Timing policy (brief section 32).  The reported reconstruction runtime covers generative
-model calls, integration, MPC planning, control optimisation, backward passes and the
-controlled execution.  It EXCLUDES checkpoint download, model loading, dataset download,
-metrics, visualisation and image saving.  Model loading is recorded separately, and every
-(model, method, shape) is warmed up untimed first so JAX compilation never lands inside a
-measured run.
+model calls, integration, MPC planning, control optimisation, PnP's initial prior
+projection and its correction cycles, D-Flow's forward trajectories AND backward passes,
+and the controlled execution.  It EXCLUDES checkpoint download, model loading, dataset
+download, metrics, visualisation and image saving.  Model loading is recorded separately,
+and every (model, method, shape) is warmed up untimed first so JAX compilation never lands
+inside a measured run.
+
+Memory policy (see src/memory.py).  Each atomic job reports the GPU memory it was sitting
+at before its reconstruction (baseline), the peak during it, and the difference.  The
+measured region is exactly the reconstruction -- never model loading, metrics or warm-up --
+and the peak is a JOB peak at the configured batch size, never divided by the batch.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import dataclasses
 import json
@@ -38,15 +45,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src import checks as checks_module
-from src.config import (ConfigError, MODEL_REGISTRY_DEFAULTS, METHOD_DECLARATIONS,
-                        check_accelerator_compatibility, load_config, print_run_plan,
-                        resolve_model_registry, resolve_run_plan, validate_config)
+from src.config import (COMPARED_METHODS, ConfigError, MODEL_REGISTRY_DEFAULTS,
+                        METHOD_DECLARATIONS, check_accelerator_compatibility, load_config,
+                        print_run_plan, resolve_model_registry, resolve_run_plan,
+                        validate_config)
 from src.data import DataManager
+from src.memory import GpuMemoryProfiler
 from src.metrics import configure_lpips, degraded_baseline, evaluate_reconstruction
 from src.models import ModelManager, build_initial_state, load_adapters
 from src.models.base import PREFETCH_HOOKS
 from src.models.base import Conditioning
-from src.mpc import select_reconstructor
+from src.reconstruction import select_reconstructor
 from src.problems import ProblemStore
 from src.sdedit import ReconstructionStats
 from src.utils import (RULE, THIN, apply_offline_mode, detect_accelerator,
@@ -92,6 +101,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-figures", action="store_true", help="skip figure generation")
     p.add_argument("--no-warmup", action="store_true",
                    help="skip the untimed warm-up (timings will then include compilation)")
+    p.add_argument("--no-gpu-memory", action="store_true",
+                   help="disable GPU peak-memory instrumentation (it is cheap and "
+                        "non-invasive, but this is the escape hatch)")
     p.add_argument("--run-id", default=None, help="reuse an existing run directory name")
 
     cluster = p.add_argument_group(
@@ -166,6 +178,8 @@ def apply_cli_overrides(config: Dict[str, Any], args: argparse.Namespace) -> Dic
         rt["replicate"] = int(args.replicate)
     if args.resume is not None:
         rt["resume"] = bool(args.resume)
+    if args.no_gpu_memory:
+        rt["gpu_memory_profiling"] = False
     if args.experiments:
         wanted = {name.strip() for name in args.experiments.split(",") if name.strip()}
         unknown = wanted - set(config.get("experiments", {}))
@@ -284,9 +298,11 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
     if "torch" in frameworks:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")   # before cuBLAS starts
         import torch
-        # AUTOGRAD STAYS ENABLED: MPC-delta_t and RHC K>1 differentiate the terminal loss
-        # through the generative model.  Model PARAMETERS keep requires_grad_(False), so no
-        # parameter gradients are ever allocated.  SDEdit wraps its own loop in no_grad().
+        # AUTOGRAD STAYS ENABLED: MPC-delta_t, RHC K>1 and D-Flow differentiate the terminal
+        # loss through the generative model, and PnP differentiates the data-fidelity term
+        # through the decoder.  Model PARAMETERS keep requires_grad_(False), so no parameter
+        # gradients are ever allocated.  SDEdit and PnP's denoiser wrap their own loops in
+        # no_grad().
         torch.set_grad_enabled(True)
         want_cuda = accel["kind"] == "gpu"
         if want_cuda and not torch.cuda.is_available():
@@ -342,21 +358,28 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
             print("PyTorch         : %s | device: %s | dtypes: %s"
                   % (torch.__version__, device,
                      {k: str(v) for k, v in context["torch_dtypes"].items()}))
-            print("Autograd enabled: %s (required by MPC)" % torch.is_grad_enabled())
+            print("Autograd enabled: %s (required by MPC and D-Flow)" % torch.is_grad_enabled())
     return context
 
 
 # =====================================================================================
 # One atomic job
 # =====================================================================================
-def run_job(adapter, spec, problem, manager) -> Dict[str, Any]:
+def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
     """Execute one atomic job: one model, one problem, one method, one hyperparameter set.
 
     Batching is the only decision made here; every scientific setting arrived in the spec.
     Fixed-batch MeanFlow models repeat-pad a short tail chunk to their compiled shape.  Both
     terms of the MPC objective are sums over the batch and a padded row carries its own
     duplicated measurement and its own control, so padding cannot influence a real image's
-    gradient or its metrics.  Padded rows are counted and reported, never treated as real.
+    gradient or its metrics.  The same holds for PnP and D-Flow: their per-measurement
+    fidelity is summed over the batch, so a padded row contributes only to its own
+    duplicate's gradient.  Padded rows are counted and reported, never treated as real.
+
+    `profiler`, when given, measures GPU memory around the reconstruction ONLY -- the
+    baseline is taken immediately before the first chunk's reconstruction, so building the
+    initial state and loading the model are outside the incremental figure.  It is None
+    during warm-up, which must never contribute to a reported number.
     """
     reconstruct = select_reconstructor(spec.dynamics_family, spec.method)
     bs = max(1, int(spec.batch_size))
@@ -378,12 +401,16 @@ def run_job(adapter, spec, problem, manager) -> Dict[str, Any]:
         sub_problem = problem.subset(chunk)
         labels = (problem.labels[np.asarray(chunk, np.int64)] if problem.labels is not None
                   else np.zeros((len(chunk),), np.int32))
-        # SDEdit and both MPC methods receive the SAME conditioning object for an image.
+        # Every strategy receives the SAME conditioning object for an image.
         cond = Conditioning(labels=np.asarray(labels, np.int32), guidance=dict(spec.guidance))
         x0 = build_initial_state(adapter, problem, spec, chunk, manager)
         fingerprints.append(pixel_fingerprint(adapter.to_numpy(x0)))
 
-        x_final, stats = reconstruct(adapter, cond, x0, sub_problem, spec)
+        if profiler is not None and profiler.baseline_gib is None:
+            profiler.establish_baseline()
+        region = profiler.measure() if profiler is not None else contextlib.nullcontext()
+        with region:
+            x_final, stats = reconstruct(adapter, cond, x0, sub_problem, spec)
         total.merge(stats)
         pixels = adapter.to_pixels(x_final)
         outputs.append(pixels[:size] if pad else pixels)
@@ -403,21 +430,51 @@ def warm_up(adapter, spec, problem, manager, verbose: bool = True) -> float:
     the cold/compile time separately.
     """
     # The warm-up must trace EXACTLY the trajectory the timed job will run.  Reducing
-    # steps / num_mpc_steps here would change the time grid, so the real job would meet
-    # uncompiled intervals and pay for their compilation inside the measured region --
-    # which is precisely what "steady-state runtime" is supposed to exclude.  Only
-    # n_ctrl and the image count are reduced: neither changes the traced computation.
-    tiny = dataclasses.replace(
-        spec,
-        num_images=min(int(spec.batch_size), int(spec.num_images)),
-        n_ctrl=None if spec.method == "sdedit" else 1,
-        record_loss_history=False)
+    # steps / num_mpc_steps / num_pnp_steps here would change the time grid, so the real
+    # job would meet uncompiled intervals and pay for their compilation inside the measured
+    # region -- which is precisely what "steady-state runtime" is supposed to exclude.
+    #
+    #   PnP     each correction time s_k -> 1 is a DISTINCT transition for a MeanFlow model,
+    #           so all N of them must be traced.  noise_samples is kept as well: it changes
+    #           no shape, but keeping it makes the warm-up a faithful rehearsal.
+    #   D-Flow  the trajectory shape is fixed by `steps` and the solver, and every optimiser
+    #           iteration re-runs the SAME traced computation, so a single iteration is
+    #           enough to compile everything the timed run needs -- including the backward
+    #           pass and the Adam update.
+    #
+    # Only n_ctrl / num_opt_steps and the image count are reduced: none of them changes the
+    # traced computation.
+    reductions: Dict[str, Any] = {
+        "num_images": min(int(spec.batch_size), int(spec.num_images)),
+        "record_loss_history": False,
+    }
+    if spec.method in ("mpc_rhc", "mpc_delta_t"):
+        reductions["n_ctrl"] = 1
+    if spec.method == "dflow":
+        reductions["num_opt_steps"] = 1
+    tiny = dataclasses.replace(spec, **reductions)
     started = time.perf_counter()
-    run_job(adapter, tiny, problem, manager)
+    run_job(adapter, tiny, problem, manager, profiler=None)
     seconds = time.perf_counter() - started
     if verbose:
         print("        warm-up (untimed, excluded from results): %.2fs" % seconds)
     return seconds
+
+
+def warmup_key(spec, problem) -> Tuple:
+    """Everything that changes the traced computation or the compiled shapes.
+
+    Two jobs sharing this key can share one warm-up; two jobs differing in any of it cannot,
+    or the second would compile inside its measured region.
+    """
+    return (spec.method, spec.batch_size, spec.problem,
+            tuple(problem.measurement.shape[1:]), spec.K, spec.t0,
+            spec.steps, spec.num_mpc_steps, spec.solver,
+            spec.phi_normalization, spec.control_cost_normalization,
+            # PnP: N fixes the whole s_k grid, M fixes how many denoiser calls are traced.
+            spec.num_pnp_steps, spec.noise_samples,
+            # D-Flow: the trajectory graph, not the number of Adam updates.
+            spec.optimizer)
 
 
 # =====================================================================================
@@ -431,13 +488,21 @@ RESULT_COLUMNS = [
     "steps", "solver", "num_mpc_steps", "delta", "K", "lam", "n_ctrl", "lr",
     "optimizer", "warm_start", "grad_clip", "phi_normalization",
     "control_cost_normalization", "delta_t_lambda_scaling",
+    # PnP-Flow / D-Flow hyperparameters
+    "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps",
     "hyperparameter_source_lam", "hyperparameter_source_n_ctrl", "hyperparameter_source_lr",
+    "hyperparameter_source_gamma0", "hyperparameter_source_alpha",
     "psnr", "ssim", "lpips", "measurement_rmse", "missing_rmse", "missing_psnr",
     "missing_ssim", "observed_rmse", "observed_psnr",
     "degraded_psnr", "degraded_ssim", "degraded_lpips", "guide_psnr",
     "runtime", "runtime_per_image", "reconstruction_steps", "network_forwards",
     "model_evaluations", "planning_model_evaluations", "control_iterations",
     "backprops_through_model", "expected_model_evaluations", "expected_backprops",
+    # compute accounting added with PnP-Flow / D-Flow
+    "objective_evaluations", "data_gradient_evaluations", "optimizer_iterations",
+    "denoiser_samples", "expected_objective_evaluations", "expected_data_gradients",
+    # GPU memory (job peak at the configured batch size -- never per image)
+    "gpu_baseline_gib", "gpu_peak_gib", "gpu_incremental_peak_gib", "gpu_memory_source",
     "batch_size", "num_images", "padded_items", "warmup_seconds", "model_load_seconds",
     "seed", "replicate", "generative_noise_id", "measurement_id", "guide_id",
     "initial_state_fingerprint", "conditioning_label", "cfg_scale",
@@ -448,9 +513,11 @@ RESULT_COLUMNS = [
 def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
                  metrics: Optional[Dict[str, Any]], degraded: Dict[str, Any],
                  status: str, failure: Optional[str], warmup_seconds: float,
-                 load_seconds: float) -> Dict[str, Any]:
+                 load_seconds: float,
+                 memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     stats = run["stats"] if run else ReconstructionStats()
     metrics = metrics or {}
+    memory = memory or {}
     guidance = spec.guidance or {}
     record = {
         "run_id": plan.run_id, "job_id": spec.job_id, "task": spec.experiment,
@@ -470,9 +537,13 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "grad_clip": spec.grad_clip, "phi_normalization": spec.phi_normalization,
         "control_cost_normalization": spec.control_cost_normalization,
         "delta_t_lambda_scaling": spec.delta_t_lambda_scaling,
+        "num_pnp_steps": spec.num_pnp_steps, "gamma0": spec.gamma0, "alpha": spec.alpha,
+        "noise_samples": spec.noise_samples, "num_opt_steps": spec.num_opt_steps,
         "hyperparameter_source_lam": spec.hyperparameter_sources.get("lam"),
         "hyperparameter_source_n_ctrl": spec.hyperparameter_sources.get("n_ctrl"),
         "hyperparameter_source_lr": spec.hyperparameter_sources.get("lr"),
+        "hyperparameter_source_gamma0": spec.hyperparameter_sources.get("gamma0"),
+        "hyperparameter_source_alpha": spec.hyperparameter_sources.get("alpha"),
         "psnr": metrics.get("psnr"), "ssim": metrics.get("ssim"),
         "lpips": metrics.get("lpips"), "measurement_rmse": metrics.get("measurement_rmse"),
         "missing_rmse": metrics.get("missing_rmse"), "missing_psnr": metrics.get("missing_psnr"),
@@ -491,6 +562,16 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "backprops_through_model": stats.backprops_through_model,
         "expected_model_evaluations": spec.expected_model_evals * spec.num_chunks,
         "expected_backprops": spec.expected_backprops * spec.num_chunks,
+        "objective_evaluations": stats.objective_evals,
+        "data_gradient_evaluations": stats.data_gradient_evals,
+        "optimizer_iterations": stats.optimizer_iterations,
+        "denoiser_samples": stats.denoiser_samples,
+        "expected_objective_evaluations": spec.expected_objective_evals * spec.num_chunks,
+        "expected_data_gradients": spec.expected_data_gradients * spec.num_chunks,
+        "gpu_baseline_gib": memory.get("gpu_baseline_gib"),
+        "gpu_peak_gib": memory.get("gpu_peak_gib"),
+        "gpu_incremental_peak_gib": memory.get("gpu_incremental_peak_gib"),
+        "gpu_memory_source": memory.get("gpu_memory_source"),
         "batch_size": spec.batch_size, "num_images": spec.num_images,
         "padded_items": (run or {}).get("padded_items", 0),
         "warmup_seconds": round(float(warmup_seconds), 4),
@@ -521,6 +602,10 @@ def per_image_rows(record: Dict[str, Any], metrics: Dict[str, Any],
         row["psnr"] = ps[i] if i < len(ps) else None
         row["ssim"] = ss[i] if i < len(ss) else None
         row["lpips"] = lp[i] if i < len(lp) else None
+        # Memory is a JOB peak over a computational batch; splitting it across the images
+        # in that batch would invent a per-image number that was never measured.
+        for key in ("gpu_baseline_gib", "gpu_peak_gib", "gpu_incremental_peak_gib"):
+            row[key] = record.get(key)
         rows.append(row)
     return rows
 
@@ -602,7 +687,12 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
 
 
 def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
-    """Resume support: reuse a job only when its RESOLVED spec matches exactly."""
+    """Resume support: reuse a job only when its RESOLVED spec matches exactly.
+
+    The comparison is over the whole resolved spec, so a job that differs only in gamma0,
+    alpha, noise_samples, num_opt_steps or the fidelity normalisation can never reuse
+    another configuration's reconstruction.
+    """
     out = job_dir_for(run_dir, spec)
     meta_path, array_path = out / "metadata.json", out / "results.npz"
     if not (meta_path.exists() and array_path.exists()):
@@ -623,6 +713,9 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
 # =====================================================================================
 # Reporting
 # =====================================================================================
+METHOD_ORDER = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2, "pnp": 3, "dflow": 4}
+
+
 def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
     """Per-configuration tables.
 
@@ -644,9 +737,9 @@ def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
           % ("task", "model", "configuration", "PSNR", "SSIM", "LPIPS", "meas-RMSE",
              "s/image"))
     print(THIN)
-    order = {"sdedit": 0, "mpc_rhc": 1, "mpc_delta_t": 2}
     last_task = None
-    for row in sorted(ok, key=lambda r: (r["task"], r["model"], order.get(r["method"], 9),
+    for row in sorted(ok, key=lambda r: (r["task"], r["model"],
+                                         METHOD_ORDER.get(r["method"], 9),
                                          viz.config_label(r))):
         if last_task is not None and row["task"] != last_task:
             print()
@@ -662,21 +755,56 @@ def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
     print("!  marks a reconstruction whose PSNR is BELOW the degraded observation itself,")
     print("   i.e. one that did worse than leaving the measurement untouched.")
 
+    # ---------------------------------------------------------------- compute and memory
+    print("\n" + RULE)
+    print("COMPUTE AND MEMORY BY RESOLVED CONFIGURATION")
+    print("memory is a JOB peak at the stated batch size -- never divided by the batch")
+    print(RULE)
+    print("%-18s %-5s %-24s %5s %8s %8s %8s %9s %9s"
+          % ("task", "model", "configuration", "batch", "modelev", "backprop", "datagrad",
+             "peakGiB", "deltaGiB"))
+    print(THIN)
+    any_memory = False
+    for row in sorted(ok, key=lambda r: (r["task"], r["model"],
+                                         METHOD_ORDER.get(r["method"], 9),
+                                         viz.config_label(r))):
+        peak, delta = row.get("gpu_peak_gib"), row.get("gpu_incremental_peak_gib")
+        any_memory = any_memory or peak is not None
+        print("%-18s %-5s %-24s %5s %8s %8s %8s %9s %9s"
+              % (row["task"][:18], row["model"], viz.config_label(row)[:24],
+                 row.get("batch_size"), row.get("model_evaluations"),
+                 row.get("backprops_through_model"),
+                 row.get("data_gradient_evaluations"),
+                 ("%.3f" % peak) if peak is not None else "n/a",
+                 ("%.3f" % delta) if delta is not None else "n/a"))
+    print(THIN)
+    if any_memory:
+        sources = sorted({r.get("gpu_memory_source") for r in ok
+                          if r.get("gpu_memory_source")})
+        for source in sources:
+            print("   measurement source: %s" % source)
+        print("   deltaGiB is the peak MINUS the memory already resident before the")
+        print("   reconstruction, i.e. what the method itself added on top of the model.")
+    else:
+        print("   No GPU memory was recorded (CPU run, instrumentation unavailable, or")
+        print("   --no-gpu-memory).")
+
     # ---------------------------------------------------------------- paired deltas
     print("\n" + RULE)
     print("PAIRED COMPARISON vs STEP-MATCHED SDEdit")
-    print("each MPC job against the SDEdit job at the SAME task, model and t0 whose step")
-    print("count is closest to its own -- never against an average of SDEdit runs")
+    print("each non-baseline job against the SDEdit job at the SAME task, model and t0 whose")
+    print("step count is closest to its own -- never against an average of SDEdit runs")
     print(RULE)
     print("%-18s %-5s %-24s %-14s %8s %8s %9s %8s"
-          % ("task", "model", "MPC configuration", "baseline", "dPSNR", "dSSIM", "dLPIPS",
+          % ("task", "model", "configuration", "baseline", "dPSNR", "dSSIM", "dLPIPS",
              "runtime"))
     print(THIN)
-    mpc = [r for r in ok if r["method"] in ("mpc_rhc", "mpc_delta_t")]
+    compared = [r for r in ok if r["method"] in COMPARED_METHODS]
     printed = 0
     last_task = None
-    for row in sorted(mpc, key=lambda r: (r["task"], r["model"], order.get(r["method"], 9),
-                                          viz.config_label(r))):
+    for row in sorted(compared, key=lambda r: (r["task"], r["model"],
+                                               METHOD_ORDER.get(r["method"], 9),
+                                               viz.config_label(r))):
         base = viz.step_matched_baseline(row, ok)
         if base is None:
             continue
@@ -693,7 +821,7 @@ def print_summary_tables(records: Sequence[Dict[str, Any]]) -> None:
                  viz.config_label(base)[:14], row["psnr"] - base["psnr"],
                  row["ssim"] - base["ssim"], d_lpips, ratio))
     if not printed:
-        print("  (no MPC job has a paired SDEdit baseline at the same t0)")
+        print("  (no job has a paired SDEdit baseline at the same t0)")
     print(THIN)
     print("dLPIPS < 0 is an improvement. 'runtime' is the multiple of the named baseline.")
 
@@ -738,6 +866,9 @@ def make_figures(run_dir: Path, plan, store, records, reconstructions,
     cost = viz.plot_quality_vs_cost(records, figures_dir / "quality_vs_cost.png", show)
     if cost:
         paths.append(cost)
+    memory = viz.plot_quality_vs_memory(records, figures_dir / "quality_vs_memory.png", show)
+    if memory:
+        paths.append(memory)
     return paths
 
 
@@ -1049,6 +1180,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     save_images = bool(rt.get("save_individual_images", True))
     keep_going = bool(rt.get("continue_on_experiment_error", True))
     do_warmup = not args.no_warmup
+    profile_memory = bool(rt.get("gpu_memory_profiling", True))
+    nvml_interval = float(rt.get("nvml_sample_interval", 0.02))
 
     # ---------------------------------------------------------------- model-major execution
     started = time.perf_counter()
@@ -1059,6 +1192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("  physical order : %s" % " -> ".join(m.upper() for m in scheduled))
     print("  logical order  : %s" % ", ".join(plan.experiment_names()))
     print("  release models : %s | resume finished jobs: %s" % (bool(release), resume))
+    print("  gpu memory     : %s" % ("measured per job" if profile_memory else "disabled"))
     print(RULE)
 
     for position, model in enumerate(scheduled, 1):
@@ -1088,8 +1222,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.check:
             probe = specs[0]
+            methods_here = sorted({s.method for s in specs})
             checks_module.run_model_checks(adapter, store.get(probe.problem_key), probe,
-                                           manager, report)
+                                           manager, report, methods=methods_here,
+                                           specs=specs)
             # Fairness, measured rather than assumed: jobs that differ only by method or by
             # hyperparameters must start from a bit-identical z_t0.
             groups: Dict[Tuple, List] = {}
@@ -1122,24 +1258,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print("        -> reused a finished job from %s" % finished["output_dir"])
                     continue
 
-            # Every field below alters the time grid or the traced graph, so each
-            # distinct combination needs its own untimed warm-up.
-            warm_key = (spec.method, spec.batch_size, spec.problem,
-                        tuple(problem.measurement.shape[1:]), spec.K, spec.t0,
-                        spec.steps, spec.num_mpc_steps, spec.solver,
-                        spec.phi_normalization, spec.control_cost_normalization)
-            warm_seconds = warmed.get(warm_key, 0.0)
+            key = warmup_key(spec, problem)
+            warm_seconds = warmed.get(key, 0.0)
             try:
-                if do_warmup and warm_key not in warmed:
+                if do_warmup and key not in warmed:
                     warm_seconds = warm_up(adapter, spec, problem, manager)
-                    warmed[warm_key] = warm_seconds
+                    warmed[key] = warm_seconds
 
-                run = run_job(adapter, spec, problem, manager)
+                # Instrumentation is created AFTER warm-up, so compilation buffers and
+                # first-call allocations are part of the baseline, not of the measurement.
+                profiler = GpuMemoryProfiler(adapter, enabled=profile_memory,
+                                             nvml_interval=nvml_interval)
+                run = run_job(adapter, spec, problem, manager, profiler=profiler)
+                memory = profiler.report()
                 metrics = evaluate_reconstruction(run["pixels"], problem, spec)
                 record = build_record(spec, plan, problem, run, metrics,
                                       degraded_metrics[spec.problem_key], run["status"],
                                       None if run["status"] == "ok" else run["status"],
-                                      warm_seconds, load_seconds)
+                                      warm_seconds, load_seconds, memory=memory)
                 out = persist_job(run_dir, spec, run, record, metrics, problem, save_images)
                 record["output_dir"] = str(out)
                 reconstructions[spec.job_id] = run["pixels"]
@@ -1155,8 +1291,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          record["backprops_through_model"],
                          " | padded %d" % record["padded_items"]
                          if record["padded_items"] else ""))
+                if record["gpu_peak_gib"] is not None:
+                    print("        -> GPU %.3f GiB peak (%.3f GiB above the %.3f GiB "
+                          "baseline), batch=%d"
+                          % (record["gpu_peak_gib"], record["gpu_incremental_peak_gib"],
+                             record["gpu_baseline_gib"], record["batch_size"]))
                 writer.event("job_done", job_id=spec.job_id, psnr=record["psnr"],
-                             lpips=record["lpips"], seconds=record["runtime"])
+                             lpips=record["lpips"], seconds=record["runtime"],
+                             gpu_peak_gib=record["gpu_peak_gib"])
             except Exception as exc:
                 message = "%s: %s" % (type(exc).__name__, exc)
                 print("        FAILED: %s" % message)
@@ -1223,10 +1365,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "checks": report.to_dict(),
         "timing": timing_summary(),
         "figures": [str(p) for p in figures],
+        "gpu_memory_policy": (
+            "gpu_peak_gib is the peak GPU memory during the measured reconstruction of one "
+            "atomic job at its configured batch size; gpu_baseline_gib is the steady state "
+            "after model load and warm-up, immediately before it; gpu_incremental_peak_gib "
+            "is the difference. Model loading, dataset preparation, metrics, visualisation "
+            "and warm-up are outside the measured region. The numbers are NOT per image and "
+            "are never divided by the batch size. gpu_memory_source records how each number "
+            "was obtained -- a Torch allocator high-water mark and a sampled NVML process "
+            "peak are not the same kind of measurement."),
         "class_conditioning": (
             "Every reconstruction is conditioned on the TRUE ImageNet class of the source "
-            "image, identically for SDEdit and both MPC methods. The benchmark therefore "
-            "measures reconstruction given a known class, not blind restoration."),
+            "image, identically for SDEdit, both MPC methods, PnP-Flow and D-Flow. The "
+            "benchmark therefore measures reconstruction given a known class, not blind "
+            "restoration."),
         "warnings": list(plan.warnings) + list(accel_notes),
     })
     print("\nResults : %s" % csv_path)

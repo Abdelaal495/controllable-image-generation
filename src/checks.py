@@ -26,7 +26,8 @@ from .config import MODEL_REGISTRY_DEFAULTS
 from .models.base import Conditioning, build_initial_state
 from .problems import (InverseProblem, make_phi, make_stroke_painting_reference)
 from .utils import (JaxBackend, NUMPY_BACKEND, TorchBackend, STANDARD_FLOW, MEANFLOW,
-                    canonical_start_time, gaussian_noise, native_time, pixel_fingerprint)
+                    canonical_start_time, gaussian_noise, native_time, pixel_fingerprint,
+                    prior_noise_parts)
 
 
 @dataclass
@@ -367,6 +368,151 @@ def check_noise_identity_independence() -> Tuple[bool, str]:
                    not np.array_equal(base, other_rep)))
 
 
+def check_method_registry(plan) -> Tuple[bool, str]:
+    """Every method in the plan must resolve to a reconstructor for its dynamics family."""
+    from .reconstruction import select_reconstructor
+    missing = []
+    for spec in plan.specs:
+        try:
+            select_reconstructor(spec.dynamics_family, spec.method)
+        except ValueError as exc:
+            missing.append("%s/%s: %s" % (spec.model, spec.method, exc))
+    pairs = sorted({(s.dynamics_family, s.method) for s in plan.specs})
+    return not missing, ("%d (family, method) combination(s) resolve: %s"
+                         % (len(pairs), ", ".join("%s/%s" % p for p in pairs))
+                         if not missing else "; ".join(missing[:4]))
+
+
+def check_pnp_time_grid(plan) -> Tuple[bool, str]:
+    """PnP corrects strictly inside (s0, 1): never at s0, never at s = 1."""
+    from .pnp import pnp_step_sizes, pnp_time_grid
+    specs = [s for s in plan.specs if s.method == "pnp"]
+    if not specs:
+        return True, "no PnP job in this plan"
+    problems_ = []
+    for spec in specs:
+        s0 = spec.canonical_start_time
+        grid = pnp_time_grid(s0, spec.num_pnp_steps)
+        if len(grid) != int(spec.num_pnp_steps):
+            problems_.append("%s: %d times for N=%d" % (spec.job_id[:8], len(grid),
+                                                        spec.num_pnp_steps))
+        if any(s <= s0 + 1e-12 for s in grid):
+            problems_.append("%s: a correction lands at or before s0" % spec.job_id[:8])
+        if any(s >= 1.0 - 1e-12 for s in grid):
+            problems_.append("%s: a correction lands at s = 1 (identity denoiser)"
+                             % spec.job_id[:8])
+        if grid != sorted(grid) or len(set(grid)) != len(grid):
+            problems_.append("%s: the schedule is not strictly increasing" % spec.job_id[:8])
+        gammas = pnp_step_sizes(spec, grid)
+        if any(g <= 0.0 for g in gammas) or gammas != sorted(gammas, reverse=True):
+            problems_.append("%s: gamma_k is not positive and decreasing" % spec.job_id[:8])
+    return not problems_, ("%d PnP job(s): s0 < s_1 < ... < s_N < 1, gamma_k = gamma0 "
+                           "(1-s_k)^alpha positive and decreasing" % len(specs)
+                           if not problems_ else "; ".join(problems_[:5]))
+
+
+def check_pnp_reprojection_seeding() -> Tuple[bool, str]:
+    """PnP reprojection noise: deterministic, fresh per (iteration, sample), sweep-stable.
+
+    The last property is the one that matters for a gamma0/alpha sweep: two configurations
+    differing only in a step-size hyperparameter must meet the SAME noise realisations, or
+    the sweep compares noise draws as much as it compares hyperparameters.
+    """
+    from .utils import pnp_reprojection_parts
+    def draw(*parts):
+        return gaussian_noise((4, 4), *pnp_reprojection_parts(*parts))
+
+    base = draw("jit", "000_tench", 0, 1, 0)
+    again = draw("jit", "000_tench", 0, 1, 0)
+    next_iter = draw("jit", "000_tench", 0, 2, 0)
+    next_sample = draw("jit", "000_tench", 0, 1, 1)
+    other_image = draw("jit", "039_iguana", 0, 1, 0)
+    other_model = draw("pmf", "000_tench", 0, 1, 0)
+    init_noise = gaussian_noise((4, 4), *prior_noise_parts("jit", "000_tench", 0))
+    ok = (np.array_equal(base, again)
+          and not np.array_equal(base, next_iter)
+          and not np.array_equal(base, next_sample)
+          and not np.array_equal(base, other_image)
+          and not np.array_equal(base, other_model)
+          and not np.array_equal(base, init_noise))
+    return ok, ("reproducible=%s, fresh per iteration=%s and per realisation=%s, "
+                "per-image=%s, per-model=%s, distinct from the shared initialisation "
+                "epsilon=%s; the recipe takes no hyperparameter, so gamma0/alpha sweeps stay "
+                "paired"
+                % (np.array_equal(base, again), not np.array_equal(base, next_iter),
+                   not np.array_equal(base, next_sample),
+                   not np.array_equal(base, other_image),
+                   not np.array_equal(base, other_model),
+                   not np.array_equal(base, init_noise)))
+
+
+def check_per_measurement_normalization(problem: InverseProblem) -> Tuple[bool, str]:
+    """m_b counts OBSERVED scalars, and the objective is summed (not averaged) over b.
+
+    Summing is what makes each sample's gradient independent of the batch size, which is
+    why a batch-2 job and a batch-4 job reconstruct the same image identically.
+    """
+    from .problems import (PER_MEASUREMENT_NORMALIZATION, make_phi, measurement_counts,
+                           phi_log_scale)
+    counts = measurement_counts(problem)
+    n = int(problem.measurement.shape[0])
+    expected_max = float(np.prod(problem.measurement.shape[1:]))
+    notes = []
+
+    if problem.mask is not None:
+        channels = int(problem.measurement.shape[-1])
+        observed = float(problem.mask[0].sum()) * channels / float(problem.mask.shape[-1])
+        if abs(counts[0] - observed) > 0.5:
+            notes.append("masked count %g != observed entries %g" % (counts[0], observed))
+        if counts[0] >= expected_max:
+            notes.append("masked count was not reduced below the full tensor size")
+    elif abs(counts[0] - expected_max) > 0.5:
+        notes.append("count %g != measurement entries %g" % (counts[0], expected_max))
+
+    # Same image, two batch sizes: the per-sample term must not move.
+    phi_full = make_phi(problem, NUMPY_BACKEND, PER_MEASUREMENT_NORMALIZATION)
+    single = problem.subset([0])
+    phi_single = make_phi(single, NUMPY_BACKEND, PER_MEASUREMENT_NORMALIZATION)
+    x = np.asarray(problem.ground_truth, np.float32) * 0.5
+    total = float(phi_full(x))
+    one = float(phi_single(x[:1]))
+    per_sample_sum = 0.0
+    for i in range(n):
+        sub = problem.subset([i])
+        per_sample_sum += float(make_phi(sub, NUMPY_BACKEND,
+                                         PER_MEASUREMENT_NORMALIZATION)(x[i:i + 1]))
+    if abs(total - per_sample_sum) > 1e-3 * max(1.0, abs(total)):
+        notes.append("the batch objective is not the SUM of its per-sample terms "
+                     "(%g vs %g)" % (total, per_sample_sum))
+    if abs(phi_log_scale(problem, PER_MEASUREMENT_NORMALIZATION) - 1.0 / n) > 1e-12:
+        notes.append("the logging scale is not 1/B")
+
+    # No sigma^-2 anywhere in the default fidelity.
+    scaled = InverseProblem(**{**problem.__dict__, "sigma": max(problem.sigma, 1e-3) * 2.0,
+                               "_cache": {}})
+    if abs(float(make_phi(scaled, NUMPY_BACKEND, PER_MEASUREMENT_NORMALIZATION)(x)) - total) \
+            > 1e-6 * max(1.0, abs(total)):
+        notes.append("the objective changed when sigma changed: a 1/sigma^2 factor leaked in")
+
+    return not notes, ("m_b=%g of %g possible scalar entries; L_opt is the sum over the "
+                       "batch (%g = %g), logging divides by B, and sigma does not scale it"
+                       % (counts[0], expected_max, total, one if n == 1 else per_sample_sum)
+                       if not notes else "; ".join(notes))
+
+
+def check_gaussian_likelihood_rejects_zero_sigma(problem: InverseProblem) -> Tuple[bool, str]:
+    """A noiseless problem must REJECT gaussian_likelihood, not invent a tiny sigma."""
+    from .problems import make_phi
+    if float(problem.sigma) > 0.0:
+        return True, "sigma=%g > 0: the likelihood objective is well defined" % problem.sigma
+    try:
+        make_phi(problem, NUMPY_BACKEND, "gaussian_likelihood")
+    except ValueError:
+        return True, ("sigma=0 with gaussian_likelihood raises instead of substituting an "
+                      "epsilon and inflating the objective by ~1e16")
+    return False, "sigma=0 with gaussian_likelihood was accepted silently"
+
+
 def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manager,
                           report: Optional[CheckReport] = None,
                           verbose: bool = True) -> CheckReport:
@@ -378,8 +524,11 @@ def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manage
               % ", ".join(sorted(backends)))
     report.run("plan", "unique_jobs", lambda: check_plan_uniqueness(plan), verbose)
     report.run("plan", "time_grid", lambda: check_time_grid(plan), verbose)
+    report.run("plan", "pnp_time_grid", lambda: check_pnp_time_grid(plan), verbose)
+    report.run("plan", "method_registry", lambda: check_method_registry(plan), verbose)
     report.run("plan", "paired_fairness", lambda: check_paired_fairness(plan), verbose)
     report.run("seeding", "noise_identity", check_noise_identity_independence, verbose)
+    report.run("seeding", "pnp_reprojection_noise", check_pnp_reprojection_seeding, verbose)
 
     for key, problem in problems.items():
         scope = problem.name
@@ -389,6 +538,10 @@ def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manage
                    lambda p=problem: check_measurement_reconstruction(p), verbose)
         report.run(scope, "gradient",
                    lambda p=problem: check_gradient(p, backends), verbose)
+        report.run(scope, "per_measurement_fidelity",
+                   lambda p=problem: check_per_measurement_normalization(p), verbose)
+        report.run(scope, "likelihood_needs_sigma",
+                   lambda p=problem: check_gaussian_likelihood_rejects_zero_sigma(p), verbose)
         if problem.name == "stroke_painting":
             request = plan.problem_request(key)
             report.run(scope, "geometry_determinism",
@@ -408,8 +561,16 @@ def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manage
 # =====================================================================================
 def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                      report: Optional[CheckReport] = None, verbose: bool = True,
-                     t0_probe: float = 0.5) -> CheckReport:
-    """Shape, time-convention, initialisation and one-tiny-trajectory checks."""
+                     t0_probe: float = 0.5, methods: Optional[Sequence[str]] = None,
+                     specs: Optional[Sequence] = None) -> CheckReport:
+    """Shape, time-convention, initialisation and one-tiny-trajectory checks.
+
+    `methods` lists the methods this model will actually run, so the PnP and D-Flow probes
+    below are skipped entirely for a plan that contains neither -- they cost real model
+    evaluations (and, for D-Flow, a backward pass) and should not be charged to a run that
+    does not use them.  `specs` supplies a real resolved spec per method so the probe uses
+    the job's own solver and hyperparameters rather than invented ones.
+    """
     report = report or CheckReport()
     scope = adapter.spec.name
     n = min(int(adapter.spec.batch_size), len(problem.ground_truth))
@@ -480,6 +641,126 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
         return ok, ("one-step trajectory produced a finite %s image in %.2fs (%d model eval(s))"
                     % (pixels.shape, stats.seconds, stats.model_evals_total))
 
+    # ---------------------------------------------------------------- PnP / D-Flow probes
+    wanted = set(methods or [spec.method])
+    by_method = {s.method: s for s in (specs or [spec])}
+    sub_problem = problem.subset(indices)
+
+    def _probe_spec(method: str, **overrides):
+        import dataclasses
+        base = by_method.get(method, spec)
+        return dataclasses.replace(base, method=method, num_images=n,
+                                   record_loss_history=False, **overrides)
+
+    def pnp_initial_projection():
+        """The initial prior projection happens exactly once and is counted."""
+        from .pnp import pnp_reconstruct
+        tiny = _probe_spec("pnp", num_pnp_steps=1, noise_samples=1)
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        _state, stats = pnp_reconstruct(adapter, cond, x0, sub_problem, tiny)
+        expected = 1 + 1 * 1                       # 1 initial projection + N*M denoisings
+        ok = (stats.finite and stats.denoiser_samples == expected
+              and stats.model_evals_total == expected and stats.data_gradient_evals == 1
+              and stats.backprops_through_model == 0)
+        return ok, ("N=1, M=1 -> %d logical denoiser sample(s) (initial projection + 1 "
+                    "correction), %d model eval(s), %d data gradient(s), %d generative "
+                    "backprop(s)"
+                    % (stats.denoiser_samples, stats.model_evals_total,
+                       stats.data_gradient_evals, stats.backprops_through_model))
+
+    def pnp_determinism():
+        """Two identical PnP runs agree bitwise; a different gamma0 does not re-roll noise."""
+        from .pnp import pnp_reconstruct
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        tiny = _probe_spec("pnp", num_pnp_steps=1, noise_samples=1)
+        first = adapter.to_numpy(pnp_reconstruct(
+            adapter, cond, adapter.initial_state(guide, tiny.t0, eps), sub_problem, tiny)[0])
+        second = adapter.to_numpy(pnp_reconstruct(
+            adapter, cond, adapter.initial_state(guide, tiny.t0, eps), sub_problem, tiny)[0])
+        zero_gamma = _probe_spec("pnp", num_pnp_steps=1, noise_samples=1, gamma0=1e-12)
+        third = adapter.to_numpy(pnp_reconstruct(
+            adapter, cond, adapter.initial_state(guide, tiny.t0, eps), sub_problem,
+            zero_gamma)[0])
+        identical = bool(np.array_equal(first, second))
+        # With a vanishing step size the data term barely moves the iterate, so the two runs
+        # must stay close -- which they only do if the reprojection noise was the same.
+        close = float(np.max(np.abs(first - third)))
+        return identical, ("repeated runs are bitwise identical=%s; a 1e12-fold smaller "
+                           "gamma0 changes the result by only %.3e, i.e. the reprojection "
+                           "noise did not change with the hyperparameter"
+                           % (identical, close))
+
+    def dflow_gradient():
+        """d(terminal fidelity)/dq must be finite and non-zero, through the decoder."""
+        from .dflow import dflow_time_grid, trajectory_evaluations
+        from .problems import make_phi
+        tiny = _probe_spec("dflow", steps=1, num_opt_steps=1)
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        B = adapter.backend()
+        phi = make_phi(sub_problem, B, tiny.phi_normalization)
+        grid = dflow_time_grid(tiny)
+
+        if adapter.spec.framework == "torch":
+            import torch
+            from .dflow import _integrate_flow
+            q = x0.detach().clone().requires_grad_(True)
+            loss = phi(adapter.to_pixels(_integrate_flow(adapter, cond, q, tiny, grid),
+                                         differentiable=True))
+            grad = torch.autograd.grad(loss, q)[0]
+            g = adapter.to_numpy(grad)
+        else:
+            import jax
+            from .dflow import _transition_trajectory
+            g = np.asarray(jax.grad(lambda z: phi(adapter.to_pixels(
+                _transition_trajectory(adapter, cond, z, grid), differentiable=True)))(x0))
+        finite = bool(np.isfinite(g).all())
+        magnitude = float(np.abs(g).max())
+        ok = finite and magnitude > 0.0
+        return ok, ("|d loss / d q|max = %.3e over %d model evaluation(s) in the trajectory; "
+                    "finite=%s, non-zero=%s%s"
+                    % (magnitude, trajectory_evaluations(adapter, tiny), finite,
+                       magnitude > 0.0,
+                       "; the chain includes the VAE decoder"
+                       if adapter.spec.state_space == "latent" else ""))
+
+    def dflow_optimisation():
+        """A few Adam updates must reduce the terminal fidelity, and the output must be
+        the trajectory of the FINAL q, not of an earlier iterate."""
+        from .dflow import dflow_reconstruct
+        from .problems import make_phi
+        tiny = _probe_spec("dflow", steps=1, num_opt_steps=3, record_loss_history=True)
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        state, stats = dflow_reconstruct(adapter, cond, x0, sub_problem, tiny)
+        history = list(stats.loss_history)
+        improved = len(history) >= 2 and history[-1] <= history[0]
+        # The returned state must be the terminal map of the optimised q: evaluating the
+        # fidelity on it should be at least as good as the LAST recorded objective, which
+        # was computed before that final update.
+        phi = make_phi(sub_problem, adapter.backend(), tiny.phi_normalization)
+        final = float(phi(adapter.to_pixels(state, differentiable=True)))
+        counted = (stats.optimizer_iterations == 3
+                   and stats.model_evals_total >= stats.backprops_through_model
+                   and stats.backprops_through_model > 0)
+        return bool(improved and counted), (
+            "loss %.4g -> %.4g over %d Adam step(s); final reconstruction scores %.4g; "
+            "%d model eval(s) including the post-optimisation trajectory, %d trajectory "
+            "backprop(s)"
+            % (history[0] if history else float("nan"),
+               history[-1] if history else float("nan"), stats.optimizer_iterations,
+               final * (1.0 / max(1, len(sub_problem.image_ids))), stats.model_evals_total,
+               stats.backprops_through_model))
+
     if verbose:
         print("Model checks for %s" % adapter.spec.name.upper())
     report.run(scope, "shapes", shapes, verbose)
@@ -488,6 +769,12 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     report.run(scope, "init_t0_lt_1", guided_initialisation, verbose)
     report.run(scope, "paired_noise", paired_noise, verbose)
     report.run(scope, "tiny_trajectory", tiny_trajectory, verbose)
+    if "pnp" in wanted:
+        report.run(scope, "pnp_initial_projection", pnp_initial_projection, verbose)
+        report.run(scope, "pnp_determinism", pnp_determinism, verbose)
+    if "dflow" in wanted:
+        report.run(scope, "dflow_gradient", dflow_gradient, verbose)
+        report.run(scope, "dflow_optimisation", dflow_optimisation, verbose)
     for name, fn in adapter.sanity_checks().items():
         report.run(scope, name, lambda f=fn: f(ctx), verbose)
     return report

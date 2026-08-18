@@ -521,7 +521,59 @@ class ProblemStore:
 # Terminal objective and control cost  (MPC-Flow section 16)
 # =====================================================================================
 VALID_PHI_NORMALIZATIONS = ("half_sum_squared", "sum_squared", "mean_squared",
-                            "gaussian_likelihood")
+                            "gaussian_likelihood", "half_mean_squared_per_measurement")
+PER_MEASUREMENT_NORMALIZATION = "half_mean_squared_per_measurement"
+
+
+def measurement_counts(problem: InverseProblem) -> np.ndarray:
+    """m_b: the number of ACTUAL observed scalar measurements for each sample b.
+
+    Not blindly the size of A(x): what matters is how many scalar numbers the residual
+    really carries information about.
+
+        denoising / deblur          H * W * C
+        super_resolution            H_low * W_low * C   -- the real low-resolution y, NOT
+                                                           the 256x256 bicubic guide
+        box / random inpainting     C * (observed pixels)  -- masked entries contribute an
+                                                           identically-zero residual and
+                                                           must not dilute the mean
+        stroke_painting             the scalar entries of the differentiable rendered
+                                    measurement A_G(x); no "effective degrees of freedom"
+                                    correction is invented for the stroke geometry
+
+    Returned per sample because an inpainting mask is drawn per image, so m_b genuinely
+    differs across a batch.
+    """
+    n = int(problem.measurement.shape[0])
+    per_sample_entries = float(np.prod(problem.measurement.shape[1:]))
+    if problem.mask is None:
+        return np.full((n,), per_sample_entries, np.float32)
+    # The mask is (N,H,W,1) and broadcasts over the C channels of A(x) = mask * x.
+    mask = np.asarray(problem.mask, np.float32)
+    channels = int(problem.measurement.shape[-1])
+    per_image = mask.reshape(n, -1).sum(axis=1) * (channels / float(mask.shape[-1]))
+    counts = np.maximum(per_image, 1.0).astype(np.float32)
+    return counts
+
+
+def _per_measurement_weights(problem: InverseProblem) -> np.ndarray:
+    """1/m_b shaped (N,1,1,1) so it broadcasts against any BHWC residual."""
+    counts = measurement_counts(problem)
+    return (1.0 / counts).astype(np.float32).reshape(-1, 1, 1, 1)
+
+
+def phi_log_scale(problem: InverseProblem, normalization: str) -> float:
+    """Factor turning the OPTIMISED scalar into a per-image number for the loss history.
+
+    The per-measurement objective is summed over the batch (see `make_phi`), which keeps
+    each sample's gradient independent of the batch size.  A summed number is not
+    comparable across batch sizes when a human reads it, so `loss_history` divides by the
+    batch dimension.  Rows that were repeat-padded to fill a fixed compiled batch are
+    duplicates of a real image, so the mean stays on a per-image scale.
+    """
+    if normalization != PER_MEASUREMENT_NORMALIZATION:
+        return 1.0
+    return 1.0 / max(1, int(problem.measurement.shape[0]))
 
 
 def make_phi(problem: InverseProblem, B: Backend, normalization: str):
@@ -529,11 +581,38 @@ def make_phi(problem: InverseProblem, B: Backend, normalization: str):
 
     `x_pixels` is canonical BHWC, and the whole path stays inside the caller's autograd
     graph: no NumPy conversion, no detach, no PIL.
+
+    `half_mean_squared_per_measurement` (the PnP-Flow / D-Flow default) is
+
+        F_b(x_b) = (1 / 2 m_b) * sum_{j in Omega_b} (A(x_b)_j - y_b,j)^2
+        L_opt    = sum_b F_b                        <- what is optimised
+
+    It is SUMMED, never averaged, across the batch: reconstruction variables are
+    independent per image, so summing leaves each sample's gradient invariant to the batch
+    size and to repeat padding.  Use `phi_log_scale` for the number you report.
+
+    It deliberately carries NO 1/sigma^2 factor.  A sigma of 0.05 would otherwise inflate
+    the objective 200-fold and silently move the useful gamma0 / lr by the same factor;
+    those hyperparameters are swept instead.  `gaussian_likelihood` remains available as an
+    explicit choice and keeps its 1/(2 sigma^2), but is rejected for a noiseless problem
+    rather than falling back to a tiny epsilon.
     """
     if normalization not in VALID_PHI_NORMALIZATIONS:
         raise ValueError("Unknown phi_normalization %r" % normalization)
+    if normalization == "gaussian_likelihood" and float(problem.sigma) <= 0.0:
+        raise ValueError(
+            "phi_normalization='gaussian_likelihood' is undefined for %s: sigma=%g. Its "
+            "1/(2 sigma^2) factor would have to invent a noise level. Use "
+            "'half_mean_squared_per_measurement' or 'half_sum_squared' instead."
+            % (problem.name, float(problem.sigma)))
     y = problem.measurement_tensor(B)
-    inv_two_sigma_sq = 1.0 / (2.0 * max(problem.sigma, 1e-8) ** 2)
+    if normalization == "gaussian_likelihood":
+        inv_two_sigma_sq = 1.0 / (2.0 * float(problem.sigma) ** 2)
+    if normalization == PER_MEASUREMENT_NORMALIZATION:
+        # One cached (N,1,1,1) constant per backend; no per-sample Python loop, and the
+        # same expression in NumPy, Torch and JAX.
+        half_inv_m = problem._c(B, "half_inv_measurements",
+                                0.5 * _per_measurement_weights(problem))
 
     def phi(x_pixels):
         residual = problem.apply(x_pixels, B) - y
@@ -544,6 +623,8 @@ def make_phi(problem: InverseProblem, B: Backend, normalization: str):
             return B.sum(sq)
         if normalization == "mean_squared":
             return B.mean(sq)
+        if normalization == PER_MEASUREMENT_NORMALIZATION:
+            return B.sum(sq * half_inv_m)
         return inv_two_sigma_sq * B.sum(sq)          # gaussian_likelihood
 
     return phi
