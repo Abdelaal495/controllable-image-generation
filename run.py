@@ -1388,8 +1388,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def _exit(code: int) -> None:
-    """Terminate without running interpreter finalization.
+def _exit(code: int, force: Optional[bool] = None) -> int:
+    """Terminate without running interpreter finalization -- but NEVER inside a kernel.
 
     This process ends up holding ~100 independently-built native extensions (pyarrow,
     torch, jax, aiohttp via `datasets`, PIL, scipy).  At shutdown they tear down in an
@@ -1403,14 +1403,34 @@ def _exit(code: int) -> None:
     failure that did not occur.  Every artefact this program produces is written and closed
     as it goes (results are persisted per job, not buffered to the end), so skipping
     finalization costs nothing.  The streams are flushed explicitly first.
+
+    THE EXCEPTION: `%run run.py` in Colab or Jupyter executes in the NOTEBOOK'S OWN
+    process, where os._exit() would kill the kernel the moment the run finished -- which
+    looks exactly like a crash even though the run succeeded and every result was already
+    on disk.  Under IPython this therefore returns the status code instead of terminating,
+    and the messy-teardown problem does not arise there anyway: the interpreter is not
+    finalizing, the kernel simply carries on.
+
+    `force` overrides the detection in both directions, for tests.
     """
     try:
         sys.stdout.flush()
         sys.stderr.flush()
     except Exception:
         pass
+    if force is None:
+        force = not in_ipython()
+    if not force:
+        return int(code)
     os._exit(int(code))
 
 
 if __name__ == "__main__":
-    _exit(main())
+    _status = main()
+    if in_ipython():
+        # A notebook: return the status rather than taking the kernel down with us.
+        if _status:
+            print("\nrun.py finished with status %d (see the failure column in results.csv)."
+                  % _status)
+    else:
+        _exit(_status)
