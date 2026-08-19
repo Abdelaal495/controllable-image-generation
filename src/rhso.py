@@ -6,15 +6,19 @@ executes a single scheduled interval and starts over:
 
     at s_k, from the current state x_k:
 
-        q^(0) = x_k
+        anchor = stop_gradient(x_k)               <- FIXED for the whole stage
+        q^(0)  = x_k
         for j = 0 .. M-1:
-            loss   = Phi( to_pixels( G_{s_k -> 1}( q^(j) ), differentiable=True ) )
-            q^(j+1) = AdamUpdate( q^(j), d loss / d q )
+            fidelity = Phi( to_pixels( G_{s_k -> 1}( q^(j) ), differentiable=True ) )
+            R        = sum_b 1/(2 d_b) || q^(j)_b - anchor_b ||^2
+            loss     = fidelity + mu * R
+            q^(j+1)  = AdamUpdate( q^(j), d loss / d q )
         q* = q^(M)
 
         x_{k+1} = G_{s_k -> s_{k+1}}( q* )        <- only ONE interval is executed
 
-    then repeat at s_{k+1}, from a FRESH optimisation problem.
+    then repeat at s_{k+1}, from a FRESH optimisation problem AND a FRESH anchor taken
+    from the state actually reached.
 
 The outer times are the repository's universal power-law schedule with N = num_rhso_steps:
 
@@ -27,8 +31,33 @@ What RHSO is NOT
   optimisation problem away after committing a single interval and re-optimises from the
   state it actually reached.  The closed-loop replanning is the method.
 * NOT MPC.  MPC optimises an explicit control variable u that is added to the dynamics, and
-  pays for it with a control penalty and a lambda trade-off.  RHSO has no u, no control
-  cost, no lambda and no K: the decision variable IS the state.
+  pays for it with a control penalty ||u||^2 and a lambda trade-off.  RHSO has no u, no
+  control cost, no lambda and no K: the decision variable IS the state.  `mu` below is NOT
+  MPC's lambda -- it weights a displacement of the STATE from where the trajectory actually
+  was, not the magnitude of an added control signal, and the two are neither numerically
+  nor conceptually interchangeable.
+
+State-anchor regularisation (optional; mu = 0 by default)
+---------------------------------------------------------
+Pure terminal fidelity lets q drift arbitrarily far from x_k, and an over-optimised q can
+score well on the measurement while leaving the generative manifold -- the observed failure
+mode is measurement consistency continuing to improve while PSNR / SSIM / LPIPS degrade.
+`mu > 0` adds a trust-region-like penalty on that displacement:
+
+    R(q, x_k) = sum_b  1/(2 d_b)  || q_b - x_{k,b} ||_2^2
+
+    (squared difference -> MEAN over the non-batch state dimensions -> times 1/2
+     -> SUMMED over the batch)
+
+The batch sum matches the repository's per-measurement fidelity convention, so one sample's
+gradient never depends on the batch size, and the 1/d normalisation means a useful mu does
+not scale with the state dimensionality (a pixel model and a latent model are comparable).
+
+The anchor is the state at the START of the stage, detached, and it does NOT move as q
+moves.  It is not the trajectory's origin x_0, and it is not a moving average.  Nothing
+about the schedule, the planner, the execution step, the Adam reset or the cost accounting
+changes: the penalty contains no model evaluation.  mu is an EXPERIMENTAL extension
+motivated by observed over-optimisation, not a theoretical requirement.
 
 Family differences (both are implemented; neither is a special case of the other)
 --------------------------------------------------------------------------------
@@ -64,6 +93,7 @@ changes when the terminal transport map changes.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -107,6 +137,60 @@ def _field(spec, name: str):
     if value is None:
         raise ValueError("RHSO field %r is None; it has no meaningful default." % name)
     return value
+
+
+def rhso_mu(spec) -> float:
+    """The state-anchor regularisation weight of one resolved job.
+
+    Absent or None -> 0.0, i.e. the vanilla objective, so a spec predating `mu` (and any
+    stand-in used by a test) behaves exactly as it did before the field existed.
+    """
+    mu = getattr(spec, "mu", None)
+    if mu is None:
+        return 0.0
+    mu = float(mu)
+    if not math.isfinite(mu) or mu < 0.0:
+        raise ValueError(
+            "RHSO mu must be a finite, non-negative state-regularisation weight, got %r. "
+            "mu = 0 disables the penalty." % (mu,))
+    return mu
+
+
+def state_anchor_penalty(B, q, anchor):
+    """R(q, x_k) = sum_b (1 / 2 d_b) * ||q_b - x_{k,b}||^2 -- one implementation, both families.
+
+    Written against the `Backend` abstraction and using only `-`, `*`, `reshape` and a
+    global `sum`, all of which behave identically on NumPy arrays, torch tensors and JAX
+    arrays.  Torch RHSO and MeanFlow RHSO therefore share this exact normalisation by
+    construction rather than by two parallel transcriptions of a formula.
+
+        squared difference -> MEAN over the non-batch dimensions (the 1/d factor)
+                           -> times 1/2
+                           -> SUM over the batch
+
+    Summing over the batch (rather than averaging) keeps each sample's gradient independent
+    of the batch size, exactly as `problems.make_phi` does for the per-measurement
+    fidelity.  Dividing by d keeps a useful mu independent of the state dimensionality.
+    """
+    batch = int(q.shape[0])
+    diff = (q - anchor).reshape(batch, -1)
+    dims = int(diff.shape[1])
+    return 0.5 * B.sum(diff * diff) / float(dims)
+
+
+def rhso_total_objective(B, fidelity, q, anchor, mu: float):
+    """(total, R) for one inner iteration.  `total` is the scalar Adam differentiates.
+
+    At mu = 0 the returned total is the fidelity object ITSELF, so the differentiated graph
+    is identical to the one this method used before the penalty existed -- backward
+    compatibility is structural, not a matter of a zero multiplier cancelling later.  R is
+    still computed and reported, because "how far did q drift" is worth logging even when
+    nothing penalises it.
+    """
+    penalty = state_anchor_penalty(B, q, anchor)
+    if mu == 0.0:
+        return fidelity, penalty
+    return fidelity + mu * penalty, penalty
 
 
 def _require_adam(spec) -> None:
@@ -200,6 +284,7 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
     grid = rhso_time_grid(spec)
     N = int(_field(spec, "num_rhso_steps"))
     M = int(_field(spec, "num_opt_steps"))
+    mu = rhso_mu(spec)
 
     stats = ReconstructionStats()
     started = time.perf_counter()
@@ -212,7 +297,11 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
 
         # A FRESH optimisation variable AND a fresh Adam state: the terminal transport map
         # has changed, so moments accumulated at s_{k-1} describe a different problem.
-        q = x.detach().clone().requires_grad_(True)
+        # The anchor is a SEPARATE, detached copy of the same state: it is what q is
+        # measured against for the whole stage and it never receives a gradient or an
+        # update, so `q` moving cannot drag it along.
+        x_anchor = x.detach().clone()
+        q = x_anchor.clone().requires_grad_(True)
         opt = torch.optim.Adam([q], lr=float(spec.lr))
 
         for iteration in range(M):
@@ -220,7 +309,8 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
             adapter.reset_counters()
             terminal = integrate_flow(adapter, cond, q, spec, suffix,
                                       reaches_data_endpoint=True)
-            loss = phi(adapter.to_pixels(terminal, differentiable=True))
+            fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
+            loss, penalty = rhso_total_objective(B, fidelity, q, x_anchor, mu)
             loss.backward()
             opt.step()
 
@@ -233,7 +323,11 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
             stats.backprops_through_model += per_objective
             stats.network_forwards += adapter.forward_counter
             if spec.record_loss_history:
+                # Same per-image scaling for all three, so the recorded numbers still
+                # satisfy total = fidelity + mu * R after scaling.
                 stats.loss_history.append(float(loss.detach()) * log_scale)
+                stats.fidelity_history.append(float(fidelity.detach()) * log_scale)
+                stats.state_penalty_history.append(float(penalty.detach()) * log_scale)
             if not torch.isfinite(loss.detach()):
                 raise FloatingPointError(
                     "RHSO objective became non-finite at outer stage %d/%d (s=%.6f), "
@@ -281,6 +375,7 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
     grid = rhso_time_grid(spec)
     N = int(_field(spec, "num_rhso_steps"))
     M = int(_field(spec, "num_opt_steps"))
+    mu = rhso_mu(spec)
 
     stats = ReconstructionStats()
     started = time.perf_counter()
@@ -289,20 +384,28 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
     for k in range(N):
         s_k, s_next = grid[k], grid[k + 1]
 
-        def loss_fn(q, _s=s_k):
-            terminal = adapter.transition(q, _s, 1.0, cond)      # ONE direct transition
-            return phi(adapter.to_pixels(terminal, differentiable=True))
+        # The anchor is closed over as a CONSTANT: stop_gradient here means the penalty's
+        # gradient flows to q only, and nothing rebinds it during the M inner iterations.
+        x_anchor = jax.lax.stop_gradient(x)
 
-        value_and_grad = jax.value_and_grad(loss_fn)
+        def loss_fn(q, _s=s_k, _anchor=x_anchor):
+            terminal = adapter.transition(q, _s, 1.0, cond)      # ONE direct transition
+            fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
+            total, penalty = rhso_total_objective(B, fidelity, q, _anchor, mu)
+            return total, (fidelity, penalty)
+
+        # has_aux keeps the diagnostics out of the differentiated scalar: the gradient is
+        # of `total` alone, so mu = 0 reproduces the pre-penalty gradient exactly.
+        value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
 
         # Fresh variable, fresh Adam moments -- see the standard-flow twin.
-        q = x
+        q = x_anchor
         tx = optax.adam(float(spec.lr))
         opt_state = tx.init(q)
 
         for iteration in range(M):
             adapter.reset_counters()
-            loss, grads = value_and_grad(q)
+            (loss, (fidelity, penalty)), grads = value_and_grad(q)
             updates, opt_state = tx.update(grads, opt_state, q)
             q = optax.apply_updates(q, updates)
 
@@ -316,6 +419,8 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
             stats.network_forwards += adapter.forward_counter
             if spec.record_loss_history:
                 stats.loss_history.append(float(loss) * log_scale)
+                stats.fidelity_history.append(float(fidelity) * log_scale)
+                stats.state_penalty_history.append(float(penalty) * log_scale)
             if not bool(jnp.isfinite(loss)):
                 raise FloatingPointError(
                     "RHSO objective became non-finite at outer stage %d/%d (s=%.6f), "

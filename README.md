@@ -154,8 +154,12 @@ notebooks' rather than merely numerically close.
   stage**. For a standard flow the terminal planner integrates the remaining suffix
   `[s_k, …, 1]` of the same grid; for a MeanFlow it is the single learned transition
   `T(q; s_k → 1)`, which is what makes MeanFlow models cheap here. No control variable, no
-  control penalty, no `λ`, no `K`. It differs from D-Flow, which optimises **one** state and
-  then executes the **whole** trajectory, and from MPC, which optimises explicit controls —
+  control penalty, no `λ`, no `K`. Optionally, `mu > 0` adds a trust-region-like penalty
+  `μ·R(q, x_k)` that discourages the optimised state from drifting far from the state the
+  trajectory actually reached at the start of that stage — an experimental response to
+  observed over-optimisation, off by default (`mu: 0.0`). It differs from D-Flow, which
+  optimises **one** state and then executes the **whole** trajectory, and from MPC, which
+  optimises explicit controls and penalises **their** magnitude with `λ` —
   see [`docs/schedule_and_rhso.md`](docs/schedule_and_rhso.md).
 
 ### Time discretisation: `beta`
@@ -249,7 +253,7 @@ Every sweepable field accepts a scalar or a list; lists expand as a Cartesian pr
 | `mpc_delta_t` only | `delta_t_lambda_scaling` |
 | `pnp` | `num_pnp_steps`, `gamma0`, `alpha`, `noise_samples`, `phi_normalization` |
 | `dflow` | `steps`, `solver`, `num_opt_steps`, `lr`, `optimizer`, `phi_normalization` |
-| `rhso` | `num_rhso_steps`, `num_opt_steps`, `lr`, `optimizer`, `phi_normalization`, `solver` (standard flow only) |
+| `rhso` | `num_rhso_steps`, `num_opt_steps`, `lr`, `mu`, `optimizer`, `phi_normalization`, `solver` (standard flow only) |
 
 The sweepable set is **closed**: any other list (e.g. `guidance.interval`) is a literal
 value, never a sweep.
@@ -662,6 +666,10 @@ columns in `results.csv`; neither is inside `runtime`.
 - RHSO is this repository's own strategy, not a published method: it has no paper defaults
   and no tuned hyperparameters, so `num_rhso_steps`, `num_opt_steps` and `lr` are starting
   values to sweep, recorded as such in every row.
+- RHSO's state-anchor penalty `mu` is likewise experimental: it is motivated by an observed
+  failure mode (measurement consistency improving while PSNR/SSIM/LPIPS degrade), not by a
+  theoretical requirement, and no value is claimed to be optimal. `mu: 0.0` is the default
+  and reproduces the unpenalised objective exactly.
 - The power-law `beta` family is inspired by Flower's time-discretisation ablation; applying
   it to every strategy here is a generalisation of that idea, not a result from that paper.
 - The curated ImageNet list holds 32 classes. Use `data.source: local_folder` for a larger

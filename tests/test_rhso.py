@@ -46,6 +46,41 @@ class _ProbeProblem:
         shape = (BATCH, 256, 256, 3)
 
 
+def _names_used(fn):
+    """Every global name referenced by `fn`, including inside its nested closures.
+
+    `meanflow_rhso` builds its objective in an inner `loss_fn`, so a flat `co_names` scan
+    would miss the very call this check is about.
+    """
+    import types
+    names, stack = set(), [fn.__code__]
+    while stack:
+        code = stack.pop()
+        names.update(code.co_names)
+        stack.extend(c for c in code.co_consts if isinstance(c, types.CodeType))
+    return names
+
+
+class _NoMu:
+    """A spec from before `mu` existed: the attribute is simply not there."""
+
+
+class _StripMu:
+    """Proxy exposing every field of a resolved spec EXCEPT `mu`.
+
+    Used to prove backward compatibility against the actual pre-change interface rather
+    than against `mu = 0` written out explicitly.
+    """
+
+    def __init__(self, spec):
+        object.__setattr__(self, "_spec", spec)
+
+    def __getattr__(self, name):
+        if name == "mu":
+            raise AttributeError("mu")
+        return getattr(object.__getattribute__(self, "_spec"), name)
+
+
 class ToyMeanFlow(MeanFlowAdapter):
     """Analytic learned transition, plus a trace of the intervals it was asked for."""
 
@@ -78,6 +113,29 @@ class ToyMeanFlow(MeanFlowAdapter):
         self.calls.append((round(float(s_from), 12), round(float(s_to), 12)))
         dt = float(s_to) - float(s_from)
         return state + dt * (0.7 * (self.target - state) + 0.2 * jnp.sin(3.0 * state))
+
+
+class RecordingMeanFlow(ToyMeanFlow):
+    """ToyMeanFlow that also keeps the OUTPUT of every transition it is asked for.
+
+    The executed interval of stage k is the transition whose s_to is not 1 (or, at the last
+    stage, the final one), so its recorded output is exactly the state the next stage must
+    anchor to.  Comparing that array against the anchor the next stage actually used is how
+    "a fresh anchor is taken from the executed state" is verified rather than assumed.
+    """
+
+    def __init__(self, target, name="pmf"):
+        super().__init__(target, name=name)
+        self.outputs = []                     # [(s_from, s_to, np.ndarray)] in order
+
+    def transition(self, state, s_from, s_to, conditioning):
+        out = super().transition(state, s_from, s_to, conditioning)
+        # Inside jax.value_and_grad the output is a tracer with no value yet; only the
+        # EXECUTED transitions are concrete, and those are the ones this check needs.
+        if not isinstance(out, jax.core.Tracer):
+            self.outputs.append((round(float(s_from), 12), round(float(s_to), 12),
+                                 np.asarray(jax.device_get(out), np.float64)))
+        return out
 
 
 class ToyLatentMeanFlow(ToyMeanFlow):
@@ -500,6 +558,187 @@ def main():
         "beta=1 gives the uniform grid %s; beta=0.5 gives %s"
         % (["%.3f" % s for s in beta_one], ["%.3f" % s for s in flow_grid])))
 
+    # ---------------------------------------------------------------- mu: state anchor
+    print("\nState-anchor regularisation (mu)")
+    from src.rhso import rhso_mu, rhso_total_objective, state_anchor_penalty
+    from src.utils import JaxBackend, NUMPY_BACKEND
+
+    JB = JaxBackend(jnp)
+    anchor_np = np.random.default_rng(11).normal(size=(BATCH, RES, RES, 3)).astype(np.float32)
+    q_np = anchor_np + 0.3
+    d = int(anchor_np[0].size)
+
+    # 2 + 3. zero at the anchor, positive after a displacement, matching the definition
+    exact = 0.5 * sum(float(np.mean((q_np[b] - anchor_np[b]) ** 2)) for b in range(BATCH))
+    at_anchor = float(state_anchor_penalty(NUMPY_BACKEND, anchor_np.copy(), anchor_np))
+    displaced = float(state_anchor_penalty(NUMPY_BACKEND, q_np, anchor_np))
+    results.append(report(
+        "R = 0 at the anchor, R > 0 once displaced",
+        at_anchor == 0.0 and displaced > 0.0 and abs(displaced - exact) < 1e-6,
+        "R(anchor, anchor) = 0 exactly; R after a 0.3 shift = %.6f, matching "
+        "sum_b mean((q_b - a_b)^2)/2 = %.6f" % (displaced, exact)))
+
+    # 7. one implementation, two frameworks: same normalisation by construction
+    jax_value = float(state_anchor_penalty(JB, jnp.asarray(q_np), jnp.asarray(anchor_np)))
+    shared = all(name in _names_used(fn)
+                 for fn in (flow_rhso, meanflow_rhso)
+                 for name in ("rhso_mu", "rhso_total_objective"))
+    scale_free = abs(
+        float(state_anchor_penalty(NUMPY_BACKEND,
+                                   np.zeros((BATCH, 2, 2, 1), np.float32) + 0.3,
+                                   np.zeros((BATCH, 2, 2, 1), np.float32))) - displaced)
+    results.append(report(
+        "torch and JAX share one normalisation",
+        abs(jax_value - displaced) < 1e-6 and shared and scale_free < 1e-6,
+        "NumPy and JAX backends agree to %.2e on the SAME backend-generic function, which "
+        "both loops call (rhso_mu and rhso_total_objective appear in the bytecode of "
+        "flow_rhso and of meanflow_rhso); the 1/d factor makes R independent of state size. "
+        "Torch parity is therefore structural -- torch itself cannot be executed here"
+        % abs(jax_value - displaced)))
+
+    # batch SUM, not mean
+    doubled = float(state_anchor_penalty(NUMPY_BACKEND, np.concatenate([q_np, q_np]),
+                                         np.concatenate([anchor_np, anchor_np])))
+    results.append(report(
+        "summed over the batch", abs(doubled - 2.0 * displaced) < 1e-6,
+        "doubling the batch doubles R (%.6f -> %.6f), so one sample's gradient never "
+        "depends on how many others share the batch" % (displaced, doubled)))
+
+    # 4. the gradient points back at the anchor
+    grad = np.asarray(jax.grad(lambda z: state_anchor_penalty(JB, z, jnp.asarray(anchor_np)))(
+        jnp.asarray(q_np)))
+    analytic = (q_np - anchor_np) / float(d)
+    stepped = q_np - 0.5 * grad
+    results.append(report(
+        "the gradient points at the anchor",
+        float(np.abs(grad - analytic).max()) < 1e-8
+        and float(np.abs(stepped - anchor_np).max()) < float(np.abs(q_np - anchor_np).max()),
+        "dR/dq = (q - anchor)/d to %.2e, and a descent step strictly reduces the distance "
+        "to the anchor" % float(np.abs(grad - analytic).max())))
+
+    # 10. invalid weights fail clearly
+    bad_rejected = 0
+    for bad in (-1.0, float("nan"), float("inf")):
+        try:
+            rhso_mu(dataclasses.replace(make_spec("rhso"), mu=bad))
+        except ValueError:
+            bad_rejected += 1
+    absent = rhso_mu(_NoMu())
+    results.append(report(
+        "invalid mu fails, absent mu is 0",
+        bad_rejected == 3 and absent == 0.0,
+        "negative, NaN and infinite weights raise; a spec that predates the field resolves "
+        "to mu = 0.0, i.e. the vanilla objective"))
+
+    # 1 + 8. mu = 0 is the unpenalised objective and costs exactly the same
+    adapter = ToyMeanFlow(problem.ground_truth)
+    x0 = jnp.asarray(problem.initialization_guide, jnp.float32)
+    base_spec = make_spec("rhso", num_rhso_steps=3, num_opt_steps=4, lr=0.05, mu=0.0)
+    legacy_spec = _StripMu(base_spec)            # no `mu` attribute at all
+    state_zero, stats_zero = meanflow_rhso(adapter, cond, x0, problem, base_spec)
+    state_legacy, stats_legacy = meanflow_rhso(adapter, cond, x0, problem, legacy_spec)
+    reg_spec = dataclasses.replace(base_spec, mu=0.5)
+    state_reg, stats_reg = meanflow_rhso(adapter, cond, x0, problem, reg_spec)
+
+    bitwise = bool(np.array_equal(np.asarray(jax.device_get(state_zero)),
+                                  np.asarray(jax.device_get(state_legacy))))
+    results.append(report(
+        "mu = 0 reproduces the pre-change behaviour", bitwise
+        and stats_zero.loss_history == stats_legacy.loss_history
+        and all(t == f for t, f in zip(stats_zero.loss_history,
+                                       stats_zero.fidelity_history)),
+        "a spec carrying mu=0.0 and a spec with no mu field at all produce a BITWISE "
+        "identical state and identical loss history, and the optimised scalar is still the "
+        "fidelity itself"))
+
+    counters = ("model_evals_total", "model_evals_planning", "backprops_through_model",
+                "objective_evals", "optimizer_iterations", "control_iterations",
+                "data_gradient_evals", "network_forwards")
+    same_cost = all(getattr(stats_zero, c) == getattr(stats_reg, c) for c in counters)
+    predicted = rhso_cost_estimate({"num_rhso_steps": 3, "num_opt_steps": 4}, MEANFLOW)
+    results.append(report(
+        "mu does not change any compute counter",
+        same_cost and stats_reg.model_evals_total == predicted["model_evals"]
+        == base_spec.expected_model_evals
+        and stats_reg.backprops_through_model == predicted["backprops"],
+        "mu=0 and mu=0.5 agree on all %d counters (%d model evals, %d backprops, %d "
+        "objectives), and both match the unchanged planner estimate"
+        % (len(counters), stats_reg.model_evals_total,
+           stats_reg.backprops_through_model, stats_reg.objective_evals)))
+
+    # the differentiated scalar really is fidelity + mu * R
+    decomposes = all(abs(t - (f + 0.5 * r)) <= 1e-5 * max(1.0, abs(t))
+                     for t, f, r in zip(stats_reg.loss_history, stats_reg.fidelity_history,
+                                        stats_reg.state_penalty_history))
+    results.append(report(
+        "loss history decomposes",
+        decomposes and len(stats_reg.state_penalty_history) == 3 * 4
+        and stats_reg.state_penalty_history[0] == 0.0
+        and max(stats_reg.state_penalty_history) > 0.0,
+        "for all 12 recorded iterations total = fidelity + mu*R; R is 0 at the first "
+        "iteration of a stage (q IS the anchor) and grows to %.4g as q moves away"
+        % max(stats_reg.state_penalty_history)))
+
+    # a larger mu must hold q closer to the anchor
+    tight_spec = dataclasses.replace(base_spec, mu=50.0)
+    _tight_state, stats_tight = meanflow_rhso(adapter, cond, x0, problem, tight_spec)
+    results.append(report(
+        "a larger mu keeps q nearer the anchor",
+        max(stats_tight.state_penalty_history) < max(stats_reg.state_penalty_history),
+        "mu=50 holds the maximum displacement to %.3g against %.3g at mu=0.5 -- the "
+        "penalty acts as a trust region rather than merely being recorded"
+        % (max(stats_tight.state_penalty_history),
+           max(stats_reg.state_penalty_history))))
+
+    # 5 + 6. the anchor is fixed within a stage and refreshed from the EXECUTED state
+    import src.rhso as rhso_module
+    recorder = RecordingMeanFlow(problem.ground_truth)
+    seen = []
+    original = rhso_module.rhso_total_objective
+
+    def spy(B, fidelity, q, anchor, mu):
+        # `q` is a tracer inside value_and_grad and has no value yet; the ANCHOR is the
+        # concrete constant this check is about, and that asymmetry is itself the point.
+        seen.append((np.asarray(jax.device_get(anchor), np.float64),
+                     isinstance(q, jax.core.Tracer)))
+        return original(B, fidelity, q, anchor, mu)
+
+    rhso_module.rhso_total_objective = spy
+    try:
+        anchor_spec = dataclasses.replace(base_spec, num_rhso_steps=3, num_opt_steps=4,
+                                          mu=0.5)
+        _anchor_state, anchor_stats = meanflow_rhso(recorder, cond, x0, problem, anchor_spec)
+    finally:
+        rhso_module.rhso_total_objective = original
+
+    stages = [seen[i * 4:(i + 1) * 4] for i in range(3)]
+    fixed_within = all(np.array_equal(it[0], stage[0][0]) for stage in stages for it in stage)
+    anchor_never_traced = all(
+        not isinstance(it[0], jax.core.Tracer) for stage in stages for it in stage)
+    # q DID move inside each stage: the displacement is 0 at the stage's first iteration
+    # (q is the anchor) and non-zero afterwards, measured against that same fixed anchor.
+    per_stage = [anchor_stats.state_penalty_history[i * 4:(i + 1) * 4] for i in range(3)]
+    moves_within = all(r[0] == 0.0 and max(r[1:]) > 0.0 for r in per_stage)
+    results.append(report(
+        "the anchor is fixed for the whole stage",
+        fixed_within and anchor_never_traced and moves_within,
+        "across all 4 inner iterations of each of the 3 stages the anchor array is bitwise "
+        "unchanged and never a tracer, while the displacement measured against it grows "
+        "from exactly 0 -- a stop-gradient constant, not a moving target"))
+
+    _g = [round(float(t), 12) for t in rhso_time_grid(anchor_spec)]
+    intervals = list(zip(_g[:-1], _g[1:]))
+    executed = [out for out in recorder.outputs if (out[0], out[1]) in intervals]
+    fresh = all(np.array_equal(stages[k + 1][0][0], executed[k][2]) for k in range(2))
+    not_origin = not np.array_equal(stages[1][0][0], stages[0][0][0])
+    starts_at_x0 = np.array_equal(stages[0][0][0],
+                                  np.asarray(jax.device_get(x0), np.float64))
+    results.append(report(
+        "each stage anchors to the state it actually reached",
+        fresh and not_origin and starts_at_x0,
+        "stage 0 anchors to z_t0; stage k+1's anchor is BITWISE the output of stage k's "
+        "executed interval -- not x0, and not the optimised q before execution"))
+
     # ---------------------------------------------------------------- configuration
     if spec_source() == "real":
         print("\nConfiguration: RHSO in the declaration, validation and planning machinery")
@@ -511,12 +750,12 @@ def main():
             "declared with the intended fields",
             decl is not None and not decl.is_mpc and not decl.uses_K
             and set(decl.fields) == {"t0", "beta", "num_rhso_steps", "num_opt_steps", "lr",
-                                     "optimizer", "phi_normalization", "solver"}
+                                     "mu", "optimizer", "phi_normalization", "solver"}
             and all("rhso" in c.supported_methods for c in MODEL_CAPABILITIES.values())
             and "rhso" in COMPARED_METHODS,
-            "shared t0/beta plus N, M, lr, optimizer, phi and solver -- no lambda, no K, no "
-            "control-cost normalisation; supported by every model and compared against "
-            "SDEdit"))
+            "shared t0/beta plus N, M, lr, mu, optimizer, phi and solver -- no lambda, no "
+            "K, no control-cost normalisation; supported by every model and compared "
+            "against SDEdit"))
 
         rejected = {}
         for field, value in (("lam", 1.0), ("K", 2), ("control_cost_normalization",
@@ -569,7 +808,70 @@ def main():
             "%d and %d" % (spec3.expected_model_evals, estimate["backprops"],
                            stats3.model_evals_total, stats3.backprops_through_model)))
 
+        # ---- mu through the configuration system ----------------------------------
+        mu_plan, _w = build_plan({"rhso": {"num_rhso_steps": 2, "num_opt_steps": 3,
+                                           "mu": [0.0, 0.01, 1.0]}})
+        mus = sorted(s.mu for s in mu_plan.specs)
+        leaves = [s.leaf_dir for s in mu_plan.specs]
+        results.append(report(
+            "mu sweeps into distinct jobs",
+            mus == [0.0, 0.01, 1.0] and len({s.job_id for s in mu_plan.specs}) == 3
+            and len(set(leaves)) == 3
+            and sum("mu=" in leaf for leaf in leaves) == 2,
+            "3 jobs with 3 job ids and 3 output paths; mu appears in the two non-default "
+            "leaf names and is omitted at mu=0, exactly as beta is"))
+
+        default_mu, _w = build_plan({"rhso": {"num_rhso_steps": 2}})
+        titles = {s.figure_title() for s in mu_plan.specs}
+        results.append(report(
+            "omitting mu resolves to 0.0",
+            default_mu.specs[0].mu == 0.0
+            and default_mu.specs[0].hyperparameter_sources.get("mu") == "builtin"
+            and sum("mu=" in t for t in titles) == 2,
+            "an RHSO block that never mentions mu resolves to 0.0 with provenance "
+            "'builtin' (the feature off, not an untuned guess), and only penalised jobs "
+            "carry mu in their figure label"))
+
+        bad_mu = 0
+        for bad in (-0.5, float("nan"), float("inf"), "small", True):
+            try:
+                build_plan({"rhso": {"num_rhso_steps": 2, "mu": bad}})
+            except ConfigError:
+                bad_mu += 1
+        wrong_method = 0
+        for method, entry in (("dflow", {"steps": 1}), ("sdedit", {"steps": 2}),
+                              ("mpc_delta_t", {"num_mpc_steps": 2}),
+                              ("pnp", {"num_pnp_steps": 2})):
+            try:
+                build_plan({method: dict(entry, mu=0.1)})
+            except ConfigError:
+                wrong_method += 1
+        results.append(report(
+            "mu is validated and RHSO-only",
+            bad_mu == 5 and wrong_method == 4,
+            "negative, NaN, infinite, non-numeric and boolean weights are all rejected, and "
+            "mu is refused for D-Flow, SDEdit, MPC-delta_t and PnP with an explanation that "
+            "distinguishes it from MPC's lam"))
+
+        mu_costs = {s.mu: (s.expected_model_evals, s.expected_backprops,
+                           s.expected_objective_evals) for s in mu_plan.specs}
+        results.append(report(
+            "mu leaves the planner's cost estimate alone",
+            len(set(mu_costs.values())) == 1,
+            "all three mu values predict the same %d model evaluations / %d backprops / %d "
+            "objectives -- the penalty contains no model evaluation"
+            % mu_costs[0.0]))
+
         import run as runner
+        mu_keys = {runner.warmup_key(s, _ProbeProblem()) for s in mu_plan.specs}
+        results.append(report(
+            "mu is a results column and a warm-up key",
+            "mu" in runner.RESULT_COLUMNS
+            and "hyperparameter_source_mu" in runner.RESULT_COLUMNS
+            and len(mu_keys) == 3,
+            "results.csv records mu and where it came from, and each mu traces its own "
+            "objective so none of them compiles inside a measured region"))
+
         keys = {runner.warmup_key(s, _ProbeProblem()) for s in plan.specs}
         results.append(report(
             "warm-up key and results columns",

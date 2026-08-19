@@ -106,23 +106,66 @@ Method key `rhso`, implemented for **both** dynamics families in `src/rhso.py`.
 ```
 at s_k, holding the current state x_k:
 
-    q⁽⁰⁾ = x_k
+    anchor = stop_gradient(x_k)              ← FIXED for the whole stage
+    q⁽⁰⁾   = x_k
     for j = 0 … M-1:
-        loss    = Φ( to_pixels( G_{s_k → 1}( q⁽ʲ⁾ ), differentiable=True ) )
-        q⁽ʲ⁺¹⁾ = AdamUpdate( q⁽ʲ⁾, ∂loss/∂q )
+        fidelity = Φ( to_pixels( G_{s_k → 1}( q⁽ʲ⁾ ), differentiable=True ) )
+        R        = Σ_b  ‖q⁽ʲ⁾_b − anchor_b‖²  /  (2 d_b)
+        loss     = fidelity + μ · R
+        q⁽ʲ⁺¹⁾  = AdamUpdate( q⁽ʲ⁾, ∂loss/∂q )
     q* = q⁽ᴹ⁾
 
     x_{k+1} = G_{s_k → s_{k+1}}( q* )        ← only ONE interval is executed
 
-then discard the problem and start again at s_{k+1}
+then discard the problem and start again at s_{k+1}, with a FRESH anchor = x_{k+1}
 ```
 
-with `N = num_rhso_steps`, `M = num_opt_steps` and the outer times from the `beta`
-schedule. In one line: **optimise the current state using its terminal prediction →
+with `N = num_rhso_steps`, `M = num_opt_steps`, `μ = mu` and the outer times from the
+`beta` schedule. In one line: **optimise the current state using its terminal prediction →
 execute one scheduled interval → replan.**
 
 The variable being optimised is the **current generative state itself**. There is no
 control `u`, no control penalty, no `λ`, no `K`, no `τ` and no adaptive step size.
+`μ = 0` (the default) is the plain terminal-fidelity objective and is exactly what RHSO did
+before the penalty existed.
+
+### State-anchor regularisation (`mu`) — optional, off by default
+
+Pure terminal fidelity places no cost on *where* `q` goes: it may drift far from the state
+the generative trajectory actually reached and still score well on the measurement. The
+failure mode this addresses is empirical — pushing the inner optimisation harder keeps
+improving measurement consistency while PSNR / SSIM / LPIPS start to degrade. `mu > 0` adds
+a trust-region-like penalty on that displacement:
+
+```
+R(q, x_k) = Σ_b  1/(2 d_b) · ‖q_b − x_{k,b}‖²
+
+    squared difference  →  MEAN over the non-batch state dimensions  →  × ½  →  SUM over the batch
+
+L_k(q) = Φ( G_{s_k → 1}(q) )  +  μ · R(q, x_k)
+```
+
+* **The anchor is `x_k`**: the state at the *start of that outer stage*, detached. It is
+  **not** the trajectory origin `x_0`, and it is **not** a moving average — it does not
+  follow `q`. Stage `k+1` takes a fresh anchor from the state actually executed.
+* **Batch sum, not batch mean**, matching the repository's per-measurement fidelity: one
+  sample's gradient never depends on the batch size.
+* **Divided by `d_b`**, the number of scalar state dimensions per sample, so a useful `μ`
+  does not scale with image or latent dimensionality — a pixel model and a latent model are
+  on comparable footing. An unnormalised `‖q − x_k‖²` would not be.
+* **No `σ²`, `dt`, `beta` or time dependence.** `μ` is the only weight in this iteration.
+* The penalty contains **no generative-model evaluation**, so every compute counter and
+  every dry-run cost estimate is unchanged (verified by a check, not asserted).
+
+`μ` is *not* MPC's `λ`. MPC's `λ` weights the magnitude of an **added control signal** `u`
+in a dynamics that RHSO does not have; `μ` weights a **displacement of the state** from
+where the trajectory actually was. They are different quantities on different objects, with
+different units, and are not interchangeable — which is why the field is separately named
+and rejected outside RHSO.
+
+This is an **experimental extension** motivated by observed over-optimisation. It is not
+claimed to be theoretically required, and no value of `μ` is claimed to be optimal; `μ = 0`
+is a first-class point of the sweep and remains the default.
 
 ### The two families differ in the planner, not in the method
 
@@ -159,14 +202,19 @@ mathematics** and no model-name special-casing.
 * The executed interval always uses the **final post-update `q*`**. The last inner
   objective was evaluated *before* the last Adam update, so its terminal prediction belongs
   to a state that no longer exists and is never reused.
+* The anchor is a **stop-gradient constant for the whole stage**: `x_anchor = x.detach()`
+  in torch, `jax.lax.stop_gradient(x)` closed over by `loss_fn` in JAX. It never receives a
+  gradient or an update. Both families call the same
+  `rhso.state_anchor_penalty(B, q, anchor)`, written against the `Backend` abstraction, so
+  the normalisation is shared by construction rather than transcribed twice.
 
 ### RHSO vs D-Flow vs MPC
 
 | | what is optimised | what is executed after optimising |
 |---|---|---|
 | **D-Flow** | one starting/intermediate state, globally | the **whole** planned trajectory |
-| **MPC** | explicit control variables `u` added to the dynamics, with a control penalty and `λ` | one interval, then replan |
-| **RHSO** | the **current generative state** | one interval, then re-optimise from the state actually reached |
+| **MPC** | explicit control variables `u` added to the dynamics, with a control penalty `λ‖u‖²` | one interval, then replan |
+| **RHSO** | the **current generative state**, optionally with `μ·R` anchoring it to the state the trajectory reached | one interval, then re-optimise from the state actually reached |
 
 RHSO is *terminal planning + state optimisation + partial execution + replanning*. It is
 not implemented by calling D-Flow in a loop; it has its own reconstruction implementation
@@ -178,16 +226,37 @@ and reuses only low-level numerical helpers.
 rhso: {t0: 0.8, beta: [0.5, 1.0, 2.0], num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01}
 ```
 
+Sweeping the state-regularisation weight (the values below are **syntax, not
+recommendations** — nothing here is tuned):
+
+```yaml
+rhso:
+  t0: 1.0
+  beta: 0.5
+  num_rhso_steps: 4
+  num_opt_steps: 20
+  lr: 0.02
+  mu: [0.0, 0.01, 0.1, 1.0]        # 0.0 = the unpenalised objective
+  optimizer: adam
+  phi_normalization: half_mean_squared_per_measurement
+```
+
 | scope | fields |
 |---|---|
 | shared | `t0`, `beta` |
-| `rhso` | `num_rhso_steps`, `num_opt_steps`, `lr`, `optimizer`, `phi_normalization` |
+| `rhso` | `num_rhso_steps`, `num_opt_steps`, `lr`, `mu`, `optimizer`, `phi_normalization` |
 | `rhso` on a standard flow only | `solver` (same allowed values and semantics as the other standard-flow methods) |
+
+`mu` must be finite and `>= 0`; it defaults to `0.0`, takes part in the job id, and appears
+in the output directory name only when it is non-zero (so paths written before the field
+existed are unchanged). It is rejected for every other method — including with MPC's `lam`
+present in the same file — because no other method here optimises a state in place.
 
 `optimizer: adam` is the only supported value in this iteration. `solver` is meaningless for
 MeanFlow RHSO and must be rejected there, exactly as it is for the other MeanFlow methods.
 Deliberately **absent**: `lam`, `control_cost_normalization`, `K`, `warm_start`, `tau`,
-`alpha_min`, adaptive horizons, state regularisation and any new noise hyperparameter.
+`alpha_min`, adaptive horizons, adaptive or time-dependent `mu`, and any new noise
+hyperparameter.
 
 ### Cost accounting
 
@@ -215,8 +284,32 @@ execution = Σ_k ( stages(solver) − [heun && euler_final_step_for_heun && k = 
 ```
 
 `rhso.rhso_cost_estimate(values, dynamics_family, euler_final_step_for_heun)` returns
-exactly these numbers and is the function `config._estimate_cost` should call, so the
-dry-run plan and the measured counters cannot drift apart.
+exactly these numbers and is the function `config._estimate_cost` calls, so the dry-run plan
+and the measured counters cannot drift apart.
+
+**`mu` does not appear anywhere above, and that is the point.** The state penalty is a
+handful of elementwise tensor operations on `q` and a constant; it evaluates no generative
+model, so planning evaluations, total model evaluations, generative backprops, optimizer
+iterations, objective evaluations and the dry-run estimate are all identical at every `mu`.
+A regression check runs the same job at `mu = 0` and `mu > 0` and compares every counter.
+
+### Diagnostics
+
+The scalar Adam differentiates is the **total** objective `Φ + μ·R`, and `loss_history`
+records exactly that — so at `μ = 0` the history is what it always was. Two parallel lists
+in `ReconstructionStats` split it, on the same per-image scale:
+
+| field | meaning |
+|---|---|
+| `loss_history` | the optimised total `Φ + μ·R` |
+| `fidelity_history` | the terminal measurement fidelity `Φ` alone |
+| `state_penalty_history` | the **unweighted** displacement `R` (multiply by `mu` from the result row for the weighted contribution) |
+
+`loss_history[i] == fidelity_history[i] + mu · state_penalty_history[i]` for every recorded
+iteration. `R` is stored unweighted so a `mu` sweep can be re-weighted after the fact. All
+three land in the per-job `results.npz` when `record_loss_history` is on, and are empty for
+every method that has no such split. `mu` itself, and where it came from, are columns in
+`results.csv`.
 
 ---
 
@@ -232,7 +325,10 @@ dry-run plan and the measured counters cannot drift apart.
   whenever it is not 1 — so two runs differing only in `beta` can never share an output
   directory or a plotting group.
 * `METHOD_DECLARATIONS["rhso"]` declares
-  `t0, beta, num_rhso_steps, num_opt_steps, lr, optimizer, phi_normalization, solver`.
+  `t0, beta, num_rhso_steps, num_opt_steps, lr, mu, optimizer, phi_normalization, solver`.
+  `mu` is sweepable, defaults to `0.0` with provenance `builtin` (the feature *off*, not an
+  untuned guess), takes part in `job_id`, appears in `leaf_dir` and the figure label only
+  when non-zero, and is rejected for every other method.
   `lam`, `control_cost_normalization` and `K` are rejected with an explanation;
   `optimizer` is restricted to `adam` by `VALID_RHSO_OPTIMIZERS`; `solver` is accepted only
   where the model's capabilities allow one, so a MeanFlow RHSO job refuses it exactly as
@@ -248,12 +344,14 @@ dry-run plan and the measured counters cannot drift apart.
 
 **`run.py`**
 
-* `warmup_key` includes `beta` and `num_rhso_steps`: both change the resolved time grid, so
+* `warmup_key` includes `beta`, `num_rhso_steps` and `mu`: the first two change the resolved
+  time grid and the third changes the objective that is traced and differentiated, so
   two such jobs never share a warm-up and neither compiles inside its measured region.
 * `warm_up` reduces RHSO's inner Adam budget to one iteration and **never** reduces
   `num_rhso_steps` or `beta` — every outer stage traces a different computation.
-* `RESULT_COLUMNS` gains `beta`, `num_rhso_steps`, `delta_nominal_uniform`, `delta_min` and
-  `delta_max`; `METHOD_ORDER` places RHSO after D-Flow; `run_metadata.json` records the
+* `RESULT_COLUMNS` gains `beta`, `num_rhso_steps`, `mu`, `hyperparameter_source_mu`,
+  `delta_nominal_uniform`, `delta_min` and `delta_max`; `persist_job` writes
+  `fidelity_history` and `state_penalty_history` beside `loss_history` in `results.npz`; `METHOD_ORDER` places RHSO after D-Flow; `run_metadata.json` records the
   time-schedule policy.
 
 Nothing else in either file changed, and a configuration that mentions neither `beta` nor

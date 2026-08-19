@@ -26,7 +26,7 @@
 #   mpc_delta_t delta_t_lambda_scaling
 #   pnp         num_pnp_steps, gamma0, alpha, noise_samples, phi_normalization
 #   dflow       steps, solver, num_opt_steps, lr, optimizer, phi_normalization
-#   rhso        num_rhso_steps, num_opt_steps, lr, optimizer, phi_normalization,
+#   rhso        num_rhso_steps, num_opt_steps, lr, mu, optimizer, phi_normalization,
 #               solver (standard-flow models only)
 # Any other list (e.g. models.jit.guidance.interval) is a literal value, never a sweep.
 #
@@ -142,7 +142,11 @@ experiments:
           # scheduled interval, replan.  For a standard flow the inner objective integrates
           # the remaining suffix [s_k, ..., 1], so cost falls as k grows.  Uncomment to run:
           # it is fully declared, validated and costed like any other method.
-          # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01, solver: heun}
+          # `mu` (default 0.0) optionally anchors the optimised state to the state the
+          # trajectory actually reached at the start of the stage; 0.0 is the plain
+          # terminal-fidelity objective and is NOT MPC's control lam.
+          # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01,
+          #               solver: heun, mu: 0.0}
       pmf:
         methods:
           sdedit:      {t0: 0.8, steps: [1, 2]}
@@ -156,7 +160,10 @@ experiments:
           # so N*M planning evaluations and N*(M+1) in total.  `solver` is meaningless here
           # and is rejected.  A beta sweep is cheap and is where this method is interesting:
           # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01,
-          #               beta: [0.5, 1.0, 2.0]}
+          #               beta: [0.5, 1.0, 2.0], mu: 0.0}
+          # Sweeping the state-anchor weight instead (SYNTAX, not tuned values):
+          # rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 20, lr: 0.02,
+          #               mu: [0.0, 0.01, 0.1, 1.0]}
 
   # ------------------------------------------------------------------- 2. deblurring
   deblurring:
@@ -329,6 +336,14 @@ experiments:
 #
 #   sdedit: {t0: 0.8, steps: 4, beta: [0.5, 1.0, 2.0]}
 #   rhso:   {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.01, beta: [0.5, 1.0, 2.0]}
+#
+# RHSO's optional state-anchor penalty.  mu weights how far the OPTIMISED state may move
+# from the state the trajectory actually reached at the start of that outer stage; mu = 0
+# (the default) is the plain terminal-fidelity objective.  It is NOT MPC's control lam.
+# The values below show sweep SYNTAX -- none of them is tuned or recommended:
+#   rhso:   {t0: 1.0, beta: 0.5, num_rhso_steps: 4, num_opt_steps: 20, lr: 0.02,
+#            mu: [0.0, 0.01, 0.1, 1.0], optimizer: adam,
+#            phi_normalization: half_mean_squared_per_measurement}
 #
 # beta = 1 reproduces existing results exactly, so a beta sweep always contains its own
 # control.  Sweeping beta where the trajectory has a single interval (steps: 1) has no

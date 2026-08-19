@@ -482,8 +482,9 @@ def warmup_key(spec, problem) -> Tuple:
             spec.num_pnp_steps, spec.noise_samples,
             # D-Flow: the trajectory graph, not the number of Adam updates.
             spec.optimizer,
-            # RHSO: N fixes the outer grid AND, for a standard flow, every planning suffix.
-            spec.num_rhso_steps)
+            # RHSO: N fixes the outer grid AND, for a standard flow, every planning suffix;
+            # mu changes the objective that is traced and differentiated.
+            spec.num_rhso_steps, spec.mu)
 
 
 # =====================================================================================
@@ -500,8 +501,10 @@ RESULT_COLUMNS = [
     "control_cost_normalization", "delta_t_lambda_scaling",
     # PnP-Flow / D-Flow / RHSO hyperparameters
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps", "num_rhso_steps",
+    "mu",
     "hyperparameter_source_lam", "hyperparameter_source_n_ctrl", "hyperparameter_source_lr",
     "hyperparameter_source_gamma0", "hyperparameter_source_alpha",
+    "hyperparameter_source_mu",
     "psnr", "ssim", "lpips", "measurement_rmse", "missing_rmse", "missing_psnr",
     "missing_ssim", "observed_rmse", "observed_psnr",
     "degraded_psnr", "degraded_ssim", "degraded_lpips", "guide_psnr",
@@ -554,12 +557,13 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "delta_t_lambda_scaling": spec.delta_t_lambda_scaling,
         "num_pnp_steps": spec.num_pnp_steps, "gamma0": spec.gamma0, "alpha": spec.alpha,
         "noise_samples": spec.noise_samples, "num_opt_steps": spec.num_opt_steps,
-        "num_rhso_steps": spec.num_rhso_steps,
+        "num_rhso_steps": spec.num_rhso_steps, "mu": spec.mu,
         "hyperparameter_source_lam": spec.hyperparameter_sources.get("lam"),
         "hyperparameter_source_n_ctrl": spec.hyperparameter_sources.get("n_ctrl"),
         "hyperparameter_source_lr": spec.hyperparameter_sources.get("lr"),
         "hyperparameter_source_gamma0": spec.hyperparameter_sources.get("gamma0"),
         "hyperparameter_source_alpha": spec.hyperparameter_sources.get("alpha"),
+        "hyperparameter_source_mu": spec.hyperparameter_sources.get("mu"),
         "psnr": metrics.get("psnr"), "ssim": metrics.get("ssim"),
         "lpips": metrics.get("lpips"), "measurement_rmse": metrics.get("measurement_rmse"),
         "missing_rmse": metrics.get("missing_rmse"), "missing_psnr": metrics.get("missing_psnr"),
@@ -692,6 +696,14 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
     arrays: Dict[str, Any] = {"reconstruction": to_uint8(run["pixels"])}
     if spec.record_loss_history and run["stats"].loss_history:
         arrays["loss_history"] = np.asarray(run["stats"].loss_history, np.float32)
+        # RHSO with a state-anchor penalty splits that same scalar into its two parts, on
+        # the same per-image scale: loss = fidelity + mu * state_penalty. Absent for every
+        # method that has no such split.
+        if run["stats"].fidelity_history:
+            arrays["fidelity_history"] = np.asarray(run["stats"].fidelity_history,
+                                                    np.float32)
+            arrays["state_penalty_history"] = np.asarray(
+                run["stats"].state_penalty_history, np.float32)
     np.savez_compressed(out / "results.npz", **arrays)
     if save_images:
         img_dir = out / "images"

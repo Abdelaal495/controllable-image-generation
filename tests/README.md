@@ -45,14 +45,29 @@ and distinct from D-Flow. The standard-flow parts that are not torch-specific �
 suffix, the evaluation counts, `flow_step`, and `integrate_flow` over a non-uniform suffix
 compared bitwise against a reference integrator — are executed too.
 
+It also covers RHSO's optional state-anchor regularisation `mu`: that `R` is zero at the
+anchor and positive after a displacement, that its gradient equals `(q − anchor)/d` and a
+descent step strictly shortens the distance to the anchor, that `R` is summed over the batch
+and normalised by the state dimensionality, that the anchor stays bitwise fixed across a
+stage's inner iterations while the displacement grows from exactly zero, that stage `k+1`
+anchors bitwise to stage `k`'s **executed** state (not `x0`, not the optimised `q`), that a
+larger `mu` really does hold `q` nearer the anchor, that every compute counter is identical
+at `mu = 0` and `mu > 0`, and that a spec carrying `mu = 0.0` and one with no `mu` attribute
+at all produce a **bitwise identical** result. Torch/JAX parity is asserted structurally —
+both loops are shown (by scanning their bytecode, nested closures included) to call the one
+backend-generic `rhso.state_anchor_penalty`, whose NumPy and JAX evaluations agree — because
+`flow_rhso` itself cannot run here.
+
 `tests/spec_support.py` builds every spec through the **real** validator and planner: it
 assembles a small in-memory configuration, runs `validate_config` and `resolve_run_plan`,
 and splits overrides automatically between the configuration (where they are validated) and
 `dataclasses.replace`. A test that runs at all has therefore already proved its method and
 fields are properly declared. Both scripts also exercise the configuration directly — `beta`
 sweeping into distinct job ids and directories, `delta` becoming null at `beta != 1`, RHSO
-rejecting `lam`/`K`/`control_cost_normalization`/non-Adam optimisers, and the warm-up key
-separating beta-distinct jobs. A documented stand-in remains as a fallback if
+rejecting `lam`/`K`/`control_cost_normalization`/non-Adam optimisers, `mu` sweeping into
+distinct job ids and output paths while leaving the cost estimate untouched, `mu` being
+refused for every non-RHSO method, and the warm-up key separating beta- and mu-distinct
+jobs. A documented stand-in remains as a fallback if
 `src/config.py` cannot be imported at all; each script prints which path it used.
 
 ## What these tests do NOT cover

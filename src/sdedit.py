@@ -57,6 +57,17 @@ class ReconstructionStats:
         denoiser_samples      LOGICAL prior/denoiser applications, including PnP's initial
                               projection and every one of its M noise realisations, even if
                               an implementation later vectorises them into one network call.
+
+    The third block was added with RHSO's optional state-anchor regularisation.  It splits
+    the SAME scalar `loss_history` already records into its two parts, on the same
+    per-image scale, so that for every recorded iteration
+
+        loss_history[i] == fidelity_history[i] + mu * state_penalty_history[i]
+
+    `state_penalty_history` is the UNWEIGHTED displacement R, not mu * R: mu is a resolved
+    job field, so keeping R raw means a mu sweep can be re-weighted after the fact.  Both
+    lists stay empty for every method that has no such split (and whenever
+    `record_loss_history` is off), so nothing that reads `loss_history` changes.
     """
     control_iterations: int = 0
     model_evals_planning: int = 0        # v_theta / T_theta calls inside a control loop
@@ -73,6 +84,10 @@ class ReconstructionStats:
     optimizer_iterations: int = 0
     denoiser_samples: int = 0
 
+    # -- added with RHSO's state-anchor regularisation --------------------------------
+    fidelity_history: List[float] = field(default_factory=list)
+    state_penalty_history: List[float] = field(default_factory=list)
+
     def merge(self, other: "ReconstructionStats") -> None:
         self.control_iterations += other.control_iterations
         self.model_evals_planning += other.model_evals_planning
@@ -86,6 +101,8 @@ class ReconstructionStats:
         self.objective_evals += other.objective_evals
         self.optimizer_iterations += other.optimizer_iterations
         self.denoiser_samples += other.denoiser_samples
+        self.fidelity_history.extend(other.fidelity_history)
+        self.state_penalty_history.extend(other.state_penalty_history)
 
 
 # `canonical_time_grid` used to be defined HERE, which made an algorithm module the owner

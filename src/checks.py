@@ -16,6 +16,7 @@ of a long run, unless `on_failure="raise"`.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -329,6 +330,102 @@ def check_time_grid(plan) -> Tuple[bool, str]:
                           % counted if not problems else "; ".join(problems[:5]))
 
 
+def check_rhso_state_penalty(plan=None) -> Tuple[bool, str]:
+    """RHSO's state-anchor regulariser: its algebra, its normalisation and its plan wiring.
+
+    Pure arithmetic on the NumPy reference backend, which is the SAME code path the torch
+    and JAX backends take (`rhso.state_anchor_penalty` is written against the `Backend`
+    abstraction), so an error in the normalisation shows up here without a checkpoint.
+    """
+    from .rhso import rhso_mu, rhso_total_objective, state_anchor_penalty
+    B = NUMPY_BACKEND
+    problems = []
+
+    rng = np.random.default_rng(0)
+    anchor = rng.normal(size=(3, 4, 5, 2)).astype(np.float32)
+
+    if float(state_anchor_penalty(B, anchor.copy(), anchor)) != 0.0:
+        problems.append("R != 0 when q == anchor")
+
+    q = anchor + 0.25
+    d = int(anchor[0].size)
+    expected = 0.5 * sum(float(np.mean((q[b] - anchor[b]) ** 2)) for b in range(len(q)))
+    got = float(state_anchor_penalty(B, q, anchor))
+    if abs(got - expected) > 1e-6:
+        problems.append("R = %.8g does not match the per-sample definition %.8g"
+                        % (got, expected))
+    if got <= 0.0:
+        problems.append("R is not positive after a displacement")
+
+    # 1/d normalisation: the SAME per-element displacement must give the same R at any
+    # state dimensionality, which is what makes a useful mu comparable across models.
+    small = np.zeros((3, 2, 2, 1), np.float32)
+    if abs(float(state_anchor_penalty(B, small + 0.25, small)) - got) > 1e-6:
+        problems.append("R depends on the state dimensionality; the 1/d factor is wrong")
+
+    # Batch SUM, not mean: doubling the batch with the same displacement doubles R, so one
+    # sample's gradient never depends on how many others share the batch.
+    doubled = float(state_anchor_penalty(B, np.concatenate([q, q]),
+                                         np.concatenate([anchor, anchor])))
+    if abs(doubled - 2.0 * got) > 1e-6:
+        problems.append("R is averaged over the batch instead of summed")
+
+    # Analytic gradient dR/dq = (q - anchor)/d, i.e. a descent step points AT the anchor.
+    grad = (q - anchor) / float(d)
+    stepped = q - 0.5 * grad
+    if not float(np.abs(stepped - anchor).max()) < float(np.abs(q - anchor).max()):
+        problems.append("a descent step on R does not move q towards the anchor")
+
+    # mu = 0 must return the fidelity object itself, so the differentiated graph is the
+    # one RHSO had before the penalty existed.
+    fidelity = np.float32(1.25)
+    total0, pen0 = rhso_total_objective(B, fidelity, q, anchor, 0.0)
+    total2, pen2 = rhso_total_objective(B, fidelity, q, anchor, 2.0)
+    if total0 is not fidelity:
+        problems.append("mu=0 does not return the fidelity scalar unchanged")
+    if abs(float(total2) - (float(fidelity) + 2.0 * float(pen2))) > 1e-6:
+        problems.append("total objective != fidelity + mu * R")
+    if abs(float(pen0) - float(pen2)) > 1e-6:
+        problems.append("the reported R depends on mu")
+
+    for bad in (-1.0, float("nan"), float("inf")):
+        try:
+            rhso_mu(_MuSpec(bad))
+            problems.append("mu=%r was accepted" % (bad,))
+        except ValueError:
+            pass
+    if rhso_mu(_MuSpec(None)) != 0.0:
+        problems.append("a spec without mu does not resolve to 0.0")
+
+    counted = 0
+    if plan is not None:
+        for spec in getattr(plan, "specs", ()):
+            if spec.method != "rhso":
+                if getattr(spec, "mu", None) is not None:
+                    problems.append("%s: mu is set on a non-RHSO job" % spec.job_id)
+                continue
+            counted += 1
+            mu = getattr(spec, "mu", None)
+            if mu is None or float(mu) < 0.0 or not math.isfinite(float(mu)):
+                problems.append("%s: mu is %r" % (spec.job_id, mu))
+            if float(mu or 0.0) and "mu=" not in spec.leaf_dir:
+                problems.append("%s: a non-zero mu is missing from the output path"
+                                % spec.job_id)
+
+    return not problems, (
+        "R = sum_b ||q_b - x_k,b||^2 / (2 d_b): zero at the anchor, positive after a "
+        "displacement, gradient towards the anchor, dimension-normalised, summed over the "
+        "batch; mu = 0 returns the unpenalised objective; %d RHSO job(s) carry a valid mu"
+        % counted if not problems else "; ".join(problems[:5]))
+
+
+class _MuSpec:
+    """Minimal stand-in for `rhso_mu`, which reads exactly one attribute."""
+
+    def __init__(self, mu):
+        self.mu = mu
+
+
 def check_beta_schedule() -> Tuple[bool, str]:
     """The universal power-law grid itself: validation, endpoints, legacy regression.
 
@@ -632,6 +729,8 @@ def run_structural_checks(plan, problems: Dict[str, InverseProblem], data_manage
               % ", ".join(sorted(backends)))
     report.run("plan", "unique_jobs", lambda: check_plan_uniqueness(plan), verbose)
     report.run("schedule", "beta_schedule", check_beta_schedule, verbose)
+    report.run("plan", "rhso_state_penalty",
+               lambda: check_rhso_state_penalty(plan), verbose)
     report.run("plan", "time_grid", lambda: check_time_grid(plan), verbose)
     report.run("plan", "delta_t_lambda_scaling",
                lambda: check_delta_t_lambda_scaling(plan), verbose)
@@ -911,6 +1010,54 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                                       history[0] if history else float("nan"),
                                       history[-1] if history else float("nan")))
 
+    def rhso_state_regularization():
+        """mu adds a state-anchor penalty and NOTHING else.
+
+        Run on the real model, once without the penalty and once with it, from the SAME
+        initial state.  The compute counters must be identical -- the penalty contains no
+        model evaluation -- and the recorded histories must satisfy
+        total = fidelity + mu * R with R >= 0 and R = 0 at the first iteration of the first
+        stage, where q still IS the anchor.
+        """
+        from .rhso import rhso_reconstruct
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+
+        runs = {}
+        for mu in (0.0, 0.5):
+            tiny = _probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2, mu=mu,
+                               record_loss_history=True)
+            x0 = adapter.initial_state(guide, tiny.t0, eps)
+            _state, runs[mu] = rhso_reconstruct(adapter, cond, x0, sub_problem, tiny)
+
+        base, reg = runs[0.0], runs[0.5]
+        counters = ("model_evals_total", "model_evals_planning", "backprops_through_model",
+                    "objective_evals", "optimizer_iterations", "control_iterations",
+                    "data_gradient_evals")
+        same_cost = all(getattr(base, c) == getattr(reg, c) for c in counters)
+
+        decomposes = all(
+            abs(t - (f + 0.5 * r)) <= 1e-4 * max(1.0, abs(t))
+            for t, f, r in zip(reg.loss_history, reg.fidelity_history,
+                               reg.state_penalty_history))
+        # The first inner iteration of the first stage evaluates the objective at q = the
+        # anchor itself, so its displacement is exactly zero in both runs.
+        starts_at_anchor = (reg.state_penalty_history[0] == 0.0
+                            and base.state_penalty_history[0] == 0.0)
+        drifts = any(r > 0.0 for r in reg.state_penalty_history[1:])
+        unpenalised = all(t == f for t, f in zip(base.loss_history, base.fidelity_history))
+
+        ok = (base.finite and reg.finite and same_cost and decomposes and starts_at_anchor
+              and drifts and unpenalised)
+        return ok, ("mu=0 vs mu=0.5 on the same z_t0: identical counters (%d model eval(s), "
+                    "%d backprop(s), %d objective(s)); total = fidelity + mu*R holds for "
+                    "all %d recorded iteration(s); R starts at 0 (q == anchor) and grows to "
+                    "%.4g; mu=0 leaves the objective equal to the fidelity"
+                    % (reg.model_evals_total, reg.backprops_through_model,
+                       reg.objective_evals, len(reg.loss_history),
+                       max(reg.state_penalty_history)))
+
     if verbose:
         print("Model checks for %s" % adapter.spec.name.upper())
     report.run(scope, "shapes", shapes, verbose)
@@ -927,6 +1074,7 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
         report.run(scope, "dflow_optimisation", dflow_optimisation, verbose)
     if "rhso" in wanted:
         report.run(scope, "rhso_receding_horizon", rhso_receding_horizon, verbose)
+        report.run(scope, "rhso_state_regularization", rhso_state_regularization, verbose)
     for name, fn in adapter.sanity_checks().items():
         report.run(scope, name, lambda f=fn: f(ctx), verbose)
     return report

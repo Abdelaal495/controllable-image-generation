@@ -306,8 +306,12 @@ DFLOW_FIELDS: Tuple[str, ...] = (
 # variable is the state itself, so there is nothing to trade the fidelity off against.
 # `solver` is meaningful only for standard-flow models; the MeanFlow capability table has no
 # solver, so the validator rejects it there exactly as it does for the other methods.
+# `mu` is RHSO's OWN state-anchor regularisation weight and is deliberately not named
+# `lam`: MPC's lambda weights an added control signal, this weights a displacement of the
+# state from where the trajectory actually was.  It defaults to 0.0 (penalty off).
 RHSO_FIELDS: Tuple[str, ...] = (
-    "num_rhso_steps", "num_opt_steps", "lr", "optimizer", "phi_normalization", "solver")
+    "num_rhso_steps", "num_opt_steps", "lr", "mu", "optimizer", "phi_normalization",
+    "solver")
 
 METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
     "sdedit": MethodDeclaration(
@@ -337,7 +341,10 @@ METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
         "interval, then discard the problem and re-optimise from the state actually reached. "
         "No control variable, no control penalty, no lambda and no K. For a standard flow "
         "the terminal planner integrates the remaining suffix of the outer grid; for a "
-        "MeanFlow it is the single learned transition T(q; s_k -> 1)."),
+        "MeanFlow it is the single learned transition T(q; s_k -> 1). Optionally adds "
+        "mu * R(q, x_k), a trust-region-like penalty on how far the optimised state has "
+        "moved from the state the trajectory actually reached at the start of that stage; "
+        "mu = 0 (the default) is the plain terminal-fidelity objective."),
     "dflow": MethodDeclaration(
         "dflow", "D-Flow", False, False, SHARED_FIELDS + DFLOW_FIELDS,
         "Optimises the starting generative state q by differentiating the terminal "
@@ -363,7 +370,7 @@ SWEEPABLE_FIELDS: Tuple[str, ...] = (
     # D-Flow
     "num_opt_steps",
     # RHSO
-    "num_rhso_steps",
+    "num_rhso_steps", "mu",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -448,6 +455,9 @@ RHSO_DEFAULTS: Dict[str, Any] = {
     "num_opt_steps": 10,
     "lr": 0.01,
     "optimizer": "adam",
+    # NOT an untuned guess but a deliberate OFF switch: 0.0 is the vanilla objective, so
+    # every RHSO configuration written before this field existed keeps its exact meaning.
+    "mu": 0.0,
 }
 UNTUNED = "repository_default_untuned"
 
@@ -705,6 +715,14 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                 raise ConfigError("%s: num_rhso_steps must be an integer >= 1, got %r."
                                   % (tag, v))
+        elif field_name == "mu":
+            # _finite() rejects booleans, non-numbers, NaN and +/-inf in one place.
+            if not _finite(v) or float(v) < 0.0:
+                raise ConfigError(
+                    "%s: mu must be a finite, non-negative number, got %r.\n"
+                    "    mu weights RHSO's state-anchor penalty "
+                    "R = sum_b ||q_b - x_k,b||^2 / (2 d_b); mu = 0 (the default) disables "
+                    "it and reproduces the plain terminal-fidelity objective." % (tag, v))
         else:                                                       # pragma: no cover
             raise ConfigError("Sweepable field %r has no validation rule." % field_name)
 
@@ -1001,6 +1019,14 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
                     "%s: 'solver' does not apply to PnP-Flow. Its prior step is a SINGLE "
                     "denoiser evaluation D_s(q) = q + (1 - s) v(q, s), not an ODE solve; there "
                     "is no trajectory to integrate." % where)
+            if key == "mu":
+                raise ConfigError(
+                    "%s: 'mu' is RHSO's state-anchor regularisation weight and does not "
+                    "apply to %s.\n    It penalises how far the OPTIMISED STATE has moved "
+                    "from the state the trajectory actually reached, which only exists in a "
+                    "method that optimises a state in place.\n    MPC's control penalty is "
+                    "a different quantity with a different name ('lam')."
+                    % (where, method_decl.title))
             if key in ("lam", "control_cost_normalization") and method_name == "rhso":
                 raise ConfigError(
                     "%s: %r is meaningless for RHSO and is rejected.\n"
@@ -1164,6 +1190,9 @@ class JobSpec:
 
     # -- RHSO ---------------------------------------------------------------------------
     num_rhso_steps: Optional[int] = None
+    # State-anchor regularisation weight. 0.0 = off = the objective RHSO had before this
+    # field existed; None for every method that is not RHSO.
+    mu: Optional[float] = None
 
     # -- resolved schedule metadata (derived; see src/schedule.py) ----------------------
     # delta_nominal_uniform is (1 - s0)/N for this method's own trajectory and is reported
@@ -1243,6 +1272,10 @@ class JobSpec:
             if self.solver:
                 parts.append(self.solver)
             parts += ["opt=%d" % self.num_opt_steps, "lr=%g" % self.lr, self.optimizer]
+            # Omitted at the default, exactly like beta: mu=0 keeps the directory names a
+            # pre-mu run would have produced, and job_id disambiguates regardless.
+            if self.mu:
+                parts.append("mu=%g" % self.mu)
             if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
                 parts.append("phi=%s" % self.phi_normalization)
         else:
@@ -1285,10 +1318,11 @@ class JobSpec:
                        (" %s" % self.solver) if self.solver else "", self.num_opt_steps,
                        self.lr, self._beta_suffix))
         if self.method == "rhso":
-            return ("%s | %s/%s | RHSO | t0=%.2f N=%d%s opt=%d lr=%g%s"
+            return ("%s | %s/%s | RHSO | t0=%.2f N=%d%s opt=%d lr=%g%s%s"
                     % (self.experiment, self.model, self.problem, self.t0,
                        self.num_rhso_steps, (" %s" % self.solver) if self.solver else "",
-                       self.num_opt_steps, self.lr, self._beta_suffix))
+                       self.num_opt_steps, self.lr,
+                       (" mu=%g" % self.mu) if self.mu else "", self._beta_suffix))
         return ("%s | %s/%s | %s | t0=%.2f N=%d %s=%.4g lam=%g nctrl=%d lr=%g%s"
                 % (self.experiment, self.model, self.problem, self.method_title, self.t0,
                    self.num_mpc_steps,
@@ -1325,6 +1359,9 @@ class JobSpec:
             lines.append("RHSO")
             lines.append("t0=%.2g N=%d" % (self.t0, self.num_rhso_steps))
             lines.append("opt=%d lr=%g" % (self.num_opt_steps, self.lr))
+            # A mu sweep is the point of this field, so panels must never merge over it.
+            if self.mu:
+                lines.append("mu=%g" % self.mu)
         else:
             lines.append("MPC-dt")
             lines.append("t0=%.2g N=%d" % (self.t0, self.num_mpc_steps))
@@ -1436,6 +1473,7 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rhso_num_opt_steps": RHSO_DEFAULTS["num_opt_steps"],
     "rhso_lr": RHSO_DEFAULTS["lr"],
     "rhso_optimizer": RHSO_DEFAULTS["optimizer"],
+    "mu": RHSO_DEFAULTS["mu"],
 }
 
 # Every field a JobSpec can carry from the sweep grid.  Fields a method does not use are
@@ -1446,7 +1484,7 @@ SWEEP_ORDER: Tuple[str, ...] = (
     "optimizer", "warm_start", "grad_clip", "phi_normalization",
     "control_cost_normalization", "delta_t_lambda_scaling",
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps",
-    "num_rhso_steps",
+    "num_rhso_steps", "mu",
 )
 
 
@@ -1623,6 +1661,9 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     axis("num_rhso_steps", BUILTIN_DEFAULTS["num_rhso_steps"], UNTUNED)
                     axis("num_opt_steps", BUILTIN_DEFAULTS["rhso_num_opt_steps"], UNTUNED)
                     axis("lr", BUILTIN_DEFAULTS["rhso_lr"], UNTUNED)
+                    # `builtin`, not UNTUNED: 0.0 is not a guess at a good weight, it is the
+                    # feature being off. A row whose source reads `builtin` had no penalty.
+                    axis("mu", BUILTIN_DEFAULTS["mu"])
                     axis("optimizer", BUILTIN_DEFAULTS["rhso_optimizer"])
                     # MeanFlow adapters have default_solver None, so a MeanFlow RHSO job
                     # resolves to no solver and the validator rejects any explicit one.
@@ -1738,8 +1779,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                          values["num_opt_steps"],
                                          # beta and the RHSO horizon change what runs, so two
                                          # jobs differing only in them can never collide.
-                                         values["num_rhso_steps"], beta, num_images,
-                                         replicate, size=6)
+                                         values["num_rhso_steps"], values["mu"], beta,
+                                         num_images, replicate, size=6)
 
                     specs.append(JobSpec(
                         job_id=job_id, experiment=exp_name, problem=problem,
@@ -1789,6 +1830,7 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                        if values["num_opt_steps"] is not None else None),
                         num_rhso_steps=(int(values["num_rhso_steps"])
                                         if values["num_rhso_steps"] is not None else None),
+                        mu=(float(values["mu"]) if values["mu"] is not None else None),
                         delta_nominal_uniform=delta_nominal,
                         delta_min=delta_min, delta_max=delta_max,
                         expected_objective_evals=cost["objective_evals"],
@@ -2051,6 +2093,8 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                         print("      outer stages %s | solver %s | opt steps %s | lr %s"
                               % (_axis(sel, "num_rhso_steps", "%s"), _axis(sel, "solver"),
                                  _axis(sel, "num_opt_steps", "%s"), _axis(sel, "lr", "%g")))
+                        print("      mu %s   (0 = no state-anchor penalty)"
+                              % _axis(sel, "mu", "%g"))
                         print("      executed dt %s | phi %s | source %s"
                               % (_dt_axis(sel), _axis(sel, "phi_normalization"),
                                  ", ".join(sorted({s.hyperparameter_sources.get("lr", "?")
@@ -2111,6 +2155,9 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
     print("    solver stage evaluations, a MeanFlow step costs ONE learned transition.")
     print("  * RHSO has no published hyperparameters at all: num_rhso_steps, num_opt_steps")
     print("    and lr are this repository's starting values, recorded as %r." % UNTUNED)
+    print("  * RHSO's mu weights a STATE-anchor penalty (how far the optimised state moved")
+    print("    from the state the trajectory reached); it is NOT MPC's control lambda, and")
+    print("    mu = 0 is the plain terminal-fidelity objective.")
     print("  * All methods share one epsilon per (model, image, replicate), so SDEdit, MPC,")
     print("    PnP, D-Flow and RHSO start from a bit-identical z_t0 at equal t0.")
     print(RULE_)
