@@ -1,5 +1,5 @@
 # =====================================================================================
-# Toronto mega tuning sweep — JiT vs pMF only
+# Mega tuning sweep — JiT vs pMF only
 # =====================================================================================
 # Purpose:
 #   - broad 2-image validation sweep to identify robust hyperparameter patterns;
