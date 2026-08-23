@@ -69,7 +69,8 @@ experiments:
     defaults:
       t0: 1.0
       beta: 1.0
-    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters on the same candidate grids.
+    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters
+      on the same candidate grids.
     models:
       jit:
         methods:
@@ -151,6 +152,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -232,6 +234,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
   denoising_initialization:
@@ -278,8 +281,8 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -315,8 +318,8 @@ experiments:
             optimizer: adam
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   denoising_beta:
@@ -326,7 +329,7 @@ experiments:
     degradation:
       sigma: 0.2
     defaults:
-      t0: 0.8
+      t0: 1.0
     notes: Targeted schedule ablation for MPC-delta_t and RHSO.
     models:
       jit:
@@ -350,8 +353,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -375,8 +378,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   deblurring_main:
@@ -391,7 +394,8 @@ experiments:
     defaults:
       t0: 1.0
       beta: 1.0
-    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters on the same candidate grids.
+    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters
+      on the same candidate grids.
     models:
       jit:
         methods:
@@ -473,6 +477,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -554,6 +559,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
   deblurring_initialization:
@@ -603,8 +609,8 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -640,8 +646,8 @@ experiments:
             optimizer: adam
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   deblurring_beta:
@@ -654,7 +660,7 @@ experiments:
       kernel_size: 7
       padding: reflect
     defaults:
-      t0: 0.8
+      t0: 1.0
     notes: Targeted schedule ablation for MPC-delta_t and RHSO.
     models:
       jit:
@@ -678,8 +684,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -703,8 +709,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   deblurring_rhso_mu:
@@ -718,7 +724,7 @@ experiments:
       padding: reflect
     defaults:
       t0: 1.0
-      beta: 1.0
+      beta: 0.5
     notes: RHSO anchor-weight probe.
     models:
       jit:
@@ -728,13 +734,13 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu:
             - 0.0
             - 0.01
+            - 0.03
             - 0.1
-            - 1.0
             optimizer: adam
             solver: heun
       pmf:
@@ -743,13 +749,13 @@ experiments:
             steps: 4
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu:
             - 0.0
             - 0.01
+            - 0.03
             - 0.1
-            - 1.0
             optimizer: adam
   super_resolution_main:
     enabled: true
@@ -761,7 +767,8 @@ experiments:
     defaults:
       t0: 1.0
       beta: 1.0
-    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters on the same candidate grids.
+    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters
+      on the same candidate grids.
     models:
       jit:
         methods:
@@ -843,6 +850,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -924,6 +932,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
   super_resolution_initialization:
@@ -971,8 +980,8 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1008,8 +1017,8 @@ experiments:
             optimizer: adam
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   super_resolution_beta:
@@ -1020,7 +1029,7 @@ experiments:
       sigma: 0.05
       factor: 2
     defaults:
-      t0: 0.8
+      t0: 1.0
     notes: Targeted schedule ablation for MPC-delta_t and RHSO.
     models:
       jit:
@@ -1044,8 +1053,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1069,8 +1078,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   box_inpainting_main:
@@ -1083,7 +1092,8 @@ experiments:
     defaults:
       t0: 1.0
       beta: 1.0
-    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters on the same candidate grids.
+    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters
+      on the same candidate grids.
     models:
       jit:
         methods:
@@ -1165,6 +1175,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1246,6 +1257,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
   box_inpainting_initialization:
@@ -1293,8 +1305,8 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1330,8 +1342,8 @@ experiments:
             optimizer: adam
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   box_inpainting_beta:
@@ -1342,7 +1354,7 @@ experiments:
       sigma: 0.05
       box: 40
     defaults:
-      t0: 0.8
+      t0: 1.0
     notes: Targeted schedule ablation for MPC-delta_t and RHSO.
     models:
       jit:
@@ -1366,8 +1378,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1391,8 +1403,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   random_inpainting_main:
@@ -1405,7 +1417,8 @@ experiments:
     defaults:
       t0: 1.0
       beta: 1.0
-    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters on the same candidate grids.
+    notes: Matched JiT/pMF structural-budget sweep; tune scale-sensitive parameters
+      on the same candidate grids.
     models:
       jit:
         methods:
@@ -1487,6 +1500,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1568,6 +1582,7 @@ experiments:
             lr:
             - 0.005
             - 0.01
+            - 0.02
             mu: 0.0
             optimizer: adam
   random_inpainting_initialization:
@@ -1615,8 +1630,8 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1652,8 +1667,8 @@ experiments:
             optimizer: adam
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   random_inpainting_beta:
@@ -1664,7 +1679,7 @@ experiments:
       sigma: 0.01
       missing_fraction: 0.7
     defaults:
-      t0: 0.8
+      t0: 1.0
     notes: Targeted schedule ablation for MPC-delta_t and RHSO.
     models:
       jit:
@@ -1688,8 +1703,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
             solver: heun
@@ -1713,8 +1728,8 @@ experiments:
             - 1.0
             - 2.0
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu: 0.0
             optimizer: adam
   random_inpainting_rhso_mu:
@@ -1726,7 +1741,7 @@ experiments:
       missing_fraction: 0.7
     defaults:
       t0: 1.0
-      beta: 1.0
+      beta: 0.5
     notes: RHSO anchor-weight probe.
     models:
       jit:
@@ -1736,13 +1751,13 @@ experiments:
             solver: heun
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu:
             - 0.0
             - 0.01
+            - 0.03
             - 0.1
-            - 1.0
             optimizer: adam
             solver: heun
       pmf:
@@ -1751,11 +1766,11 @@ experiments:
             steps: 4
           rhso:
             num_rhso_steps: 4
-            num_opt_steps: 10
-            lr: 0.01
+            num_opt_steps: 20
+            lr: 0.02
             mu:
             - 0.0
             - 0.01
+            - 0.03
             - 0.1
-            - 1.0
             optimizer: adam
