@@ -238,6 +238,29 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
     return {"repo_paths": paths, "repo_heads": heads}
 
 
+def configure_jax_environment(accel: Dict[str, Any], cache_root: Path) -> Path:
+    """Set JAX's allocator policy BEFORE anything can import jax.
+
+    These are read once, when JAX first initialises its backend, so setting them late is
+    the same as not setting them at all.  That mattered: `src/checks.py` imports JAX for
+    the three-backend operator-parity check REGARDLESS of which models the plan needs, and
+    the structural checks run before `init_frameworks`.  So on a torch-only run -- and on
+    a mixed run too -- JAX initialised with its defaults and PREALLOCATED ~75% of the
+    device (17.7 GiB of a 24 GiB card), which it never gives back.  PyTorch was then left
+    with ~6 GiB, and D-Flow, which keeps its whole trajectory in the autograd graph, died
+    with `CUDA out of memory` while reporting only ~5 GiB allocated by PyTorch itself.
+    """
+    if accel["kind"] == "gpu":
+        # Do not grab the whole device: PyTorch may share this process.
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+        os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    jax_cache = Path(cache_root) / "jax_compilation_cache"
+    jax_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(jax_cache))
+    return jax_cache
+
+
 def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
                     cache_root: Path, verbose: bool = True) -> Dict[str, Any]:
     """Import and configure only the frameworks this plan needs."""
@@ -246,14 +269,7 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
     frameworks = plan.resources.frameworks
 
     if "jax" in frameworks:
-        if accel["kind"] == "gpu":
-            # Do not grab the whole device: PyTorch may share this process.
-            os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-            os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
-        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-        jax_cache = Path(cache_root) / "jax_compilation_cache"
-        jax_cache.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(jax_cache))
+        jax_cache = configure_jax_environment(accel, cache_root)
         import jax
         # Persist compiled executables to disk so compilation is paid ONCE EVER rather
         # than once per session. The defaults skip small/fast entries; pMF's model step is
@@ -1170,6 +1186,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report = checks_module.CheckReport()
     if args.check or args.checks_only:
         print("\n" + RULE)
+        # The parity checks import JAX whatever the plan contains, so its allocator policy
+        # has to be in the environment before they run -- see configure_jax_environment.
+        configure_jax_environment(accel, cache_root)
         checks_module.run_structural_checks(plan, problems, data, report)
         failures = report.failures()
         if failures:

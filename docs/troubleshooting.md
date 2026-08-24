@@ -92,6 +92,64 @@ The pMF and iMF repositories import `wandb` at module scope from their logging u
 even though this repository never logs. Recent versions install an inert stub automatically.
 On older checkouts, `pip install wandb` on a login node also works.
 
+### `TypeError: <module 'wandb' (...)> is a built-in module` while loading SiT or JiT
+
+Fixed. This is the `wandb` stub above misfiring, and it appears in a completely unrelated
+place: a Torch model that loads *after* a JAX model in the same process fails with
+
+```
+RuntimeError: Failed to import diffusers.models.autoencoders.autoencoder_kl ...
+TypeError: <module 'wandb' (<src.models.base._StubFinder object ...>)> is a built-in module
+```
+
+`inspect.getmodule` walks every entry of `sys.modules` and, for each one where
+`hasattr(m, "__file__")` holds, calls `inspect.getfile(m)` — which raises `TypeError` when
+`__file__` is falsy, and `getmodule` does not catch it. The stub used to answer *every*
+attribute with an inert placeholder, `__file__` included, so once pMF or iMF had installed
+it, the next `inspect` call anywhere in the process raised. `torch.library` makes exactly
+such a call while `diffusers` registers its custom ops. The stub now raises
+`AttributeError` for dunders, like a genuinely attribute-less module. `git pull` for the
+fix; installing the real `wandb` also sidesteps it.
+
+### `KeyError: 0` in `utils/vae_util.py` while loading iMF
+
+Fixed. `LatentManager.get_decode_fn` logs the decoder's FLOPs with
+`compiled_decode_fn.cost_analysis()[0]["flops"]`. JAX returned a *list* of per-device dicts
+when iMF was written; current JAX returns the dict itself, so indexing it with `0` raises
+`KeyError: 0` and the checkpoint never loads. The line is pure diagnostics, so
+`src/models/imf.py` restores the old return shape for the duration of the repository's
+constructor rather than patching a pinned upstream checkout inside a gitignored cache.
+`git pull` for the fix.
+
+### `CUDA out of memory` on a 24 GB card while PyTorch reports only ~5 GiB allocated
+
+Fixed. The give-away is the mismatch in the message itself:
+
+```
+GPU 0 has a total capacity of 23.55 GiB of which 5.94 MiB is free.
+... this process has 22.38 GiB memory in use.
+Of the allocated memory 5.29 GiB is allocated by PyTorch ...
+```
+
+The missing ~17 GiB was JAX, inside the same process. `src/checks.py` imports JAX for the
+three-backend operator-parity check no matter which models the plan needs, and the
+structural checks run *before* `init_frameworks`, which is where
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` used to be set. Those variables are read once, when
+JAX first initialises its backend, so setting them afterwards does nothing: JAX came up with
+its defaults and preallocated 75% of the device, permanently. `run.py` now applies the
+allocator policy in `configure_jax_environment()` before the checks run. D-Flow, which keeps
+its whole trajectory in the autograd graph, was the first job to hit the ceiling; a
+torch-only run (`--models sit`) is affected too, because the checks import JAX regardless.
+
+### `TypeError: replace() got multiple values for keyword 'record_loss_history'`
+
+Fixed. `_probe_spec` in `src/checks.py` passed `record_loss_history=False` positionally
+*and* forwarded `**overrides`, while `dflow_optimisation`, `rhso_receding_horizon` and
+`rhso_state_regularization` all pass `record_loss_history=True` because they read
+`stats.loss_history`. All three checks therefore died before testing anything — for every
+model, not just SiT and iMF. It is now a default (`overrides.setdefault`), so callers can
+override it.
+
 ### `JIT cannot run on tpu` when there is no TPU
 
 Fixed. The accelerator probe used to treat `/dev/vfio/*` as a TPU indicator, but

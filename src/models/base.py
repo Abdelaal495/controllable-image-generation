@@ -335,7 +335,20 @@ class _StubFinder:
         return module
 
     def exec_module(self, module):
-        module.__getattr__ = lambda _item: _InertStub()   # type: ignore[attr-defined]
+        def _stub_getattr(item):
+            # Answer ordinary attributes with an inert stub, but let DUNDERS fail the way
+            # a genuinely attribute-less module does.  `inspect.getmodule` walks every
+            # entry of sys.modules and, for each one where `hasattr(m, "__file__")` is
+            # true, calls `inspect.getfile(m)` -- which raises TypeError when `__file__`
+            # is falsy, and `getmodule` does not catch it.  Answering `__file__` with a
+            # stub therefore turned any later `inspect` call ANYWHERE in the process into
+            # a TypeError: that is how a stubbed `wandb` (installed while loading iMF or
+            # pMF) broke `import diffusers...autoencoder_kl` while loading SiT or JiT.
+            if item.startswith("__") and item.endswith("__"):
+                raise AttributeError(item)
+            return _InertStub()
+
+        module.__getattr__ = _stub_getattr                # type: ignore[attr-defined]
         module.__stubbed_by__ = "sdedit-vs-mpcflow"       # type: ignore[attr-defined]
 
 

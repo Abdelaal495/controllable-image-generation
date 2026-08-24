@@ -859,8 +859,14 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     def _probe_spec(method: str, **overrides):
         import dataclasses
         base = by_method.get(method, spec)
-        return dataclasses.replace(base, method=method, num_images=n,
-                                   record_loss_history=False, **overrides)
+        # record_loss_history is a DEFAULT, not a fixed value: dflow_optimisation,
+        # rhso_receding_horizon and rhso_state_regularization all read stats.loss_history
+        # and so pass record_loss_history=True.  Passing it positionally here as well made
+        # every one of those three checks die with
+        #     TypeError: replace() got multiple values for keyword 'record_loss_history'
+        # before it could test anything.
+        overrides.setdefault("record_loss_history", False)
+        return dataclasses.replace(base, method=method, num_images=n, **overrides)
 
     def pnp_initial_projection():
         """The initial prior projection happens exactly once and is counted."""

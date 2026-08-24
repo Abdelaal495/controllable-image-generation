@@ -16,6 +16,7 @@ Two details are easy to get wrong and are therefore called out:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -26,6 +27,33 @@ from ..utils import (MEANFLOW, assert_pixel_batch, gaussian_noise, native_time,
 from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
                    download_and_extract_zip, find_checkpoint_dir, register_adapter,
                    register_prefetch, stub_missing_module)
+
+
+@contextmanager
+def _jax_cost_analysis_as_list():
+    """Make `Compiled.cost_analysis()` subscriptable by index for the iMF repository.
+
+    `utils/vae_util.LatentManager.get_decode_fn` logs the decoder's FLOPs with
+    `compiled_decode_fn.cost_analysis()[0]["flops"]`.  JAX returned a LIST of per-device
+    dicts when iMF was written; current JAX returns the dict itself, so the indexing
+    raises `KeyError: 0` and the checkpoint never loads.  The line is pure diagnostics --
+    it does not shape the decoder -- so the smallest honest fix is to restore the old
+    return shape for exactly as long as the repository's constructor runs, rather than
+    editing a pinned upstream checkout that lives in a gitignored cache.
+    """
+    import jax.stages
+    compiled = jax.stages.Compiled
+    original = compiled.cost_analysis
+
+    def as_list(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        return [result] if isinstance(result, dict) else result
+
+    compiled.cost_analysis = as_list
+    try:
+        yield
+    finally:
+        compiled.cost_analysis = original
 
 
 class IMFAdapter(MeanFlowAdapter):
@@ -94,9 +122,11 @@ class IMFAdapter(MeanFlowAdapter):
             from utils.vae_util import LatentManager
             from diffusers.models import FlaxAutoencoderKL
             self._FlaxAutoencoderKL = FlaxAutoencoderKL
-            self._latent_manager = LatentManager(vae_type=self.vae_type,
-                                                 decode_batch_size=cfg["vae_decode_batch"],
-                                                 input_size=self.latent_size)
+            with _jax_cost_analysis_as_list():
+                self._latent_manager = LatentManager(
+                    vae_type=self.vae_type,
+                    decode_batch_size=cfg["vae_decode_batch"],
+                    input_size=self.latent_size)
             self._vae = self._latent_manager.vae
             self._vae_params = self._latent_manager.vae_params
 
