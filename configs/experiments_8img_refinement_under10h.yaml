@@ -1,0 +1,1115 @@
+# =====================================================================================
+# 8-image main-paper refinement sweep — TIME-BOUNDED (<10h target)
+# =====================================================================================
+# Fixed main-paper operating point:
+#   t0=1.0 (pure noise), beta=1.0 (uniform), num_images=8, batch_size=4.
+# JiT and pMF use exactly the same structural/compute budgets.
+#
+# This revision prunes combinations already well resolved by the 2-image mega sweep
+# and keeps only targeted boundary probes for the remaining loose ends. In particular:
+#   * MPC-delta_t: focused calibration at N=4 + tiny N=8 probe (N=2 dropped; lr=.05 retained only for deblur).
+#   * MPC-RHC: N=4 and task-specific K frozen from the cross-model-consistent result.
+#   * PnP: shared task-specific N narrowed; alpha/gamma boundary calibration retained.
+#   * D-Flow: M=320 step/lr refinement + small M=640 probe at steps 2/4 only.
+#   * RHSO: N=4, direct M={20,40} and lr={.01,.02,.03} boundary test.
+#   * SDEdit: cheap shared [1,2,4,8] step curve.
+#
+# The goal is to finish comfortably overnight while leaving enough 8-image evidence
+# to freeze final configurations tomorrow.
+# Dry-run validated workload: 596 atomic jobs / 4,768 reconstructions;
+# JIT=298, PMF=298. Batched model calls/backprops are close to the previous
+# successful mega run, providing substantial margin versus the original 1,446-job draft.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 4096
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+data:
+  source: hf_imagenet_val
+  local_folder: ''
+  image_size: 256
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+metrics:
+  lpips: true
+  lpips_net: alex
+experiments:
+  denoising_refinement:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation:
+      sigma: 0.2
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Eight-image time-bounded main-paper refinement; pure noise and uniform schedule; shared structural
+      budgets.
+    models:
+      jit:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+            solver: heun
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 15.0
+            - 20.0
+            - 30.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 2
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 10.0
+            - 15.0
+            - 30.0
+          pnp:
+            num_pnp_steps: 50
+            gamma0:
+            - 200000.0
+            - 400000.0
+            - 800000.0
+            - 1200000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+            solver: heun
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 15.0
+            - 20.0
+            - 30.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 2
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 10.0
+            - 15.0
+            - 30.0
+          pnp:
+            num_pnp_steps: 50
+            gamma0:
+            - 200000.0
+            - 400000.0
+            - 800000.0
+            - 1200000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+  denoising_mpc_n8_probe:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation:
+      sigma: 0.2
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted shared N=8 MPC-delta_t boundary probe without Cartesian crossing with the full calibration
+      grid.
+    models:
+      jit:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 20.0
+            - 30.0
+      pmf:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 20.0
+            - 30.0
+  denoising_dflow_m640_probe:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation:
+      sigma: 0.2
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted D-Flow M=640 boundary probe at shared trajectory budgets 2/4 and lr=0.02.
+    models:
+      jit:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+  deblurring_refinement:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Eight-image time-bounded main-paper refinement; pure noise and uniform schedule; shared structural
+      budgets.
+    models:
+      jit:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+            solver: heun
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            - 0.15
+            lam:
+            - 240.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 1
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          pnp:
+            num_pnp_steps: 100
+            gamma0:
+            - 1200000.0
+            - 1600000.0
+            - 2000000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+            solver: heun
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            - 0.15
+            lam:
+            - 240.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 1
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          pnp:
+            num_pnp_steps: 100
+            gamma0:
+            - 1200000.0
+            - 1600000.0
+            - 2000000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+  deblurring_mpc_n8_probe:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted shared N=8 MPC-delta_t boundary probe without Cartesian crossing with the full calibration
+      grid.
+    models:
+      jit:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+      pmf:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+  deblurring_dflow_m640_probe:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation:
+      sigma: 0.05
+      blur_sigma: 1.0
+      kernel_size: 7
+      padding: reflect
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted D-Flow M=640 boundary probe at shared trajectory budgets 2/4 and lr=0.02.
+    models:
+      jit:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+  super_resolution_refinement:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation:
+      factor: 2
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Eight-image time-bounded main-paper refinement; pure noise and uniform schedule; shared structural
+      budgets.
+    models:
+      jit:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+            solver: heun
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 240.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 3
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 120.0
+            - 180.0
+            - 240.0
+          pnp:
+            num_pnp_steps:
+            - 20
+            - 50
+            gamma0:
+            - 25000.0
+            - 50000.0
+            - 100000.0
+            - 200000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+            solver: heun
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 240.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 3
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 120.0
+            - 180.0
+            - 240.0
+          pnp:
+            num_pnp_steps:
+            - 20
+            - 50
+            gamma0:
+            - 25000.0
+            - 50000.0
+            - 100000.0
+            - 200000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+  super_resolution_mpc_n8_probe:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation:
+      factor: 2
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted shared N=8 MPC-delta_t boundary probe without Cartesian crossing with the full calibration
+      grid.
+    models:
+      jit:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+      pmf:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+  super_resolution_dflow_m640_probe:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation:
+      factor: 2
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted D-Flow M=640 boundary probe at shared trajectory budgets 2/4 and lr=0.02.
+    models:
+      jit:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+  box_inpainting_refinement:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation:
+      box: 40
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Eight-image time-bounded main-paper refinement; pure noise and uniform schedule; shared structural
+      budgets.
+    models:
+      jit:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+            solver: heun
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 1
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 30.0
+            - 60.0
+            - 120.0
+          pnp:
+            num_pnp_steps: 100
+            gamma0:
+            - 200000.0
+            - 400000.0
+            - 600000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+            solver: heun
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 1
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 30.0
+            - 60.0
+            - 120.0
+          pnp:
+            num_pnp_steps: 100
+            gamma0:
+            - 200000.0
+            - 400000.0
+            - 600000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+  box_inpainting_mpc_n8_probe:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation:
+      box: 40
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted shared N=8 MPC-delta_t boundary probe without Cartesian crossing with the full calibration
+      grid.
+    models:
+      jit:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 120.0
+            - 180.0
+      pmf:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 40
+            lr: 0.1
+            lam:
+            - 120.0
+            - 180.0
+  box_inpainting_dflow_m640_probe:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation:
+      box: 40
+      sigma: 0.05
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted D-Flow M=640 boundary probe at shared trajectory budgets 2/4 and lr=0.02.
+    models:
+      jit:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+  random_inpainting_refinement:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation:
+      missing_fraction: 0.7
+      sigma: 0.01
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Eight-image time-bounded main-paper refinement; pure noise and uniform schedule; shared structural
+      budgets.
+    models:
+      jit:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+            solver: heun
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 180.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 3
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          pnp:
+            num_pnp_steps:
+            - 20
+            - 50
+            gamma0:
+            - 100000.0
+            - 200000.0
+            - 300000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+            solver: heun
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          sdedit:
+            steps:
+            - 1
+            - 2
+            - 4
+            - 8
+          mpc_delta_t:
+            num_mpc_steps: 4
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.1
+            - 0.15
+            lam:
+            - 180.0
+            - 360.0
+            - 540.0
+          mpc_rhc:
+            num_mpc_steps: 4
+            K: 3
+            n_ctrl:
+            - 20
+            - 40
+            lr:
+            - 0.05
+            - 0.1
+            lam:
+            - 60.0
+            - 120.0
+            - 180.0
+          pnp:
+            num_pnp_steps:
+            - 20
+            - 50
+            gamma0:
+            - 100000.0
+            - 200000.0
+            - 300000.0
+            alpha:
+            - 0.25
+            - 0.5
+            - 0.75
+            noise_samples: 1
+          dflow:
+            steps:
+            - 1
+            - 2
+            - 4
+            num_opt_steps: 320
+            lr:
+            - 0.02
+            - 0.03
+            optimizer: adam
+          rhso:
+            num_rhso_steps: 4
+            num_opt_steps:
+            - 20
+            - 40
+            lr:
+            - 0.01
+            - 0.02
+            - 0.03
+            mu: 0.0
+            optimizer: adam
+  random_inpainting_mpc_n8_probe:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation:
+      missing_fraction: 0.7
+      sigma: 0.01
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted shared N=8 MPC-delta_t boundary probe without Cartesian crossing with the full calibration
+      grid.
+    models:
+      jit:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+      pmf:
+        methods:
+          mpc_delta_t:
+            num_mpc_steps: 8
+            n_ctrl: 20
+            lr: 0.1
+            lam:
+            - 360.0
+            - 540.0
+  random_inpainting_dflow_m640_probe:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation:
+      missing_fraction: 0.7
+      sigma: 0.01
+    defaults:
+      t0: 1.0
+      beta: 1.0
+    notes: Targeted D-Flow M=640 boundary probe at shared trajectory budgets 2/4 and lr=0.02.
+    models:
+      jit:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
+            solver: heun
+      pmf:
+        methods:
+          dflow:
+            steps:
+            - 2
+            - 4
+            num_opt_steps: 640
+            lr: 0.02
+            optimizer: adam
