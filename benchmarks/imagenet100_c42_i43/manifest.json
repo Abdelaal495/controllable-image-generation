@@ -1,0 +1,911 @@
+{
+  "source": "ILSVRC/imagenet-1k",
+  "source_split": "validation",
+  "source_archive": "val_images.tar.gz",
+  "selection_plan": "selection_plan.json",
+  "class_seed": 42,
+  "image_seed": 43,
+  "num_images": 100,
+  "images": [
+    {
+      "filename": "041_ILSVRC2012_val_00027125_n01685808.JPEG",
+      "class_id": 41,
+      "synset": "n01685808",
+      "class_name": "whiptail",
+      "within_class_validation_rank": 25,
+      "original_archive_member": "ILSVRC2012_val_00027125_n01685808.JPEG",
+      "sha256": "769e9aa0c4d7a24c14378dc9aaa3af9ba4c2f383d1ce0eee9bfb779079ce159a"
+    },
+    {
+      "filename": "059_ILSVRC2012_val_00036082_n01739381.JPEG",
+      "class_id": 59,
+      "synset": "n01739381",
+      "class_name": "vine_snake",
+      "within_class_validation_rank": 32,
+      "original_archive_member": "ILSVRC2012_val_00036082_n01739381.JPEG",
+      "sha256": "7aea806bd8258995bc98cf4db4352eec85e2ee2ee32212c049ff04f0d44d9f8f"
+    },
+    {
+      "filename": "064_ILSVRC2012_val_00005617_n01749939.JPEG",
+      "class_id": 64,
+      "synset": "n01749939",
+      "class_name": "green_mamba",
+      "within_class_validation_rank": 20,
+      "original_archive_member": "ILSVRC2012_val_00005617_n01749939.JPEG",
+      "sha256": "516b2e0b197bdc2df14e0fb82c06dd2c8e29d4975d5e07369420c95f8e3df9aa"
+    },
+    {
+      "filename": "073_ILSVRC2012_val_00011677_n01773549.JPEG",
+      "class_id": 73,
+      "synset": "n01773549",
+      "class_name": "barn_spider",
+      "within_class_validation_rank": 2,
+      "original_archive_member": "ILSVRC2012_val_00011677_n01773549.JPEG",
+      "sha256": "bd70744c9087587a3b84c2278f5aa99c0647bfe1969b233581e420a36b49f766"
+    },
+    {
+      "filename": "077_ILSVRC2012_val_00036773_n01775062.JPEG",
+      "class_id": 77,
+      "synset": "n01775062",
+      "class_name": "wolf_spider",
+      "within_class_validation_rank": 28,
+      "original_archive_member": "ILSVRC2012_val_00036773_n01775062.JPEG",
+      "sha256": "282eec4bf57c12e5bff0decab16f4e108d4b17d2e3f450749e013957b2d7c236"
+    },
+    {
+      "filename": "080_ILSVRC2012_val_00039465_n01795545.JPEG",
+      "class_id": 80,
+      "synset": "n01795545",
+      "class_name": "black_grouse",
+      "within_class_validation_rank": 1,
+      "original_archive_member": "ILSVRC2012_val_00039465_n01795545.JPEG",
+      "sha256": "982aefad94da6a6cbfbcf7c43d138fe83a500f8fe72969aa1c34401e994c21fa"
+    },
+    {
+      "filename": "085_ILSVRC2012_val_00003833_n01806567.JPEG",
+      "class_id": 85,
+      "synset": "n01806567",
+      "class_name": "quail",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00003833_n01806567.JPEG",
+      "sha256": "b11a8abca0796600fea6182be48b29c2706a66f64ddb08ab4b2a66a18acf4b50"
+    },
+    {
+      "filename": "095_ILSVRC2012_val_00033977_n01843065.JPEG",
+      "class_id": 95,
+      "synset": "n01843065",
+      "class_name": "jacamar",
+      "within_class_validation_rank": 41,
+      "original_archive_member": "ILSVRC2012_val_00033977_n01843065.JPEG",
+      "sha256": "868c170e8d19867e439215f17df2ebedaf8492c244e88bf2dc7fcb069e8b4ddf"
+    },
+    {
+      "filename": "117_ILSVRC2012_val_00028933_n01968897.JPEG",
+      "class_id": 117,
+      "synset": "n01968897",
+      "class_name": "chambered_nautilus",
+      "within_class_validation_rank": 23,
+      "original_archive_member": "ILSVRC2012_val_00028933_n01968897.JPEG",
+      "sha256": "bbb23df3bc061df39b8e61370265cc2efee6e990241dc7e32c675dd87ff64dcd"
+    },
+    {
+      "filename": "126_ILSVRC2012_val_00047249_n01990800.JPEG",
+      "class_id": 126,
+      "synset": "n01990800",
+      "class_name": "isopod",
+      "within_class_validation_rank": 29,
+      "original_archive_member": "ILSVRC2012_val_00047249_n01990800.JPEG",
+      "sha256": "325bb3411d788aa006740694103006ed39264764e2f192c86e3730468768f116"
+    },
+    {
+      "filename": "139_ILSVRC2012_val_00012518_n02025239.JPEG",
+      "class_id": 139,
+      "synset": "n02025239",
+      "class_name": "ruddy_turnstone",
+      "within_class_validation_rank": 48,
+      "original_archive_member": "ILSVRC2012_val_00012518_n02025239.JPEG",
+      "sha256": "bb12d18eefd7708c5de65b1bf4c8c5c2494ed1ab2e01760c631133e14833dfdd"
+    },
+    {
+      "filename": "147_ILSVRC2012_val_00047167_n02066245.JPEG",
+      "class_id": 147,
+      "synset": "n02066245",
+      "class_name": "grey_whale",
+      "within_class_validation_rank": 11,
+      "original_archive_member": "ILSVRC2012_val_00047167_n02066245.JPEG",
+      "sha256": "d7647b5e139f140c5cc6c12ade387af5b4b78cc2e3e283c4aca6c9ddbc366299"
+    },
+    {
+      "filename": "155_ILSVRC2012_val_00004557_n02086240.JPEG",
+      "class_id": 155,
+      "synset": "n02086240",
+      "class_name": "Shih-Tzu",
+      "within_class_validation_rank": 42,
+      "original_archive_member": "ILSVRC2012_val_00004557_n02086240.JPEG",
+      "sha256": "c208e7eaaf118c171df29cdd466858f47f0bb05f7f103ffb124de46b79eadace"
+    },
+    {
+      "filename": "157_ILSVRC2012_val_00008910_n02086910.JPEG",
+      "class_id": 157,
+      "synset": "n02086910",
+      "class_name": "papillon",
+      "within_class_validation_rank": 37,
+      "original_archive_member": "ILSVRC2012_val_00008910_n02086910.JPEG",
+      "sha256": "a86010d25bbdf1fa7a2d22e75db5c2328cc4a0c2144fe4c54574cfeedf398d9d"
+    },
+    {
+      "filename": "168_ILSVRC2012_val_00006396_n02090379.JPEG",
+      "class_id": 168,
+      "synset": "n02090379",
+      "class_name": "redbone",
+      "within_class_validation_rank": 18,
+      "original_archive_member": "ILSVRC2012_val_00006396_n02090379.JPEG",
+      "sha256": "57682102ae4a4a7a94f0a7cc2e3c13dad11d0c5556da6133c63e1cde07a2103c"
+    },
+    {
+      "filename": "183_ILSVRC2012_val_00014809_n02093859.JPEG",
+      "class_id": 183,
+      "synset": "n02093859",
+      "class_name": "Kerry_blue_terrier",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00014809_n02093859.JPEG",
+      "sha256": "7316c40364f97534c656b9b3c9c957de69db2b075afede6677600d50592497ca"
+    },
+    {
+      "filename": "184_ILSVRC2012_val_00016668_n02093991.JPEG",
+      "class_id": 184,
+      "synset": "n02093991",
+      "class_name": "Irish_terrier",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00016668_n02093991.JPEG",
+      "sha256": "7b6bb5ca8b4cdb93d938523bbfb90fd557be3b5d7b9914ab55c95c388cb67eed"
+    },
+    {
+      "filename": "185_ILSVRC2012_val_00029281_n02094114.JPEG",
+      "class_id": 185,
+      "synset": "n02094114",
+      "class_name": "Norfolk_terrier",
+      "within_class_validation_rank": 20,
+      "original_archive_member": "ILSVRC2012_val_00029281_n02094114.JPEG",
+      "sha256": "525c69561795205eafb903c4552efc467c7019355f29a52261d28109edee8a17"
+    },
+    {
+      "filename": "211_ILSVRC2012_val_00020489_n02100583.JPEG",
+      "class_id": 211,
+      "synset": "n02100583",
+      "class_name": "vizsla",
+      "within_class_validation_rank": 31,
+      "original_archive_member": "ILSVRC2012_val_00020489_n02100583.JPEG",
+      "sha256": "0a2a1725dd27f787c0417b43443f4b93c1b027ad4251a288d064ceb39d32c0a7"
+    },
+    {
+      "filename": "221_ILSVRC2012_val_00031049_n02102973.JPEG",
+      "class_id": 221,
+      "synset": "n02102973",
+      "class_name": "Irish_water_spaniel",
+      "within_class_validation_rank": 22,
+      "original_archive_member": "ILSVRC2012_val_00031049_n02102973.JPEG",
+      "sha256": "f90deacedb550f220e7ea479aa883613aa173da80487d6ab3cf12c9d2848f462"
+    },
+    {
+      "filename": "238_ILSVRC2012_val_00011198_n02107574.JPEG",
+      "class_id": 238,
+      "synset": "n02107574",
+      "class_name": "Greater_Swiss_Mountain_dog",
+      "within_class_validation_rank": 7,
+      "original_archive_member": "ILSVRC2012_val_00011198_n02107574.JPEG",
+      "sha256": "8218a956951c4c53c295418e6f2ef5f00285aabdb36ce67649c8a04bee5f9593"
+    },
+    {
+      "filename": "259_ILSVRC2012_val_00027360_n02112018.JPEG",
+      "class_id": 259,
+      "synset": "n02112018",
+      "class_name": "Pomeranian",
+      "within_class_validation_rank": 47,
+      "original_archive_member": "ILSVRC2012_val_00027360_n02112018.JPEG",
+      "sha256": "bbad3c7a60cc4e90f25db9d4a020c86f3a2032f0652ab3ef78a6b3156fb6c25a"
+    },
+    {
+      "filename": "287_ILSVRC2012_val_00013798_n02127052.JPEG",
+      "class_id": 287,
+      "synset": "n02127052",
+      "class_name": "lynx",
+      "within_class_validation_rank": 19,
+      "original_archive_member": "ILSVRC2012_val_00013798_n02127052.JPEG",
+      "sha256": "29679b757cca2c86d6d728d5058a793f1fb313d85dd1e17d57f1533757e1f660"
+    },
+    {
+      "filename": "308_ILSVRC2012_val_00016823_n02190166.JPEG",
+      "class_id": 308,
+      "synset": "n02190166",
+      "class_name": "fly",
+      "within_class_validation_rank": 44,
+      "original_archive_member": "ILSVRC2012_val_00016823_n02190166.JPEG",
+      "sha256": "7b88ce3af7997f848cc30b23405f0215216e4d33bde3b7ef037fe83747467530"
+    },
+    {
+      "filename": "314_ILSVRC2012_val_00042897_n02233338.JPEG",
+      "class_id": 314,
+      "synset": "n02233338",
+      "class_name": "cockroach",
+      "within_class_validation_rank": 9,
+      "original_archive_member": "ILSVRC2012_val_00042897_n02233338.JPEG",
+      "sha256": "1b3a50c697a30573496093587eb4c8137cd95833e9e07625396c6a3614ac0c67"
+    },
+    {
+      "filename": "322_ILSVRC2012_val_00021979_n02277742.JPEG",
+      "class_id": 322,
+      "synset": "n02277742",
+      "class_name": "ringlet",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00021979_n02277742.JPEG",
+      "sha256": "afb6aa17b4197ca58e9b950aff57c9a13c5c2fb0299621d467e28506af928def"
+    },
+    {
+      "filename": "334_ILSVRC2012_val_00004986_n02346627.JPEG",
+      "class_id": 334,
+      "synset": "n02346627",
+      "class_name": "porcupine",
+      "within_class_validation_rank": 38,
+      "original_archive_member": "ILSVRC2012_val_00004986_n02346627.JPEG",
+      "sha256": "b89602bb103708f58ea11d1a0e43f4b85010b59ea2f8328a0c0dd0eef7a19786"
+    },
+    {
+      "filename": "341_ILSVRC2012_val_00008257_n02395406.JPEG",
+      "class_id": 341,
+      "synset": "n02395406",
+      "class_name": "hog",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00008257_n02395406.JPEG",
+      "sha256": "b5461221853fd3dc0ca1a5e43760f7795d2b844a849698ea306af34cbede1ad8"
+    },
+    {
+      "filename": "346_ILSVRC2012_val_00008103_n02408429.JPEG",
+      "class_id": 346,
+      "synset": "n02408429",
+      "class_name": "water_buffalo",
+      "within_class_validation_rank": 44,
+      "original_archive_member": "ILSVRC2012_val_00008103_n02408429.JPEG",
+      "sha256": "6d5f99f03c5db3ad3409340db771227326759a0d2d249386ed959dd31daa5d15"
+    },
+    {
+      "filename": "353_ILSVRC2012_val_00008084_n02423022.JPEG",
+      "class_id": 353,
+      "synset": "n02423022",
+      "class_name": "gazelle",
+      "within_class_validation_rank": 21,
+      "original_archive_member": "ILSVRC2012_val_00008084_n02423022.JPEG",
+      "sha256": "fb25c182bc88999731668fb96bf9cd20217c8a87965c78ca2a614277973a478d"
+    },
+    {
+      "filename": "358_ILSVRC2012_val_00029265_n02443114.JPEG",
+      "class_id": 358,
+      "synset": "n02443114",
+      "class_name": "polecat",
+      "within_class_validation_rank": 22,
+      "original_archive_member": "ILSVRC2012_val_00029265_n02443114.JPEG",
+      "sha256": "d25338288a3346c27ee7b8782cecc58e9842ab2c7c27313140900f12ba543634"
+    },
+    {
+      "filename": "373_ILSVRC2012_val_00040245_n02487347.JPEG",
+      "class_id": 373,
+      "synset": "n02487347",
+      "class_name": "macaque",
+      "within_class_validation_rank": 0,
+      "original_archive_member": "ILSVRC2012_val_00040245_n02487347.JPEG",
+      "sha256": "e68aed54fde92273a03642746a793bd0ddcdf3da6812f193ec5914e28296d824"
+    },
+    {
+      "filename": "385_ILSVRC2012_val_00038720_n02504013.JPEG",
+      "class_id": 385,
+      "synset": "n02504013",
+      "class_name": "Indian_elephant",
+      "within_class_validation_rank": 21,
+      "original_archive_member": "ILSVRC2012_val_00038720_n02504013.JPEG",
+      "sha256": "87e6135c6a8c35503907fb5d66ccc469ce5ccefface3323caf5a8d91fe377a0f"
+    },
+    {
+      "filename": "391_ILSVRC2012_val_00029638_n02536864.JPEG",
+      "class_id": 391,
+      "synset": "n02536864",
+      "class_name": "coho",
+      "within_class_validation_rank": 15,
+      "original_archive_member": "ILSVRC2012_val_00029638_n02536864.JPEG",
+      "sha256": "9b11674d379a09d6aac2d3fe4a8d7f62d7ebaabae5d6784cf6df4a7239fb0b49"
+    },
+    {
+      "filename": "396_ILSVRC2012_val_00016698_n02643566.JPEG",
+      "class_id": 396,
+      "synset": "n02643566",
+      "class_name": "lionfish",
+      "within_class_validation_rank": 27,
+      "original_archive_member": "ILSVRC2012_val_00016698_n02643566.JPEG",
+      "sha256": "758001a95dd0ef0e36eb2a349091d498e028e292019a8a653e6b2798c244820b"
+    },
+    {
+      "filename": "412_ILSVRC2012_val_00038276_n02747177.JPEG",
+      "class_id": 412,
+      "synset": "n02747177",
+      "class_name": "ashcan",
+      "within_class_validation_rank": 47,
+      "original_archive_member": "ILSVRC2012_val_00038276_n02747177.JPEG",
+      "sha256": "ef1e4432bfca1fd9f3819869d572d47efefbf3164163b3012fad85cd4d993374"
+    },
+    {
+      "filename": "414_ILSVRC2012_val_00043513_n02769748.JPEG",
+      "class_id": 414,
+      "synset": "n02769748",
+      "class_name": "backpack",
+      "within_class_validation_rank": 0,
+      "original_archive_member": "ILSVRC2012_val_00043513_n02769748.JPEG",
+      "sha256": "d9e66e5b7d24a6a51d9d929774275350642e2ec2796d323c89afd5560fb95a59"
+    },
+    {
+      "filename": "419_ILSVRC2012_val_00019400_n02786058.JPEG",
+      "class_id": 419,
+      "synset": "n02786058",
+      "class_name": "Band_Aid",
+      "within_class_validation_rank": 41,
+      "original_archive_member": "ILSVRC2012_val_00019400_n02786058.JPEG",
+      "sha256": "c064cbe4e2f45be5bc18b84f0bffb8a189370a9202aa183cc53e54784436757a"
+    },
+    {
+      "filename": "422_ILSVRC2012_val_00015734_n02790996.JPEG",
+      "class_id": 422,
+      "synset": "n02790996",
+      "class_name": "barbell",
+      "within_class_validation_rank": 19,
+      "original_archive_member": "ILSVRC2012_val_00015734_n02790996.JPEG",
+      "sha256": "9c752f5875b1553ee0cb554792bb2bfc00fcc1dd9faf24f9608438e4dbeec70c"
+    },
+    {
+      "filename": "429_ILSVRC2012_val_00036898_n02799071.JPEG",
+      "class_id": 429,
+      "synset": "n02799071",
+      "class_name": "baseball",
+      "within_class_validation_rank": 26,
+      "original_archive_member": "ILSVRC2012_val_00036898_n02799071.JPEG",
+      "sha256": "31c8312fc6b56072c96d6baad379d1569881deacaf07e019081393ec136def8e"
+    },
+    {
+      "filename": "431_ILSVRC2012_val_00011350_n02804414.JPEG",
+      "class_id": 431,
+      "synset": "n02804414",
+      "class_name": "bassinet",
+      "within_class_validation_rank": 23,
+      "original_archive_member": "ILSVRC2012_val_00011350_n02804414.JPEG",
+      "sha256": "ce492ec626aa67dd15b863dd7cde55e5af20d74b632e1e9a8cb3ab6b37ff1fb0"
+    },
+    {
+      "filename": "445_ILSVRC2012_val_00019193_n02837789.JPEG",
+      "class_id": 445,
+      "synset": "n02837789",
+      "class_name": "bikini",
+      "within_class_validation_rank": 24,
+      "original_archive_member": "ILSVRC2012_val_00019193_n02837789.JPEG",
+      "sha256": "68ca15dd559e7fa433139edd7e0c4be6dec9badb1f370c5449688ae49fbb2f05"
+    },
+    {
+      "filename": "450_ILSVRC2012_val_00037452_n02860847.JPEG",
+      "class_id": 450,
+      "synset": "n02860847",
+      "class_name": "bobsled",
+      "within_class_validation_rank": 41,
+      "original_archive_member": "ILSVRC2012_val_00037452_n02860847.JPEG",
+      "sha256": "11bd469be91d2ccd4de86ab2ae70172f73f340ac693d6d181eab672d85d43a41"
+    },
+    {
+      "filename": "455_ILSVRC2012_val_00033976_n02877765.JPEG",
+      "class_id": 455,
+      "synset": "n02877765",
+      "class_name": "bottlecap",
+      "within_class_validation_rank": 47,
+      "original_archive_member": "ILSVRC2012_val_00033976_n02877765.JPEG",
+      "sha256": "5d69367f650517295acc02f711f082916884ac9269584fdaae82ed43ffdbf42d"
+    },
+    {
+      "filename": "460_ILSVRC2012_val_00006881_n02894605.JPEG",
+      "class_id": 460,
+      "synset": "n02894605",
+      "class_name": "breakwater",
+      "within_class_validation_rank": 49,
+      "original_archive_member": "ILSVRC2012_val_00006881_n02894605.JPEG",
+      "sha256": "09f886131683baab0a64c0dc9bd3c51b5660e5c2ca5ad25dec0c2b976f047297"
+    },
+    {
+      "filename": "464_ILSVRC2012_val_00035865_n02910353.JPEG",
+      "class_id": 464,
+      "synset": "n02910353",
+      "class_name": "buckle",
+      "within_class_validation_rank": 29,
+      "original_archive_member": "ILSVRC2012_val_00035865_n02910353.JPEG",
+      "sha256": "559d038133f7f39d81fe710637770dec3dfce2b1d3645676bef99880eb9b2802"
+    },
+    {
+      "filename": "470_ILSVRC2012_val_00008021_n02948072.JPEG",
+      "class_id": 470,
+      "synset": "n02948072",
+      "class_name": "candle",
+      "within_class_validation_rank": 35,
+      "original_archive_member": "ILSVRC2012_val_00008021_n02948072.JPEG",
+      "sha256": "27d52be67064a842fbc7d23a8ce09436812c84d82fccbbda91a28b3173a34cb3"
+    },
+    {
+      "filename": "475_ILSVRC2012_val_00012425_n02965783.JPEG",
+      "class_id": 475,
+      "synset": "n02965783",
+      "class_name": "car_mirror",
+      "within_class_validation_rank": 47,
+      "original_archive_member": "ILSVRC2012_val_00012425_n02965783.JPEG",
+      "sha256": "93c5ce8e13e5e99acfba95ac94e1791f07ce6ecfdb1726fd2e5752f8396d3458"
+    },
+    {
+      "filename": "479_ILSVRC2012_val_00049494_n02974003.JPEG",
+      "class_id": 479,
+      "synset": "n02974003",
+      "class_name": "car_wheel",
+      "within_class_validation_rank": 46,
+      "original_archive_member": "ILSVRC2012_val_00049494_n02974003.JPEG",
+      "sha256": "e1ff20a196f3ab24b363d032b8bddac74d7fef4ba3930bfa3cda572967c58834"
+    },
+    {
+      "filename": "506_ILSVRC2012_val_00029746_n03065424.JPEG",
+      "class_id": 506,
+      "synset": "n03065424",
+      "class_name": "coil",
+      "within_class_validation_rank": 49,
+      "original_archive_member": "ILSVRC2012_val_00029746_n03065424.JPEG",
+      "sha256": "c737509a3be3a4d5fc24642a4ca49133c4ffe66dbbb3516fcea8c0e5bd49e0f6"
+    },
+    {
+      "filename": "517_ILSVRC2012_val_00019740_n03126707.JPEG",
+      "class_id": 517,
+      "synset": "n03126707",
+      "class_name": "crane",
+      "within_class_validation_rank": 2,
+      "original_archive_member": "ILSVRC2012_val_00019740_n03126707.JPEG",
+      "sha256": "a35883a04497ecf669259b33df2b5605be02ebf7ed46cdf5f987e1eb7e871342"
+    },
+    {
+      "filename": "523_ILSVRC2012_val_00038458_n03141823.JPEG",
+      "class_id": 523,
+      "synset": "n03141823",
+      "class_name": "crutch",
+      "within_class_validation_rank": 1,
+      "original_archive_member": "ILSVRC2012_val_00038458_n03141823.JPEG",
+      "sha256": "a57b6ac0a53674d4fbffbe47d1acf907d09772d687f57da504f38fb7558d1e9d"
+    },
+    {
+      "filename": "552_ILSVRC2012_val_00045448_n03325584.JPEG",
+      "class_id": 552,
+      "synset": "n03325584",
+      "class_name": "feather_boa",
+      "within_class_validation_rank": 29,
+      "original_archive_member": "ILSVRC2012_val_00045448_n03325584.JPEG",
+      "sha256": "85e1d997bc3aab4c98836ac4d7f3fa4746a9a1a4f366a2271f3549dfc8bbc6a6"
+    },
+    {
+      "filename": "591_ILSVRC2012_val_00017704_n03485794.JPEG",
+      "class_id": 591,
+      "synset": "n03485794",
+      "class_name": "handkerchief",
+      "within_class_validation_rank": 5,
+      "original_archive_member": "ILSVRC2012_val_00017704_n03485794.JPEG",
+      "sha256": "2279821fec9c5f092b8f53d1546248f43bdaa3b3eccdf1854c494f638ebbcce3"
+    },
+    {
+      "filename": "593_ILSVRC2012_val_00022564_n03494278.JPEG",
+      "class_id": 593,
+      "synset": "n03494278",
+      "class_name": "harmonica",
+      "within_class_validation_rank": 43,
+      "original_archive_member": "ILSVRC2012_val_00022564_n03494278.JPEG",
+      "sha256": "9c71f9427866302000ca95343bf475cb9aeb373b20e88b54429685731133af0b"
+    },
+    {
+      "filename": "596_ILSVRC2012_val_00040931_n03498962.JPEG",
+      "class_id": 596,
+      "synset": "n03498962",
+      "class_name": "hatchet",
+      "within_class_validation_rank": 38,
+      "original_archive_member": "ILSVRC2012_val_00040931_n03498962.JPEG",
+      "sha256": "13b491686ab432c4bc46e4104753e87d917892e6e34fda6f2181592c91f028ea"
+    },
+    {
+      "filename": "620_ILSVRC2012_val_00011275_n03642806.JPEG",
+      "class_id": 620,
+      "synset": "n03642806",
+      "class_name": "laptop",
+      "within_class_validation_rank": 6,
+      "original_archive_member": "ILSVRC2012_val_00011275_n03642806.JPEG",
+      "sha256": "6246e6a4494eadf2444f229039b9afe730b1f8fd6c3915e4fa2d5344eeede9d9"
+    },
+    {
+      "filename": "633_ILSVRC2012_val_00012274_n03692522.JPEG",
+      "class_id": 633,
+      "synset": "n03692522",
+      "class_name": "loupe",
+      "within_class_validation_rank": 6,
+      "original_archive_member": "ILSVRC2012_val_00012274_n03692522.JPEG",
+      "sha256": "8d1ad76822d5575dbe5d362fbd6053edda24dfa192bc3aaed7fb055205952549"
+    },
+    {
+      "filename": "636_ILSVRC2012_val_00034532_n03709823.JPEG",
+      "class_id": 636,
+      "synset": "n03709823",
+      "class_name": "mailbag",
+      "within_class_validation_rank": 5,
+      "original_archive_member": "ILSVRC2012_val_00034532_n03709823.JPEG",
+      "sha256": "e9f4ed824976cc6758e1ac88dcd9cbf4d1d26ad1ef686d355977deceb1148934"
+    },
+    {
+      "filename": "643_ILSVRC2012_val_00007992_n03724870.JPEG",
+      "class_id": 643,
+      "synset": "n03724870",
+      "class_name": "mask",
+      "within_class_validation_rank": 17,
+      "original_archive_member": "ILSVRC2012_val_00007992_n03724870.JPEG",
+      "sha256": "7377fea865f349edb3a45c58a77c131452966f8c68786cc687b1e74059f41365"
+    },
+    {
+      "filename": "655_ILSVRC2012_val_00010493_n03770439.JPEG",
+      "class_id": 655,
+      "synset": "n03770439",
+      "class_name": "miniskirt",
+      "within_class_validation_rank": 42,
+      "original_archive_member": "ILSVRC2012_val_00010493_n03770439.JPEG",
+      "sha256": "81da01316f9458c20c04410a0c0b9c8f1450b08b7fad6896495b205d0c6d232f"
+    },
+    {
+      "filename": "656_ILSVRC2012_val_00022654_n03770679.JPEG",
+      "class_id": 656,
+      "synset": "n03770679",
+      "class_name": "minivan",
+      "within_class_validation_rank": 15,
+      "original_archive_member": "ILSVRC2012_val_00022654_n03770679.JPEG",
+      "sha256": "5c9326a40265ce0fa546bd07e12155097134e0dda73f6eec7817173fe3ce107c"
+    },
+    {
+      "filename": "660_ILSVRC2012_val_00025319_n03776460.JPEG",
+      "class_id": 660,
+      "synset": "n03776460",
+      "class_name": "mobile_home",
+      "within_class_validation_rank": 35,
+      "original_archive_member": "ILSVRC2012_val_00025319_n03776460.JPEG",
+      "sha256": "112d4913a4133f76b90a140bfc2dc7bfdaaa5d7ab9b4f1e088aea962080c2dc2"
+    },
+    {
+      "filename": "669_ILSVRC2012_val_00038574_n03788365.JPEG",
+      "class_id": 669,
+      "synset": "n03788365",
+      "class_name": "mosquito_net",
+      "within_class_validation_rank": 27,
+      "original_archive_member": "ILSVRC2012_val_00038574_n03788365.JPEG",
+      "sha256": "34d2b082391e7bffd8776a2316c269a234591dbdc4627f55c8fa19ea400aa388"
+    },
+    {
+      "filename": "671_ILSVRC2012_val_00030892_n03792782.JPEG",
+      "class_id": 671,
+      "synset": "n03792782",
+      "class_name": "mountain_bike",
+      "within_class_validation_rank": 30,
+      "original_archive_member": "ILSVRC2012_val_00030892_n03792782.JPEG",
+      "sha256": "395e762c10a8cb5d153b2bc981b0b6dadf045ffb012b37c29ab421e525a398b7"
+    },
+    {
+      "filename": "681_ILSVRC2012_val_00003207_n03832673.JPEG",
+      "class_id": 681,
+      "synset": "n03832673",
+      "class_name": "notebook",
+      "within_class_validation_rank": 2,
+      "original_archive_member": "ILSVRC2012_val_00003207_n03832673.JPEG",
+      "sha256": "fa7862d6c95657a7796da7acd1d781b692a16bc23821b869a8ecfffd2096dbf6"
+    },
+    {
+      "filename": "690_ILSVRC2012_val_00019136_n03868242.JPEG",
+      "class_id": 690,
+      "synset": "n03868242",
+      "class_name": "oxcart",
+      "within_class_validation_rank": 33,
+      "original_archive_member": "ILSVRC2012_val_00019136_n03868242.JPEG",
+      "sha256": "079e0108ea59fdd1ef92b2ef745ded99697912ca0bfd0af9350122e2342c6a20"
+    },
+    {
+      "filename": "695_ILSVRC2012_val_00045334_n03874599.JPEG",
+      "class_id": 695,
+      "synset": "n03874599",
+      "class_name": "padlock",
+      "within_class_validation_rank": 22,
+      "original_archive_member": "ILSVRC2012_val_00045334_n03874599.JPEG",
+      "sha256": "57cc2cb3333eb6d5e46631bc462d10a062dc29571806cdd94245e0218d97ee70"
+    },
+    {
+      "filename": "698_ILSVRC2012_val_00046927_n03877845.JPEG",
+      "class_id": 698,
+      "synset": "n03877845",
+      "class_name": "palace",
+      "within_class_validation_rank": 6,
+      "original_archive_member": "ILSVRC2012_val_00046927_n03877845.JPEG",
+      "sha256": "1839e801dd16d24c37042acb057998d5aa3cb159fa8cac9f914fdc6bce18e432"
+    },
+    {
+      "filename": "712_ILSVRC2012_val_00015865_n03920288.JPEG",
+      "class_id": 712,
+      "synset": "n03920288",
+      "class_name": "Petri_dish",
+      "within_class_validation_rank": 27,
+      "original_archive_member": "ILSVRC2012_val_00015865_n03920288.JPEG",
+      "sha256": "eb5bf0b92fa7abbfeb848b1ecaecc471f854cdf2a1f6b0612fd428bd3a6aab31"
+    },
+    {
+      "filename": "714_ILSVRC2012_val_00018730_n03929660.JPEG",
+      "class_id": 714,
+      "synset": "n03929660",
+      "class_name": "pick",
+      "within_class_validation_rank": 30,
+      "original_archive_member": "ILSVRC2012_val_00018730_n03929660.JPEG",
+      "sha256": "a7ee4fdaaa55d683f341644ceee83c9177f067ef143ecaaf289dbe09c67b5fa2"
+    },
+    {
+      "filename": "716_ILSVRC2012_val_00013346_n03930313.JPEG",
+      "class_id": 716,
+      "synset": "n03930313",
+      "class_name": "picket_fence",
+      "within_class_validation_rank": 5,
+      "original_archive_member": "ILSVRC2012_val_00013346_n03930313.JPEG",
+      "sha256": "5a5e1a7f780fbcd12f7d79a8d81a0041bcadfb7adb19797edf12e8fae9b6fd85"
+    },
+    {
+      "filename": "720_ILSVRC2012_val_00005519_n03937543.JPEG",
+      "class_id": 720,
+      "synset": "n03937543",
+      "class_name": "pill_bottle",
+      "within_class_validation_rank": 25,
+      "original_archive_member": "ILSVRC2012_val_00005519_n03937543.JPEG",
+      "sha256": "23ca926b97ba6158d57e1e7919062379d16fb7b51a3e96bc979d8eb2483fd65c"
+    },
+    {
+      "filename": "722_ILSVRC2012_val_00041504_n03942813.JPEG",
+      "class_id": 722,
+      "synset": "n03942813",
+      "class_name": "ping-pong_ball",
+      "within_class_validation_rank": 17,
+      "original_archive_member": "ILSVRC2012_val_00041504_n03942813.JPEG",
+      "sha256": "d27a33a69190099606cfd0dc186ce14079a0e16e71955797ecaa08dcdeeeadef"
+    },
+    {
+      "filename": "739_ILSVRC2012_val_00003396_n03992509.JPEG",
+      "class_id": 739,
+      "synset": "n03992509",
+      "class_name": "potter's_wheel",
+      "within_class_validation_rank": 37,
+      "original_archive_member": "ILSVRC2012_val_00003396_n03992509.JPEG",
+      "sha256": "abacdd3fc32dbb38d72b60e08f01e0c748340471a078a1381d9204f7bd1fbf7f"
+    },
+    {
+      "filename": "759_ILSVRC2012_val_00019112_n04069434.JPEG",
+      "class_id": 759,
+      "synset": "n04069434",
+      "class_name": "reflex_camera",
+      "within_class_validation_rank": 25,
+      "original_archive_member": "ILSVRC2012_val_00019112_n04069434.JPEG",
+      "sha256": "73b9b5838df70d334bf4e36d87e46151e38928a79a6b0dfc3581d31a10309545"
+    },
+    {
+      "filename": "763_ILSVRC2012_val_00009592_n04086273.JPEG",
+      "class_id": 763,
+      "synset": "n04086273",
+      "class_name": "revolver",
+      "within_class_validation_rank": 1,
+      "original_archive_member": "ILSVRC2012_val_00009592_n04086273.JPEG",
+      "sha256": "176ba5a736bf4d33f1118b6fc9a4322ef15998815322ef83901fc26523aede13"
+    },
+    {
+      "filename": "771_ILSVRC2012_val_00044161_n04125021.JPEG",
+      "class_id": 771,
+      "synset": "n04125021",
+      "class_name": "safe",
+      "within_class_validation_rank": 15,
+      "original_archive_member": "ILSVRC2012_val_00044161_n04125021.JPEG",
+      "sha256": "2acb7c8a60cd248aa6093a0fe0bb9847386f2a9931ee6bae75e84afa698e6fa3"
+    },
+    {
+      "filename": "772_ILSVRC2012_val_00019637_n04127249.JPEG",
+      "class_id": 772,
+      "synset": "n04127249",
+      "class_name": "safety_pin",
+      "within_class_validation_rank": 28,
+      "original_archive_member": "ILSVRC2012_val_00019637_n04127249.JPEG",
+      "sha256": "fedaf76a85d40367fff9c9e91e85edda5fbcd057ff632fd896521448c31e976d"
+    },
+    {
+      "filename": "776_ILSVRC2012_val_00030435_n04141076.JPEG",
+      "class_id": 776,
+      "synset": "n04141076",
+      "class_name": "sax",
+      "within_class_validation_rank": 20,
+      "original_archive_member": "ILSVRC2012_val_00030435_n04141076.JPEG",
+      "sha256": "cd23013b90e63149d0e2b538bb11448d443b50c3a7bfb51b694c8941b23033db"
+    },
+    {
+      "filename": "777_ILSVRC2012_val_00020600_n04141327.JPEG",
+      "class_id": 777,
+      "synset": "n04141327",
+      "class_name": "scabbard",
+      "within_class_validation_rank": 13,
+      "original_archive_member": "ILSVRC2012_val_00020600_n04141327.JPEG",
+      "sha256": "cd23bcedd4b4ddc4cdd02372ab7dff48b00e1a817f5659912b3c5cf40c4b0d36"
+    },
+    {
+      "filename": "798_ILSVRC2012_val_00013019_n04238763.JPEG",
+      "class_id": 798,
+      "synset": "n04238763",
+      "class_name": "slide_rule",
+      "within_class_validation_rank": 20,
+      "original_archive_member": "ILSVRC2012_val_00013019_n04238763.JPEG",
+      "sha256": "4ce7ed07148dc2177f9d4b36c512230effe052b860b485d6cf3e3ffe6bf5cb94"
+    },
+    {
+      "filename": "804_ILSVRC2012_val_00017584_n04254120.JPEG",
+      "class_id": 804,
+      "synset": "n04254120",
+      "class_name": "soap_dispenser",
+      "within_class_validation_rank": 16,
+      "original_archive_member": "ILSVRC2012_val_00017584_n04254120.JPEG",
+      "sha256": "be4b05613f19f4b61a0d21d5c5243ffab50f21f23367700d4cb2900f4c94b402"
+    },
+    {
+      "filename": "819_ILSVRC2012_val_00016122_n04296562.JPEG",
+      "class_id": 819,
+      "synset": "n04296562",
+      "class_name": "stage",
+      "within_class_validation_rank": 4,
+      "original_archive_member": "ILSVRC2012_val_00016122_n04296562.JPEG",
+      "sha256": "bc4d7d909ea6c224e62a060e1b8360dccf7b59e083c24603293618cd5ffb9964"
+    },
+    {
+      "filename": "823_ILSVRC2012_val_00031969_n04317175.JPEG",
+      "class_id": 823,
+      "synset": "n04317175",
+      "class_name": "stethoscope",
+      "within_class_validation_rank": 34,
+      "original_archive_member": "ILSVRC2012_val_00031969_n04317175.JPEG",
+      "sha256": "56e7a04b1eedec0e6ec59eb0f83c92712ce86e2e661f1b193ddf85be82815ff1"
+    },
+    {
+      "filename": "830_ILSVRC2012_val_00013910_n04336792.JPEG",
+      "class_id": 830,
+      "synset": "n04336792",
+      "class_name": "stretcher",
+      "within_class_validation_rank": 29,
+      "original_archive_member": "ILSVRC2012_val_00013910_n04336792.JPEG",
+      "sha256": "476fba2a5e7d8f00f236a7f85c20b7b8de07e3283a3e781b39fdcb563d885a17"
+    },
+    {
+      "filename": "835_ILSVRC2012_val_00026905_n04355338.JPEG",
+      "class_id": 835,
+      "synset": "n04355338",
+      "class_name": "sundial",
+      "within_class_validation_rank": 26,
+      "original_archive_member": "ILSVRC2012_val_00026905_n04355338.JPEG",
+      "sha256": "7c0252216eb4feb1e69e080ba6626577327025b7920d34c5538c036426bfbbfd"
+    },
+    {
+      "filename": "846_ILSVRC2012_val_00040162_n04380533.JPEG",
+      "class_id": 846,
+      "synset": "n04380533",
+      "class_name": "table_lamp",
+      "within_class_validation_rank": 3,
+      "original_archive_member": "ILSVRC2012_val_00040162_n04380533.JPEG",
+      "sha256": "b0399a2e801969a4a6f4636e718746be0eecde8e058203361ddb3f0885d6521c"
+    },
+    {
+      "filename": "856_ILSVRC2012_val_00025375_n04428191.JPEG",
+      "class_id": 856,
+      "synset": "n04428191",
+      "class_name": "thresher",
+      "within_class_validation_rank": 33,
+      "original_archive_member": "ILSVRC2012_val_00025375_n04428191.JPEG",
+      "sha256": "62627aaeca5927cc890b6d51150ebcae8ab3d42683047bcf9821789e56093ad2"
+    },
+    {
+      "filename": "875_ILSVRC2012_val_00013844_n04487394.JPEG",
+      "class_id": 875,
+      "synset": "n04487394",
+      "class_name": "trombone",
+      "within_class_validation_rank": 29,
+      "original_archive_member": "ILSVRC2012_val_00013844_n04487394.JPEG",
+      "sha256": "0e8c1b56ae1301961b6424aa501a69a1123f0056eb8b0dee27e44bb89fd79c82"
+    },
+    {
+      "filename": "886_ILSVRC2012_val_00019168_n04525305.JPEG",
+      "class_id": 886,
+      "synset": "n04525305",
+      "class_name": "vending_machine",
+      "within_class_validation_rank": 40,
+      "original_archive_member": "ILSVRC2012_val_00019168_n04525305.JPEG",
+      "sha256": "32463f5c93c17520777a847632938c82748c4d41d0ca1f369f97e6987cc2f09b"
+    },
+    {
+      "filename": "889_ILSVRC2012_val_00044174_n04536866.JPEG",
+      "class_id": 889,
+      "synset": "n04536866",
+      "class_name": "violin",
+      "within_class_validation_rank": 4,
+      "original_archive_member": "ILSVRC2012_val_00044174_n04536866.JPEG",
+      "sha256": "5ac6c25f8909e257a6f6979f93a717b69f2b284ee398f5099b9b246f60037dd7"
+    },
+    {
+      "filename": "893_ILSVRC2012_val_00047367_n04548362.JPEG",
+      "class_id": 893,
+      "synset": "n04548362",
+      "class_name": "wallet",
+      "within_class_validation_rank": 16,
+      "original_archive_member": "ILSVRC2012_val_00047367_n04548362.JPEG",
+      "sha256": "ef4814292aa84e435f110ebe1d72079db73f9dc6207527ddbef94119987680a2"
+    },
+    {
+      "filename": "918_ILSVRC2012_val_00014638_n06785654.JPEG",
+      "class_id": 918,
+      "synset": "n06785654",
+      "class_name": "crossword_puzzle",
+      "within_class_validation_rank": 26,
+      "original_archive_member": "ILSVRC2012_val_00014638_n06785654.JPEG",
+      "sha256": "443710815dd341ff1815955d0d504ae2df6cff65001c60e0162332ac95af0730"
+    },
+    {
+      "filename": "922_ILSVRC2012_val_00046046_n07565083.JPEG",
+      "class_id": 922,
+      "synset": "n07565083",
+      "class_name": "menu",
+      "within_class_validation_rank": 6,
+      "original_archive_member": "ILSVRC2012_val_00046046_n07565083.JPEG",
+      "sha256": "799af9bfaac639232e92b16d93f700a766938b507ae8703667feb25f171f469b"
+    },
+    {
+      "filename": "932_ILSVRC2012_val_00035304_n07695742.JPEG",
+      "class_id": 932,
+      "synset": "n07695742",
+      "class_name": "pretzel",
+      "within_class_validation_rank": 42,
+      "original_archive_member": "ILSVRC2012_val_00035304_n07695742.JPEG",
+      "sha256": "9a15424a9ff63a937a5921c184faef5ce3a745f384d6ed7172c2eff182259ad0"
+    },
+    {
+      "filename": "950_ILSVRC2012_val_00018013_n07747607.JPEG",
+      "class_id": 950,
+      "synset": "n07747607",
+      "class_name": "orange",
+      "within_class_validation_rank": 12,
+      "original_archive_member": "ILSVRC2012_val_00018013_n07747607.JPEG",
+      "sha256": "9dc34f2851facac7918e9ea2e0b8366927048169173f937e9b9aea35c464921d"
+    },
+    {
+      "filename": "963_ILSVRC2012_val_00018461_n07873807.JPEG",
+      "class_id": 963,
+      "synset": "n07873807",
+      "class_name": "pizza",
+      "within_class_validation_rank": 14,
+      "original_archive_member": "ILSVRC2012_val_00018461_n07873807.JPEG",
+      "sha256": "fcc7618dd78ed906c1339c27bcb572298bf40c59d826c991567beeb05589c0fa"
+    },
+    {
+      "filename": "964_ILSVRC2012_val_00029286_n07875152.JPEG",
+      "class_id": 964,
+      "synset": "n07875152",
+      "class_name": "potpie",
+      "within_class_validation_rank": 19,
+      "original_archive_member": "ILSVRC2012_val_00029286_n07875152.JPEG",
+      "sha256": "ffb320cd77dd8d399bf5e923bdf4ec3711a416a9719b2504d4c9c409024772b9"
+    },
+    {
+      "filename": "979_ILSVRC2012_val_00000313_n09468604.JPEG",
+      "class_id": 979,
+      "synset": "n09468604",
+      "class_name": "valley",
+      "within_class_validation_rank": 4,
+      "original_archive_member": "ILSVRC2012_val_00000313_n09468604.JPEG",
+      "sha256": "267a3d1e2af6ac2ff6b9d1dde02f32816217ecd88e41f7f8f24703564e9da5ee"
+    }
+  ]
+}

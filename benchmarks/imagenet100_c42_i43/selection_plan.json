@@ -1,0 +1,410 @@
+{
+  "dataset": "ILSVRC/imagenet-1k",
+  "split": "validation",
+  "num_classes": 100,
+  "class_seed": 42,
+  "image_seed": 43,
+  "image_size": 256,
+  "selection": [
+    {
+      "class_id": 41,
+      "within_class_validation_rank": 25
+    },
+    {
+      "class_id": 59,
+      "within_class_validation_rank": 32
+    },
+    {
+      "class_id": 64,
+      "within_class_validation_rank": 20
+    },
+    {
+      "class_id": 73,
+      "within_class_validation_rank": 2
+    },
+    {
+      "class_id": 77,
+      "within_class_validation_rank": 28
+    },
+    {
+      "class_id": 80,
+      "within_class_validation_rank": 1
+    },
+    {
+      "class_id": 85,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 95,
+      "within_class_validation_rank": 41
+    },
+    {
+      "class_id": 117,
+      "within_class_validation_rank": 23
+    },
+    {
+      "class_id": 126,
+      "within_class_validation_rank": 29
+    },
+    {
+      "class_id": 139,
+      "within_class_validation_rank": 48
+    },
+    {
+      "class_id": 147,
+      "within_class_validation_rank": 11
+    },
+    {
+      "class_id": 155,
+      "within_class_validation_rank": 42
+    },
+    {
+      "class_id": 157,
+      "within_class_validation_rank": 37
+    },
+    {
+      "class_id": 168,
+      "within_class_validation_rank": 18
+    },
+    {
+      "class_id": 183,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 184,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 185,
+      "within_class_validation_rank": 20
+    },
+    {
+      "class_id": 211,
+      "within_class_validation_rank": 31
+    },
+    {
+      "class_id": 221,
+      "within_class_validation_rank": 22
+    },
+    {
+      "class_id": 238,
+      "within_class_validation_rank": 7
+    },
+    {
+      "class_id": 259,
+      "within_class_validation_rank": 47
+    },
+    {
+      "class_id": 287,
+      "within_class_validation_rank": 19
+    },
+    {
+      "class_id": 308,
+      "within_class_validation_rank": 44
+    },
+    {
+      "class_id": 314,
+      "within_class_validation_rank": 9
+    },
+    {
+      "class_id": 322,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 334,
+      "within_class_validation_rank": 38
+    },
+    {
+      "class_id": 341,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 346,
+      "within_class_validation_rank": 44
+    },
+    {
+      "class_id": 353,
+      "within_class_validation_rank": 21
+    },
+    {
+      "class_id": 358,
+      "within_class_validation_rank": 22
+    },
+    {
+      "class_id": 373,
+      "within_class_validation_rank": 0
+    },
+    {
+      "class_id": 385,
+      "within_class_validation_rank": 21
+    },
+    {
+      "class_id": 391,
+      "within_class_validation_rank": 15
+    },
+    {
+      "class_id": 396,
+      "within_class_validation_rank": 27
+    },
+    {
+      "class_id": 412,
+      "within_class_validation_rank": 47
+    },
+    {
+      "class_id": 414,
+      "within_class_validation_rank": 0
+    },
+    {
+      "class_id": 419,
+      "within_class_validation_rank": 41
+    },
+    {
+      "class_id": 422,
+      "within_class_validation_rank": 19
+    },
+    {
+      "class_id": 429,
+      "within_class_validation_rank": 26
+    },
+    {
+      "class_id": 431,
+      "within_class_validation_rank": 23
+    },
+    {
+      "class_id": 445,
+      "within_class_validation_rank": 24
+    },
+    {
+      "class_id": 450,
+      "within_class_validation_rank": 41
+    },
+    {
+      "class_id": 455,
+      "within_class_validation_rank": 47
+    },
+    {
+      "class_id": 460,
+      "within_class_validation_rank": 49
+    },
+    {
+      "class_id": 464,
+      "within_class_validation_rank": 29
+    },
+    {
+      "class_id": 470,
+      "within_class_validation_rank": 35
+    },
+    {
+      "class_id": 475,
+      "within_class_validation_rank": 47
+    },
+    {
+      "class_id": 479,
+      "within_class_validation_rank": 46
+    },
+    {
+      "class_id": 506,
+      "within_class_validation_rank": 49
+    },
+    {
+      "class_id": 517,
+      "within_class_validation_rank": 2
+    },
+    {
+      "class_id": 523,
+      "within_class_validation_rank": 1
+    },
+    {
+      "class_id": 552,
+      "within_class_validation_rank": 29
+    },
+    {
+      "class_id": 591,
+      "within_class_validation_rank": 5
+    },
+    {
+      "class_id": 593,
+      "within_class_validation_rank": 43
+    },
+    {
+      "class_id": 596,
+      "within_class_validation_rank": 38
+    },
+    {
+      "class_id": 620,
+      "within_class_validation_rank": 6
+    },
+    {
+      "class_id": 633,
+      "within_class_validation_rank": 6
+    },
+    {
+      "class_id": 636,
+      "within_class_validation_rank": 5
+    },
+    {
+      "class_id": 643,
+      "within_class_validation_rank": 17
+    },
+    {
+      "class_id": 655,
+      "within_class_validation_rank": 42
+    },
+    {
+      "class_id": 656,
+      "within_class_validation_rank": 15
+    },
+    {
+      "class_id": 660,
+      "within_class_validation_rank": 35
+    },
+    {
+      "class_id": 669,
+      "within_class_validation_rank": 27
+    },
+    {
+      "class_id": 671,
+      "within_class_validation_rank": 30
+    },
+    {
+      "class_id": 681,
+      "within_class_validation_rank": 2
+    },
+    {
+      "class_id": 690,
+      "within_class_validation_rank": 33
+    },
+    {
+      "class_id": 695,
+      "within_class_validation_rank": 22
+    },
+    {
+      "class_id": 698,
+      "within_class_validation_rank": 6
+    },
+    {
+      "class_id": 712,
+      "within_class_validation_rank": 27
+    },
+    {
+      "class_id": 714,
+      "within_class_validation_rank": 30
+    },
+    {
+      "class_id": 716,
+      "within_class_validation_rank": 5
+    },
+    {
+      "class_id": 720,
+      "within_class_validation_rank": 25
+    },
+    {
+      "class_id": 722,
+      "within_class_validation_rank": 17
+    },
+    {
+      "class_id": 739,
+      "within_class_validation_rank": 37
+    },
+    {
+      "class_id": 759,
+      "within_class_validation_rank": 25
+    },
+    {
+      "class_id": 763,
+      "within_class_validation_rank": 1
+    },
+    {
+      "class_id": 771,
+      "within_class_validation_rank": 15
+    },
+    {
+      "class_id": 772,
+      "within_class_validation_rank": 28
+    },
+    {
+      "class_id": 776,
+      "within_class_validation_rank": 20
+    },
+    {
+      "class_id": 777,
+      "within_class_validation_rank": 13
+    },
+    {
+      "class_id": 798,
+      "within_class_validation_rank": 20
+    },
+    {
+      "class_id": 804,
+      "within_class_validation_rank": 16
+    },
+    {
+      "class_id": 819,
+      "within_class_validation_rank": 4
+    },
+    {
+      "class_id": 823,
+      "within_class_validation_rank": 34
+    },
+    {
+      "class_id": 830,
+      "within_class_validation_rank": 29
+    },
+    {
+      "class_id": 835,
+      "within_class_validation_rank": 26
+    },
+    {
+      "class_id": 846,
+      "within_class_validation_rank": 3
+    },
+    {
+      "class_id": 856,
+      "within_class_validation_rank": 33
+    },
+    {
+      "class_id": 875,
+      "within_class_validation_rank": 29
+    },
+    {
+      "class_id": 886,
+      "within_class_validation_rank": 40
+    },
+    {
+      "class_id": 889,
+      "within_class_validation_rank": 4
+    },
+    {
+      "class_id": 893,
+      "within_class_validation_rank": 16
+    },
+    {
+      "class_id": 918,
+      "within_class_validation_rank": 26
+    },
+    {
+      "class_id": 922,
+      "within_class_validation_rank": 6
+    },
+    {
+      "class_id": 932,
+      "within_class_validation_rank": 42
+    },
+    {
+      "class_id": 950,
+      "within_class_validation_rank": 12
+    },
+    {
+      "class_id": 963,
+      "within_class_validation_rank": 14
+    },
+    {
+      "class_id": 964,
+      "within_class_validation_rank": 19
+    },
+    {
+      "class_id": 979,
+      "within_class_validation_rank": 4
+    }
+  ]
+}

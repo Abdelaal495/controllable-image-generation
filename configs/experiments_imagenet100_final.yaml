@@ -1,0 +1,165 @@
+# Final paper benchmark: 100 ImageNet-1K validation images, one per class.
+# Frozen benchmark: class seed 42, image seed 43.
+# batch_size=1 for paper-quality latency and memory measurements.
+# All methods use t0=1.0 (pure noise), beta=1.0 (uniform).
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 512
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 1
+  pmf:
+    batch_size: 1
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_final100:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8], solver: heun}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 30}
+          mpc_rhc: {num_mpc_steps: 4, K: 2, n_ctrl: 40, lr: 0.05, lam: 15}
+          pnp: {num_pnp_steps: 50, gamma0: 200000.0, alpha: 0.5, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam, solver: heun}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun}
+      pmf:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8]}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 30}
+          mpc_rhc: {num_mpc_steps: 4, K: 2, n_ctrl: 40, lr: 0.1, lam: 15}
+          pnp: {num_pnp_steps: 50, gamma0: 800000.0, alpha: 0.75, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam}
+
+  deblurring_final100:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8], solver: heun}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 540}
+          mpc_rhc: {num_mpc_steps: 4, K: 1, n_ctrl: 40, lr: 0.1, lam: 60}
+          pnp: {num_pnp_steps: 100, gamma0: 1200000.0, alpha: 0.5, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam, solver: heun}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun}
+      pmf:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8]}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 540}
+          mpc_rhc: {num_mpc_steps: 4, K: 1, n_ctrl: 40, lr: 0.05, lam: 60}
+          pnp: {num_pnp_steps: 100, gamma0: 1200000.0, alpha: 0.5, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam}
+
+  super_resolution_final100:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8], solver: heun}
+          mpc_delta_t: {num_mpc_steps: 4, n_ctrl: 20, lr: 0.1, lam: 360}
+          mpc_rhc: {num_mpc_steps: 4, K: 3, n_ctrl: 40, lr: 0.05, lam: 240}
+          pnp: {num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam, solver: heun}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun}
+      pmf:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8]}
+          mpc_delta_t: {num_mpc_steps: 4, n_ctrl: 20, lr: 0.1, lam: 360}
+          mpc_rhc: {num_mpc_steps: 4, K: 3, n_ctrl: 40, lr: 0.05, lam: 240}
+          pnp: {num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam}
+
+  box_inpainting_final100:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8], solver: heun}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 180}
+          mpc_rhc: {num_mpc_steps: 4, K: 1, n_ctrl: 40, lr: 0.05, lam: 30}
+          pnp: {num_pnp_steps: 100, gamma0: 400000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam, solver: heun}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun}
+      pmf:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8]}
+          mpc_delta_t: {num_mpc_steps: 8, n_ctrl: 40, lr: 0.1, lam: 180}
+          mpc_rhc: {num_mpc_steps: 4, K: 1, n_ctrl: 40, lr: 0.05, lam: 30}
+          pnp: {num_pnp_steps: 100, gamma0: 400000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam}
+
+  random_inpainting_final100:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8], solver: heun}
+          mpc_delta_t: {num_mpc_steps: 4, n_ctrl: 20, lr: 0.1, lam: 540}
+          mpc_rhc: {num_mpc_steps: 4, K: 3, n_ctrl: 40, lr: 0.05, lam: 180}
+          pnp: {num_pnp_steps: 20, gamma0: 200000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam, solver: heun}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun}
+      pmf:
+        methods:
+          sdedit: {steps: [1, 2, 4, 8]}
+          mpc_delta_t: {num_mpc_steps: 4, n_ctrl: 20, lr: 0.15, lam: 540}
+          mpc_rhc: {num_mpc_steps: 4, K: 3, n_ctrl: 40, lr: 0.05, lam: 180}
+          pnp: {num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.25, noise_samples: 1}
+          dflow: {steps: 1, num_opt_steps: 320, lr: 0.03, optimizer: adam}
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam}
