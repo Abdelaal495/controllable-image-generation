@@ -1,0 +1,102 @@
+# =====================================================================================
+# MPC lambda: PIXEL-model control arm -- denoising, 8 images
+# =====================================================================================
+#
+# NOT the default configuration.  Run explicitly:
+#   python run.py --config configs/experiments_lambda_pixel_control.yaml --dry-run
+#
+# THE QUESTION
+#   Sweeping lambda on the two LATENT models (rounds 2 and 3, configs/experiments_sit_imf_
+#   hpo_v2.yaml and _v3.yaml) drove it four orders of magnitude above MPC-Flow Appendix
+#   E.2's tabulated value, and the LPIPS curve then went flat: on SiT MPC-RHC, lambda 50 ->
+#   500 is worth 0.005, and on both iMF methods the curve turns back up.  So the optimum is
+#   not "a larger lambda", it is "lambda large enough to switch the control penalty off".
+#
+#   Measured directly on the first outer MPC step, the gradient balance point
+#   ||d ctrl/du|| / ||d Phi/du|| is
+#       JiT  (pixel,  control 196608 dims)   1.9      <- E.2 tabulates 15 for this method
+#       SiT  (latent, control   4096 dims)   0.019    <- swept optimum is 300
+#   Two independent causes, same direction: ||2u|| scales as sqrt(dims), so the penalty is
+#   sqrt(196608/4096) = 6.9x weaker in the latent space (measured 6.93), and the SD-VAE
+#   decoder amplifies the fidelity gradient a further 14x.
+#
+#   That says the penalty is inert on LATENT models.  It does NOT yet say the penalty is
+#   useful on PIXEL ones -- E.2's value merely sits near their balance point.  This sweep
+#   is the missing control arm: the same lambda grid, the same 8 images, the same task, on
+#   JiT and pMF.  If the pixel curve has an interior optimum while the latent curve is flat
+#   past the balance point, the claim "MPC's control penalty stops working once the control
+#   variable lives in a latent space" is supported by both arms rather than one.
+#
+#   Structural budgets are matched to the latent runs so only the state space differs:
+#     JiT <-> SiT   num_mpc_steps = 4        (standard flow)
+#     pMF <-> iMF   num_mpc_steps = 2        (MeanFlow)
+#   n_ctrl is swept at 20 and 40 because SiT chose 40 for both methods.
+#
+# Nothing else is tuned here; this file exists to produce one figure, not a best setting.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: false     # this run is a curve, not a gallery
+  verbose: true
+  max_atomic_jobs: 120
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+
+data:
+  # Executed with data.source: local_folder on a machine without an HF token; committed as
+  # hf_imagenet_val so the file works anywhere.  Each run keeps its exact configuration in
+  # outputs/<run_id>/config.yaml.
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 2
+  pmf:
+    batch_size: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  lambda_pixel:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    notes: >
+      Pixel-model control arm for the MPC lambda study.  Same lambda grid, task and images
+      as the SiT/iMF sweeps, so the two state spaces can be plotted on one axis.
+    degradation:
+      sigma: 0.20
+    models:
+      jit:                          # pixel 3x256x256, standard flow -- pairs with SiT
+        methods:
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: [20, 40],
+                        lam: [0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 50.0, 150.0, 500.0]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: [20, 40],
+                        lam: [1.0, 5.0, 15.0, 30.0, 100.0, 300.0, 1000.0]}
+      pmf:                          # pixel 256x256x3, MeanFlow -- pairs with iMF
+        methods:
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: [20, 40],
+                        lam: [0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 50.0, 150.0, 500.0]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: [20, 40],
+                        lam: [1.0, 5.0, 15.0, 30.0, 100.0, 300.0, 1000.0]}

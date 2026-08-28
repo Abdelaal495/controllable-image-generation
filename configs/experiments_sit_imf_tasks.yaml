@@ -1,0 +1,221 @@
+# =====================================================================================
+# SiT / iMF sweep across the OTHER FIVE inverse problems -- 8 images
+# =====================================================================================
+#
+# NOT the default configuration.  Run explicitly:
+#   python run.py --config configs/experiments_sit_imf_tasks.yaml --dry-run
+#
+# Rounds 2 and 3 (configs/experiments_sit_imf_hpo_v2.yaml / _v3.yaml, 360 runs) tuned the
+# two latent models on DENOISING only.  This file carries that work to the remaining five
+# problems.  The goal is a usable setting per task, not the exact optimum -- a difference
+# of ~0.01 LPIPS is inside the noise at eight images anyway, so the grid is deliberately
+# coarse and spends its budget on the axes that actually moved.
+#
+# FIXED, because denoising settled them and nothing suggests they are task-dependent:
+#   phi_normalization = half_sum_squared for PnP.  The per-method default divides the
+#       fidelity term by the measurement count (196,608 for a 256x256 RGB image), which
+#       made gamma0 inert: LPIPS spread 0.018 across a 4x range of gamma0, versus 0.204
+#       once the scale is fixed.  This was the single largest effect in the whole study.
+#   mu = 0 for RHSO.  The state-anchor penalty lost to mu = 0 in every pair where the
+#       method was working; 0 is also its floor, so this is a result, not an untried edge.
+#   K = 1 for MPC-RHC.  K = 3 was worse by 0.156 LPIPS and costs about four times more.
+#   solver = heun for SiT; MeanFlow models reject the field.
+#
+# SWEPT, because these are the axes that moved on denoising or are tabulated per task:
+#   lam            MPC-Flow Appendix E.2 gives a DIFFERENT value per problem, and on the
+#                  latent models the curve is a plateau rather than a valley -- three
+#                  points bracket the plateau entry rather than trying to locate a minimum.
+#   lr, beta       RHSO's two live knobs (swing 0.25 and 0.10 on denoising).
+#   num_opt_steps  D-Flow's and RHSO's budget; both wanted more on denoising.
+#   gamma0, alpha  PnP's step size, now that it is no longer inert.
+#
+# t0 = 0.8 throughout, matching configs/experiments_full_benchmark.yaml, so every strategy
+# is compared against a paired SDEdit at the same corruption strength.  Denoising showed
+# SDEdit and PnP prefer a smaller t0, but as t0 -> 0 the shared initial state converges to
+# the degraded observation itself and SDEdit "wins" by doing nothing, so a per-method t0
+# would not be a fair comparison.  Sweep t0 separately if the curve itself is of interest.
+#
+# NOTE for the two inpainting problems: full-image LPIPS and PSNR are dominated by the
+# OBSERVED pixels there.  Read missing_psnr / missing_rmse in results.csv before drawing a
+# conclusion -- on box inpainting the best full-image score in the earlier benchmark also
+# had the worst reconstruction of the region that actually needed filling.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 300
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+
+data:
+  # Executed with data.source: local_folder on a machine without an HF token; committed as
+  # hf_imagenet_val so the file works anywhere.
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  sit:
+    batch_size: 2
+  imf:
+    batch_size: 2
+    vae_decode_batch: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+# The five blocks below are identical apart from their degradation parameters, which are
+# the repository's own defaults for each problem.
+experiments:
+
+  deblurring:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      sit:
+        methods:
+          sdedit:      {t0: 0.8, steps: 4, solver: heun}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, solver: heun, mu: 0.0,
+                        beta: [0.25, 0.5], num_opt_steps: [20, 40], lr: [0.05, 0.1]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: 40, lam: [15.0, 100.0, 300.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: 40, lam: [5.0, 50.0, 500.0]}
+          dflow:       {t0: 0.8, steps: 2, solver: heun, num_opt_steps: [40, 80], lr: [0.05, 0.1]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: [0.5, 1.0]}
+      imf:
+        methods:
+          sdedit:      {t0: 0.8, steps: 2}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.1, mu: 0.0,
+                        beta: [0.25, 0.5]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: 20, lam: [100.0, 1000.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: 20, lam: [5.0, 50.0]}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 40, lr: [0.1, 0.2]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: 1.0}
+
+  super_resolution:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      sit:
+        methods:
+          sdedit:      {t0: 0.8, steps: 4, solver: heun}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, solver: heun, mu: 0.0,
+                        beta: [0.25, 0.5], num_opt_steps: [20, 40], lr: [0.05, 0.1]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: 40, lam: [15.0, 100.0, 300.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: 40, lam: [5.0, 50.0, 500.0]}
+          dflow:       {t0: 0.8, steps: 2, solver: heun, num_opt_steps: [40, 80], lr: [0.05, 0.1]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: [0.5, 1.0]}
+      imf:
+        methods:
+          sdedit:      {t0: 0.8, steps: 2}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.1, mu: 0.0,
+                        beta: [0.25, 0.5]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: 20, lam: [100.0, 1000.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: 20, lam: [5.0, 50.0]}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 40, lr: [0.1, 0.2]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: 1.0}
+
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      sit:
+        methods:
+          sdedit:      {t0: 0.8, steps: 4, solver: heun}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, solver: heun, mu: 0.0,
+                        beta: [0.25, 0.5], num_opt_steps: [20, 40], lr: [0.05, 0.1]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: 40, lam: [15.0, 100.0, 300.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: 40, lam: [5.0, 50.0, 500.0]}
+          dflow:       {t0: 0.8, steps: 2, solver: heun, num_opt_steps: [40, 80], lr: [0.05, 0.1]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: [0.5, 1.0]}
+      imf:
+        methods:
+          sdedit:      {t0: 0.8, steps: 2}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.1, mu: 0.0,
+                        beta: [0.25, 0.5]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: 20, lam: [100.0, 1000.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: 20, lam: [5.0, 50.0]}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 40, lr: [0.1, 0.2]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: 1.0}
+
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      sit:
+        methods:
+          sdedit:      {t0: 0.8, steps: 4, solver: heun}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, solver: heun, mu: 0.0,
+                        beta: [0.25, 0.5], num_opt_steps: [20, 40], lr: [0.05, 0.1]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: 40, lam: [15.0, 100.0, 300.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: 40, lam: [5.0, 50.0, 500.0]}
+          dflow:       {t0: 0.8, steps: 2, solver: heun, num_opt_steps: [40, 80], lr: [0.05, 0.1]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: [0.5, 1.0]}
+      imf:
+        methods:
+          sdedit:      {t0: 0.8, steps: 2}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.1, mu: 0.0,
+                        beta: [0.25, 0.5]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: 20, lam: [100.0, 1000.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: 20, lam: [5.0, 50.0]}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 40, lr: [0.1, 0.2]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: 1.0}
+
+  stroke_painting:
+    enabled: true
+    problem: stroke_painting
+    num_images: 8
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      sit:
+        methods:
+          sdedit:      {t0: 0.8, steps: 4, solver: heun}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, solver: heun, mu: 0.0,
+                        beta: [0.25, 0.5], num_opt_steps: [20, 40], lr: [0.05, 0.1]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4, n_ctrl: 40, lam: [15.0, 100.0, 300.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1, n_ctrl: 40, lam: [5.0, 50.0, 500.0]}
+          dflow:       {t0: 0.8, steps: 2, solver: heun, num_opt_steps: [40, 80], lr: [0.05, 0.1]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: [0.5, 1.0]}
+      imf:
+        methods:
+          sdedit:      {t0: 0.8, steps: 2}
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10, lr: 0.1, mu: 0.0,
+                        beta: [0.25, 0.5]}
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2, n_ctrl: 20, lam: [100.0, 1000.0]}
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1, n_ctrl: 20, lam: [5.0, 50.0]}
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 40, lr: [0.1, 0.2]}
+          pnp:         {t0: 0.8, num_pnp_steps: 20, phi_normalization: half_sum_squared,
+                        gamma0: [0.25, 0.5], alpha: 1.0}

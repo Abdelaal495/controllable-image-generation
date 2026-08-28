@@ -1,0 +1,151 @@
+# =====================================================================================
+# SiT / iMF sweep, round 3 -- BOUNDARY EXTENSION, denoising, 8 images
+# =====================================================================================
+#
+# NOT the default configuration.  Run explicitly:
+#   python run.py --config configs/experiments_sit_imf_hpo_v3.yaml --dry-run
+#
+# WHY THIS EXISTS
+#   Round 2 (configs/experiments_sit_imf_hpo_v2.yaml, 272 jobs) put 27 winning values on
+#   the EDGE of their swept range, which means round 2 did not find an optimum -- it only
+#   established a direction.  This round pushes every extendable boundary outward while
+#   holding the other axes at their round-2 optimum.  It is a coordinate-wise extension,
+#   so it will miss interactions between two axes that both moved; that is the accepted
+#   cost of keeping it to a single day instead of a full re-grid.
+#
+# WHAT IS DELIBERATELY *NOT* EXTENDED
+#   mu = 0.0   hit the lower edge on both models, but mu is a penalty weight and 0 is its
+#              floor.  That is a RESULT -- the state-anchor penalty does not help here --
+#              not an unexplored boundary.
+#   K = 1      likewise: 1 is the smallest meaningful horizon, so "K = 1 wins" is a result.
+#   t0         IS extended down to 0.2, but read those rows with care.  As t0 -> 0 the
+#              shared initial state z_t0 -> g(y), so SDEdit degenerates into returning the
+#              degraded observation itself.  The degraded input scores LPIPS ~0.43 while
+#              SDEdit at t0 = 0.4 scores 0.54, so smaller t0 will "win" for SDEdit by doing
+#              nothing.  These rows document the curve; they are not a tuning result.
+#
+# PRIORITY -- how far each axis is pushed follows how much it was worth in round 2:
+#   lam            swing 0.28 (SiT RHC) / 0.22 (SiT dt) / 0.20 (iMF RHC), all pinned at the
+#                  top of the range.  Table E.2 suggests 0.1; round 2 wanted 5-30.  Pushed
+#                  two orders of magnitude further.
+#   lr (iMF RHSO)  swing 0.25, pinned at 0.1.  Pushed to 0.5.
+#   beta           swing 0.10, pinned at 0.5 on both models.  Pushed to 0.1.
+#   num_opt_steps  swing 0.06-0.09, pinned at 40 (D-Flow) and 20 (SiT RHSO).  Doubled.
+#   n_ctrl         swing 0.09 on SiT MPC-dt, pinned at 40.  Pushed to 160.
+#   gamma0/alpha   swing ~0.035 only, so extended cheaply on SiT and minimally on iMF.
+#
+# phi_normalization is FIXED at half_sum_squared for PnP: round 2 showed the repository's
+# per-method default divides the fidelity term by m_b = 196608, which makes gamma0 and
+# alpha inert (LPIPS spread 0.017 vs 0.185 once the scale is fixed).  That question is
+# settled and does not need re-sweeping.
+#
+# iMF costs ~22 min per MPC/RHSO job at 8 images against SiT's ~2, so iMF again gets the
+# surgical grid and SiT the generous one.  Best-per-model stays valid; the two grids are
+# not equally resolved.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 200
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The run this was executed from used data.source: local_folder, because ILSVRC/imagenet-1k
+  # is gated and that machine had no HF_TOKEN.  Committed as hf_imagenet_val so the file works
+  # anywhere; each run's exact configuration is in its own outputs/<run_id>/config.yaml.
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  sit:
+    batch_size: 2
+  imf:
+    batch_size: 2
+    vae_decode_batch: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_extend:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    notes: >
+      Round-3 boundary extension.  Every axis swept here pinned itself to the edge of its
+      round-2 range; the other axes are held at their round-2 optimum.
+    degradation:
+      sigma: 0.20
+
+    models:
+      # ---------------------------------------------------------------- SiT
+      sit:
+        methods:
+          # t0 pushed below 0.4.  DEGENERATE DIRECTION -- see the header.
+          sdedit:      {t0: [0.2, 0.3, 0.4], steps: [1, 2, 4], solver: heun}
+
+          # lam pinned at 5.0 (swing 0.28, the largest of the whole sweep); n_ctrl at 20/40.
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 4, K: 1,
+                        lam: [5.0, 15.0, 50.0, 150.0, 500.0], n_ctrl: [20, 40]}
+
+          # lam pinned at 30 and n_ctrl at 40; both pushed.
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 4,
+                        lam: [30.0, 100.0, 300.0, 1000.0], n_ctrl: [40, 80]}
+
+          # alpha and t0 both pinned low; gamma0 was interior at 0.5 but is cheap to widen.
+          pnp:         {t0: [0.4, 0.6], num_pnp_steps: 20,
+                        gamma0: [0.125, 0.25, 0.5], alpha: [0.25, 0.5],
+                        phi_normalization: half_sum_squared}
+
+          # num_opt_steps pinned at 40, t0 pinned at 0.6, steps pinned at 2.
+          dflow:       {t0: [0.4, 0.6], steps: [1, 2], solver: heun,
+                        num_opt_steps: [40, 80], lr: 0.05}
+
+          # beta pinned at 0.5 and num_opt_steps at 20; mu stays 0 (a result, not a boundary).
+          rhso:        {t0: 0.8, solver: heun, num_rhso_steps: 4,
+                        beta: [0.1, 0.25, 0.5], num_opt_steps: [20, 40],
+                        lr: [0.05, 0.1], mu: 0.0}
+
+      # ---------------------------------------------------------------- iMF (surgical)
+      imf:
+        methods:
+          sdedit:      {t0: [0.2, 0.3, 0.4], steps: [4, 8]}
+
+          mpc_rhc:     {t0: 0.8, num_mpc_steps: 2, K: 1,
+                        lam: [5.0, 15.0, 50.0, 150.0, 500.0], n_ctrl: 20}
+
+          mpc_delta_t: {t0: 0.8, num_mpc_steps: 2,
+                        lam: [30.0, 100.0, 300.0, 1000.0], n_ctrl: 20}
+
+          pnp:         {t0: [0.4, 0.6], num_pnp_steps: 20,
+                        gamma0: [0.125, 0.25, 0.5], alpha: 1.0,
+                        phi_normalization: half_sum_squared}
+
+          # lr had the largest swing on iMF (0.25) and pinned at 0.1; beta pinned at 0.5.
+          rhso:        {t0: 0.8, num_rhso_steps: 4, num_opt_steps: 10,
+                        beta: [0.25, 0.5], lr: [0.1, 0.2, 0.5], mu: 0.0}
+
+          # D-Flow is the weakest method on iMF and the most expensive per unit of gain,
+          # so only its two pinned axes get one step of extension.
+          dflow:       {t0: 0.8, steps: 2, num_opt_steps: 80, lr: [0.2, 0.5]}
