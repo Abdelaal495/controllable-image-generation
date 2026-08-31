@@ -13,8 +13,8 @@ What is reported, per job (never per image):
 Memory is a property of the job and its computational batch.  It is deliberately NOT
 divided by the batch size: activation memory does not decompose into an honest
 "per image" number, and a job that runs batch 4 has not measured four independent images'
-worth of anything.  Batch sizes greater than 1 are fully supported; run the final
-memory-reporting sweep at batch 1 if you want the single-image figure.
+worth of anything.  Batch sizes greater than 1 are fully supported; always report the
+configured batch size alongside the memory number.
 
 Scope: the profiler wraps ONLY the measured reconstruction, so model loading, dataset
 preparation, metrics, visualisation and the untimed warm-up are outside it.  PnP's initial
@@ -77,7 +77,7 @@ PROCESS_UNAVAILABLE = {"gpu_process_baseline_gib": None, "gpu_process_peak_gib":
 
 
 # =====================================================================================
-# NVML -- optional, used only when a framework allocator high-water mark is unavailable
+# NVML -- optional, used for the comparable per-process cross-framework metric
 # =====================================================================================
 def _nvml():
     """Import an NVML binding if one happens to be installed; never a hard requirement.
@@ -99,16 +99,39 @@ def _nvml():
     return None
 
 
-def _visible_device_index() -> int:
-    """Index of the device this process actually uses, honouring CUDA_VISIBLE_DEVICES."""
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if visible:
-        first = visible.split(",")[0].strip()
-        try:
-            return int(first)
-        except ValueError:
-            return 0
-    return 0
+def _visible_device_token() -> str:
+    """Best available identifier for the first GPU exposed to this process.
+
+    Slurm commonly uses a physical numeric index in ``CUDA_VISIBLE_DEVICES``; container
+    runtimes may instead expose a full GPU/MIG UUID.  NVML itself uses physical identifiers,
+    so preserve the token rather than blindly mapping non-numeric values to device 0.
+    """
+    for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        visible = os.environ.get(name, "").strip()
+        if not visible or visible.lower() in {"all", "none", "void"}:
+            continue
+        return visible.split(",")[0].strip()
+    return "0"
+
+
+def _nvml_device_handle(nvml):
+    """Resolve the GPU assigned to this process without assuming an index-only CVD."""
+    token = _visible_device_token()
+    if token.startswith(("GPU-", "MIG-")):
+        getter = getattr(nvml, "nvmlDeviceGetHandleByUUID", None)
+        if getter is not None:
+            # pynvml versions differ on whether UUID arguments are str or bytes.
+            for value in (token, token.encode("ascii", errors="ignore")):
+                try:
+                    return getter(value)
+                except Exception:
+                    pass
+    try:
+        return nvml.nvmlDeviceGetHandleByIndex(int(token))
+    except Exception:
+        # If the token is unusual and cannot be resolved, do not silently choose another
+        # GPU.  Returning None makes the process metric explicitly unavailable.
+        return None
 
 
 class _NvmlSampler:
@@ -123,7 +146,7 @@ class _NvmlSampler:
         self._handle = None
         if self._nvml is not None:
             try:
-                self._handle = self._nvml.nvmlDeviceGetHandleByIndex(_visible_device_index())
+                self._handle = _nvml_device_handle(self._nvml)
             except Exception:
                 self._handle = None
 
@@ -132,28 +155,70 @@ class _NvmlSampler:
         return self._handle is not None
 
     def _used_bytes(self) -> Optional[int]:
+        """Return THIS process's resident GPU memory, or ``None`` if NVML cannot.
+
+        Deliberately NEVER falls back to ``nvmlDeviceGetMemoryInfo(...).used``.  That value
+        is total DEVICE usage and can include driver allocations and other processes.  If
+        per-process accounting is unavailable, the scientifically correct result for the
+        ``gpu_process_*`` metric is "unavailable", not a mislabeled device-wide number.
+        """
+        if self._nvml is None or self._handle is None:
+            return None
         try:
             pid = os.getpid()
+
+            # Different pynvml / driver combinations expose different process-query
+            # versions.  Try the newest first, then gracefully fall back to older APIs.
+            getters = (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetComputeRunningProcesses_v2",
+                "nvmlDeviceGetComputeRunningProcesses",
+            )
+            queried = False
             procs = []
-            for getter in ("nvmlDeviceGetComputeRunningProcesses_v3",
-                           "nvmlDeviceGetComputeRunningProcesses"):
+            for getter in getters:
                 fn = getattr(self._nvml, getter, None)
                 if fn is None:
                     continue
                 try:
                     procs = fn(self._handle)
+                    queried = True
                     break
                 except Exception:
                     continue
-            for p in procs:
-                if int(getattr(p, "pid", -1)) == pid:
-                    used = getattr(p, "usedGpuMemory", None)
-                    if used is not None:
-                        return int(used)
-            # Per-process accounting is unavailable in some containers; fall back to the
-            # device total, which is an OVER-estimate when the GPU is shared.
-            info = self._nvml.nvmlDeviceGetMemoryInfo(self._handle)
-            return int(info.used)
+
+            if not queried:
+                return None
+
+            # NVML may use its UINT64 sentinel (all bits set) when per-process memory is
+            # not available, notably on some platforms / MIG configurations.  Reject any
+            # such value rather than turning it into an absurdly large memory reading.
+            nvml_na = getattr(self._nvml, "NVML_VALUE_NOT_AVAILABLE", None)
+            for proc in procs:
+                if int(getattr(proc, "pid", -1)) != pid:
+                    continue
+                used = getattr(proc, "usedGpuMemory", None)
+                if used is None:
+                    return None
+                try:
+                    used_i = int(used)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                if nvml_na is not None:
+                    try:
+                        if used_i == int(nvml_na):
+                            return None
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                # Defensive handling for the common UINT64_MAX sentinel even when the
+                # binding does not expose NVML_VALUE_NOT_AVAILABLE.
+                if used_i < 0 or used_i >= (1 << 63):
+                    return None
+                return used_i
+
+            # The GPU is visible, but NVML did not return a per-process entry for us.
+            # This is NOT permission to use device-wide memory.
+            return None
         except Exception:
             return None
 
@@ -309,8 +374,10 @@ class GpuMemoryProfiler:
         self._sync()
         if self._process_sampler is not None:
             self.process_baseline_gib = self._process_sampler.sample_once()
-            self.process_source = ("nvml_process_sampling(interval=%gs)"
-                                   % self.nvml_interval)
+            self.process_source = (("nvml_process_sampling(interval=%gs)"
+                                    % self.nvml_interval)
+                                   if self.process_baseline_gib is not None
+                                   else "unavailable")
         try:
             if self._mode == "torch_cuda":
                 import torch
@@ -320,12 +387,34 @@ class GpuMemoryProfiler:
                 self.source = "torch.cuda.max_memory_allocated"
             elif self._mode == "nvml":
                 self.baseline_gib = self._sampler.sample_once()
-                self.source = ("nvml_process_sampling(interval=%gs)  [SAMPLED PROCESS PEAK, "
-                               "not an allocator high-water mark]" % self.nvml_interval)
                 stats = self._jax_stats()
                 if stats.get("bytes_in_use") is not None:
                     self.extra["gpu_baseline_jax_bytes_in_use_gib"] = \
                         float(stats["bytes_in_use"]) / GIB
+
+                if self.baseline_gib is not None:
+                    self.source = (
+                        "nvml_process_sampling(interval=%gs)  [SAMPLED PROCESS PEAK, "
+                        "not an allocator high-water mark]" % self.nvml_interval
+                    )
+                elif stats:
+                    # NVML can see the device but cannot provide PID-specific accounting.
+                    # Keep the cross-framework gpu_process_* metric unavailable, while still
+                    # exposing JAX's framework-specific lifetime statistic in its historical
+                    # gpu_* columns with an unmistakable label.
+                    self._mode = "jax_device_stats"
+                    self.baseline_gib = float(stats.get("bytes_in_use", 0)) / GIB
+                    self.extra["gpu_lifetime_peak_at_baseline_gib"] = \
+                        float(stats.get("peak_bytes_in_use", 0)) / GIB
+                    self.source = (
+                        "jax_device_memory_stats(peak_bytes_in_use)  [LIFETIME "
+                        "high-water mark: it has no reset API, so it can only "
+                        "over-report this job]"
+                    )
+                else:
+                    self.source = "unavailable"
+                    self._mode = "off"
+                    self.baseline_gib = None
             else:                                                # jax_device_stats
                 stats = self._jax_stats()
                 if not stats:
