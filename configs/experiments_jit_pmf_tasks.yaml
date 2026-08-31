@@ -30,9 +30,15 @@
 #    against 196,608 here, and K sets how much of the horizon is optimised jointly.  It is
 #    cheap on these models (JiT MPC-RHC costs 0.15 s/image), so K = 3 is worth its budget.
 #
-# CARRIED OVER unchanged, because the latent sweeps settled them and nothing about the
-# state space bears on either: mu = 0 for RHSO (its floor, and it lost wherever the method
-# worked), and solver = heun for the two standard flows.
+# CARRIED OVER from the latent sweeps: mu = 0 for RHSO, and solver = heun for the two
+# standard flows.
+#
+# *** THE mu = 0 CARRY-OVER WAS A MISTAKE AND THIS FILE IS AFFECTED. ***  "Nothing about
+# the state space bears on it" was an assumption, not a measurement, and it was wrong in
+# exactly the way lambda had already been wrong: configs/experiments_round4.yaml swept mu
+# on JiT and pMF and mu > 0 won all 12 cells, by up to 0.35 LPIPS.  Every RHSO row this
+# file produced is therefore a mu = 0 row and understates RHSO on pixel models.  Use the
+# round-4 numbers in docs/best_hyperparameters.md instead.
 #
 # t0 = 0.8 throughout, matching every other sweep, so each strategy is scored against a
 # paired SDEdit at the same corruption strength.

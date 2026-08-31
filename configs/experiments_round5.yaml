@@ -1,0 +1,225 @@
+# =====================================================================================
+# Round 5 -- mu beyond its edge, on both state spaces
+# =====================================================================================
+#
+# NOT the default configuration.  Run explicitly:
+#   python run.py --config configs/experiments_round5.yaml --dry-run
+#
+# WHY
+#   Round 4 swept RHSO's state-anchor weight mu on the pixel models for the first time --
+#   no earlier file had, because "mu = 0" was carried over from the latent sweeps without
+#   testing it.  mu > 0 then won all 12 pixel cells, by up to 0.35 LPIPS (JiT deblurring:
+#   0.497 at mu = 0 against 0.151 at mu = 0.2).  Ten of the twelve chose 0.2, the largest
+#   value tried, so those numbers are a lower bound and the real optimum is untried.
+#
+#   This round pushes mu to 2.0 and asks two things:
+#     * where the pixel optimum actually is;
+#     * whether the latent models still prefer mu = 0 once larger values are on the table.
+#       SiT and iMF were only ever offered mu up to 0.2, so "latent models do not want the
+#       penalty" rests on a narrow range.  If they turn out to want mu = 1.0, the
+#       pixel/latent story collapses into "everyone wants it, we just never swept far
+#       enough" -- which would also change how lambda's plateau should be read.
+#
+#   mu = 0.2 is included on every model as an internal anchor, so this round can be read
+#   without cross-referencing round 4 (which ran at a different batch size).
+#
+# BATCH SIZE
+#   Measured peaks at batch_size = 2 are JiT 5.4 GiB, pMF 13.0, SiT 12.9, iMF 1.3 on a
+#   24 GiB card, and sustained GPU utilisation during round 4 was only ~29%: eight images
+#   at batch 2 means four sequential batches of a latency-bound loop.  iMF has the room to
+#   go to 8 and JiT to 4; pMF and SiT do not and stay at 2.
+#
+#   This is safe for the numbers: src/problems.make_phi sums the fidelity over the batch
+#   rather than averaging, so each image's gradient is invariant to batch size and to
+#   repeat padding.  It is NOT safe for the memory columns -- gpu_peak_gib is reported per
+#   job at its configured batch and is never divided by it, so the four models' memory
+#   figures in this run are not comparable with each other or with earlier rounds.
+#
+# Everything else is held at the round-3/4 best for that model: beta = 0.5, and the
+# num_opt_steps each model preferred.  t0 = 0.8, beta grid not re-swept here.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 250
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+
+data:
+  # Executed with data.source: local_folder on a machine without an HF token; committed as
+  # hf_imagenet_val so the file works anywhere.
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4               # peak 5.4 GiB at batch 2
+  pmf:
+    batch_size: 2               # peak 13.0 GiB at batch 2 -- no headroom
+  sit:
+    batch_size: 2               # peak 12.9 GiB at batch 2 -- no headroom
+  imf:
+    batch_size: 8               # peak 1.3 GiB at batch 2; iMF dominates wall clock
+    vae_decode_batch: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}
+
+  deblurring:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}
+
+  super_resolution:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}
+
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}
+
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}
+
+  stroke_painting:
+    enabled: true
+    problem: stroke_painting
+    num_images: 8
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      jit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.5,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      pmf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 20, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      sit:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, solver: heun, beta: 0.25,
+                 num_opt_steps: 40, lr: 0.05, mu: [0.2, 0.5, 1.0, 2.0]}
+      imf:
+        methods:
+          rhso: {t0: 0.8, num_rhso_steps: 4, beta: 0.5,
+                 num_opt_steps: 10, lr: 0.1, mu: [0.2, 0.5, 1.0, 2.0]}

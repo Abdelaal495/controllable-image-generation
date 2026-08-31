@@ -16,8 +16,13 @@
 #       fidelity term by the measurement count (196,608 for a 256x256 RGB image), which
 #       made gamma0 inert: LPIPS spread 0.018 across a 4x range of gamma0, versus 0.204
 #       once the scale is fixed.  This was the single largest effect in the whole study.
-#   mu = 0 for RHSO.  The state-anchor penalty lost to mu = 0 in every pair where the
-#       method was working; 0 is also its floor, so this is a result, not an untried edge.
+#   mu = 0 for RHSO.  *** THIS TURNED OUT TO BE WRONG FOR PIXEL MODELS. ***  It held on
+#       SiT and iMF, where mu = 0 beat mu > 0 wherever the method worked, and it is what
+#       this file was run with.  configs/experiments_round4.yaml later swept mu on JiT and
+#       pMF -- which no earlier file had done, because this conclusion was carried over
+#       from the latent models without testing -- and mu > 0 won in all 12 pixel cells, by
+#       up to 0.35 LPIPS.  Any RHSO number this file produced for a PIXEL model is a
+#       mu = 0 number and understates the method; see docs/best_hyperparameters.md.
 #   K = 1 for MPC-RHC.  K = 3 was worse by 0.156 LPIPS and costs about four times more.
 #   solver = heun for SiT; MeanFlow models reject the field.
 #

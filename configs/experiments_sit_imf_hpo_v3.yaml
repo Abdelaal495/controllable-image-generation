@@ -15,8 +15,10 @@
 #
 # WHAT IS DELIBERATELY *NOT* EXTENDED
 #   mu = 0.0   hit the lower edge on both models, but mu is a penalty weight and 0 is its
-#              floor.  That is a RESULT -- the state-anchor penalty does not help here --
-#              not an unexplored boundary.
+#              floor.  That is a RESULT for THESE TWO LATENT MODELS -- the state-anchor
+#              penalty does not help them -- not an unexplored boundary.  It does not
+#              generalise: round 4 swept mu on the pixel models and mu > 0 won all 12
+#              cells there.
 #   K = 1      likewise: 1 is the smallest meaningful horizon, so "K = 1 wins" is a result.
 #   t0         IS extended down to 0.2, but read those rows with care.  As t0 -> 0 the
 #              shared initial state z_t0 -> g(y), so SDEdit degenerates into returning the
