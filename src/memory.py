@@ -24,6 +24,26 @@ Torch
     torch.cuda's own allocator statistics, with the peak counter reset at the boundary.
     This is a true allocator high-water mark for the measured region.
 
+CROSS-FRAMEWORK COMPARISON  (gpu_process_*)
+    A Torch allocator high-water mark and a JAX device-memory statistic measure different
+    things and must never be put in the same column of a paper table.  Independently of the
+    framework-specific numbers above, this module therefore samples ONE comparable metric
+    for both frameworks:
+
+        gpu_process_baseline_gib          this PROCESS's GPU memory immediately before the
+                                          measured reconstruction
+        gpu_process_peak_gib              the highest value sampled DURING it
+        gpu_process_incremental_peak_gib  the difference
+        gpu_process_memory_source         how it was obtained
+
+    It is sampled through NVML, restricted to this process's own usage where the driver
+    exposes per-process accounting, and a FRESH sampler is created for every atomic job --
+    unlike JAX's `peak_bytes_in_use`, which is a lifetime high-water mark with no reset API.
+    When NVML is unavailable the process fields report `unavailable`; JAX's lifetime peak is
+    NEVER substituted for them, because it cannot answer "what did THIS job peak at" once an
+    earlier job has peaked higher.  That substitution is exactly what made pMF's memory look
+    suspiciously constant across jobs.
+
 JAX
     Deliberately conservative.  This repository sets XLA_PYTHON_CLIENT_PREALLOCATE=false
     and a persistent compilation cache on purpose, and nothing here changes preallocation,
@@ -47,6 +67,13 @@ GIB = float(2 ** 30)
 # Reported when nothing usable is available, so the columns exist but claim nothing.
 UNAVAILABLE = {"gpu_baseline_gib": None, "gpu_peak_gib": None,
                "gpu_incremental_peak_gib": None, "gpu_memory_source": "unavailable"}
+
+# The ONE metric that is comparable between PyTorch and JAX, and the only one a
+# cross-framework memory table may use.  See `GpuMemoryProfiler` for why an allocator
+# high-water mark and JAX's lifetime peak are not interchangeable with it.
+PROCESS_UNAVAILABLE = {"gpu_process_baseline_gib": None, "gpu_process_peak_gib": None,
+                       "gpu_process_incremental_peak_gib": None,
+                       "gpu_process_memory_source": "unavailable"}
 
 
 # =====================================================================================
@@ -194,7 +221,27 @@ class GpuMemoryProfiler:
         self.source: str = "disabled" if not enabled else "uninitialised"
         self.extra: Dict[str, Any] = {}
         self._sampler: Optional[_NvmlSampler] = None
+        # The comparable cross-framework metric, measured for BOTH frameworks and reset per
+        # job because this object is constructed per atomic job.
+        self.process_baseline_gib: Optional[float] = None
+        self.process_peak_gib: Optional[float] = None
+        self.process_source: str = "disabled" if not enabled else "uninitialised"
+        self._process_sampler: Optional[_NvmlSampler] = None
         self._mode = self._choose_mode() if enabled else "off"
+        if self._mode not in ("off", "off_cpu"):
+            self._process_sampler = (self._sampler if self._mode == "nvml"
+                                     else self.make_process_sampler())
+            if self._process_sampler is None or not self._process_sampler.available:
+                self._process_sampler = None
+                self.process_source = "unavailable"
+        else:
+            self.process_source = ("cpu_no_gpu_memory" if self._mode == "off_cpu"
+                                   else self.process_source)
+
+    def make_process_sampler(self) -> Optional["_NvmlSampler"]:
+        """A FRESH NVML sampler for this job.  Overridable, so tests can inject a fake."""
+        sampler = _NvmlSampler(self.nvml_interval)
+        return sampler if sampler.available else None
 
     # ---------------------------------------------------------------- setup
     def _choose_mode(self) -> str:
@@ -248,7 +295,7 @@ class GpuMemoryProfiler:
     # ---------------------------------------------------------------- measurement
     def establish_baseline(self) -> Optional[float]:
         """Steady state after loading and warm-up, immediately before the measured work."""
-        if self._mode in ("off", "off_cpu"):
+        if self._mode in ("off", "off_cpu") and self._process_sampler is None:
             # Three different things, and a reader of results.csv needs to tell them apart:
             # the user disabled it, the run has no GPU at all, or we genuinely could not
             # measure.  None of them is allowed to look like a measured zero.
@@ -260,6 +307,10 @@ class GpuMemoryProfiler:
                 self.source = "unavailable"
             return None
         self._sync()
+        if self._process_sampler is not None:
+            self.process_baseline_gib = self._process_sampler.sample_once()
+            self.process_source = ("nvml_process_sampling(interval=%gs)"
+                                   % self.nvml_interval)
         try:
             if self._mode == "torch_cuda":
                 import torch
@@ -310,29 +361,45 @@ class GpuMemoryProfiler:
         return GpuMemoryProfiler._Region(self)
 
     def _enter_region(self) -> None:
-        if self._mode in ("off", "off_cpu"):
+        # The comparable process metric is deliberately INDEPENDENT of the
+        # framework-specific one: if JAX's device statistics are unavailable, or the Torch
+        # allocator path is off, NVML process sampling still answers "what did this job
+        # peak at" and must not be switched off with it.
+        if self._mode in ("off", "off_cpu") and self._process_sampler is None:
             return
         try:
             self._sync()
-            if self._mode == "nvml" and self._sampler is not None:
+            if self._process_sampler is not None:
+                self._process_sampler.start()
+            elif self._mode == "nvml" and self._sampler is not None:
                 self._sampler.start()
         except Exception:                                                # pragma: no cover
             pass
 
     def _exit_region(self) -> None:
-        if self._mode in ("off", "off_cpu"):
+        if self._mode in ("off", "off_cpu") and self._process_sampler is None:
             return
         try:
             self._sync()
+            if self._process_sampler is not None:
+                sampled = self._process_sampler.stop()
+                if sampled is not None:
+                    self.process_peak_gib = (sampled if self.process_peak_gib is None
+                                             else max(self.process_peak_gib, sampled))
             observed: Optional[float] = None
-            if self._mode == "torch_cuda":
+            if self._mode in ("off", "off_cpu"):
+                pass                       # process sampling only; nothing else to read
+            elif self._mode == "torch_cuda":
                 import torch
                 observed = torch.cuda.max_memory_allocated() / GIB
                 self.extra["gpu_peak_reserved_gib"] = max(
                     float(self.extra.get("gpu_peak_reserved_gib") or 0.0),
                     torch.cuda.max_memory_reserved() / GIB)
             elif self._mode == "nvml" and self._sampler is not None:
-                observed = self._sampler.stop()
+                # The same sampler object serves both metrics on the JAX path; it was
+                # already stopped above, so its peak is read rather than re-stopped.
+                observed = (None if self.process_peak_gib is None
+                            else self.process_peak_gib)
             elif self._mode == "jax_device_stats":
                 stats = self._jax_stats()
                 if stats:
@@ -344,11 +411,40 @@ class GpuMemoryProfiler:
             self.extra["gpu_memory_error"] = "%s: %s" % (type(exc).__name__, exc)
 
     # ---------------------------------------------------------------- output
+    def process_report(self) -> Dict[str, Any]:
+        """The cross-framework process metric, or an explicit `unavailable`.
+
+        Never falls back to JAX's `peak_bytes_in_use`: that is a LIFETIME high-water mark
+        with no reset API, so once an earlier job has peaked higher it reports that earlier
+        job's peak rather than this one's. Reporting it here would be the very mislabelling
+        that made pMF's per-job memory look constant.
+        """
+        if self.process_peak_gib is None or self.process_baseline_gib is None:
+            out = dict(PROCESS_UNAVAILABLE)
+            out["gpu_process_memory_source"] = self.process_source
+            return out
+        incremental = self.process_peak_gib - self.process_baseline_gib
+        return {
+            "gpu_process_baseline_gib": round(float(self.process_baseline_gib), 4),
+            "gpu_process_peak_gib": round(float(self.process_peak_gib), 4),
+            # A sampled process peak can land marginally below the baseline sample; report
+            # the clamp rather than a negative "incremental" number.
+            "gpu_process_incremental_peak_gib": round(float(max(incremental, 0.0)), 4),
+            "gpu_process_memory_source": self.process_source,
+        }
+
     def report(self) -> Dict[str, Any]:
+        """Framework-specific numbers PLUS the comparable process numbers.
+
+        Both sets are always present and separately labelled. The historical
+        `gpu_*` columns keep exactly the meaning they had; the `gpu_process_*` columns are
+        the ones a JiT-vs-pMF table may compare.
+        """
         if self.peak_gib is None or self.baseline_gib is None:
             out = dict(UNAVAILABLE)
             out["gpu_memory_source"] = self.source
             out.update(self.extra)
+            out.update(self.process_report())
             return out
         incremental = self.peak_gib - self.baseline_gib
         out = {
@@ -361,4 +457,5 @@ class GpuMemoryProfiler:
         }
         out.update({k: (round(v, 4) if isinstance(v, float) else v)
                     for k, v in self.extra.items()})
+        out.update(self.process_report())
         return out

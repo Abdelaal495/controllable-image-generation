@@ -88,6 +88,27 @@ class ReconstructionStats:
     fidelity_history: List[float] = field(default_factory=list)
     state_penalty_history: List[float] = field(default_factory=list)
 
+    # -- added with the RHSO theory-validation diagnostics ----------------------------
+    # STRICTLY SEPARATE from every counter above.  Stage-end evaluations, endpoint
+    # consistency predictions, JVPs, VJPs and randomised spectral probes are EXTRA
+    # measurements about the method, not compute the method spends, so counting them in
+    # `model_evals_total` / `network_forwards` / `seconds` would silently inflate the
+    # numbers a paper reports as the algorithm's cost.  `seconds` therefore excludes
+    # `diagnostic_seconds` (see rhso._finalise), and with diagnostics off every field below
+    # stays at zero / empty and nothing above changes.
+    diagnostic_model_evals: int = 0
+    diagnostic_network_forwards: int = 0
+    diagnostic_jvps: int = 0
+    diagnostic_vjps: int = 0
+    diagnostic_seconds: float = 0.0
+    # One entry per (REAL image, RHSO stage); see src/rhso_diagnostics.py.
+    stage_records: List[Dict[str, Any]] = field(default_factory=list)
+    # What ||p_k - r_k|| means for this run, and what the terminal planner is.  Set by the
+    # RHSO loops so no downstream table has to guess the semantics from the model name.
+    consistency_kind: Optional[str] = None
+    terminal_planner_kind: Optional[str] = None
+    diagnostic_settings: Optional[Dict[str, Any]] = None
+
     def merge(self, other: "ReconstructionStats") -> None:
         self.control_iterations += other.control_iterations
         self.model_evals_planning += other.model_evals_planning
@@ -103,6 +124,17 @@ class ReconstructionStats:
         self.denoiser_samples += other.denoiser_samples
         self.fidelity_history.extend(other.fidelity_history)
         self.state_penalty_history.extend(other.state_penalty_history)
+        self.diagnostic_model_evals += other.diagnostic_model_evals
+        self.diagnostic_network_forwards += other.diagnostic_network_forwards
+        self.diagnostic_jvps += other.diagnostic_jvps
+        self.diagnostic_vjps += other.diagnostic_vjps
+        self.diagnostic_seconds += other.diagnostic_seconds
+        # Chunks are disjoint sets of images, so concatenating keeps one row per
+        # (image, stage) across the whole job.
+        self.stage_records.extend(other.stage_records)
+        self.consistency_kind = self.consistency_kind or other.consistency_kind
+        self.terminal_planner_kind = self.terminal_planner_kind or other.terminal_planner_kind
+        self.diagnostic_settings = self.diagnostic_settings or other.diagnostic_settings
 
 
 # `canonical_time_grid` used to be defined HERE, which made an algorithm module the owner

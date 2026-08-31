@@ -1010,6 +1010,78 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                                       history[0] if history else float("nan"),
                                       history[-1] if history else float("nan")))
 
+    def rhso_direct_terminal_planning():
+        """The DIRECT terminal planner is one prediction, and the diagnostics stay separate.
+
+        Run against the REAL loaded model, because the container the executable tests run
+        in has no PyTorch: this is where JiT-direct's terminal planning is actually
+        exercised.  Three things are checked at once:
+
+          * one inner objective performs exactly ONE terminal-planner evaluation and never
+            integrates the remaining suffix (`integrate_flow` is replaced by a tripwire for
+            the duration of the probe);
+          * for a clean-prediction model, x + (1-s)v recovers the direct prediction, i.e.
+            the planner and the sampler are guided by the same arithmetic;
+          * with the theory diagnostics on, every ALGORITHMIC counter is identical to the
+            same job with them off, and the diagnostic work lands in its own counters.
+        """
+        import dataclasses as _dc
+        from . import rhso as rhso_module
+        from .rhso import make_terminal_planner, rhso_reconstruct, rhso_time_grid
+
+        tiny = _dc.replace(_probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2),
+                           rhso_terminal_mode="direct")
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        grid = rhso_time_grid(tiny)
+
+        original = rhso_module.integrate_flow
+
+        def tripwire(*a, **k):
+            raise AssertionError("direct terminal planning must not integrate the suffix")
+
+        rhso_module.integrate_flow = tripwire
+        try:
+            adapter.reset_counters()
+            planner = make_terminal_planner(adapter, cond, tiny, grid, 0, "direct")
+            prediction = planner(x0)
+            forwards = adapter.forward_counter
+        finally:
+            rhso_module.integrate_flow = original
+
+        recovers = True
+        if adapter.spec.dynamics_family == STANDARD_FLOW:
+            import torch
+            with torch.no_grad():
+                v = adapter.velocity(x0, grid[0], cond)
+                t_eps = float(getattr(adapter, "t_eps", 1e-8))
+                recovered = x0 + max(1.0 - grid[0], t_eps) * v
+                recovers = bool((recovered - prediction).abs().max() < 1e-2)
+
+        plain = rhso_reconstruct(adapter, cond, x0, sub_problem, tiny)[1]
+        with_diag = rhso_reconstruct(
+            adapter, cond, x0, sub_problem,
+            _dc.replace(tiny, rhso_stage_diagnostics=True,
+                        rhso_consistency_diagnostics=True))[1]
+        counters = ("model_evals_total", "model_evals_planning", "network_forwards",
+                    "backprops_through_model", "objective_evals", "optimizer_iterations")
+        same = all(getattr(plain, c) == getattr(with_diag, c) for c in counters)
+        rows = len(with_diag.stage_records)
+        ok = (recovers and same and plain.model_evals_planning == 2 * 2
+              and with_diag.diagnostic_model_evals > 0
+              and plain.diagnostic_model_evals == 0
+              and rows == 2 * len(sub_problem.image_ids))
+        return ok, ("one direct terminal prediction per objective (%d network forward(s), "
+                    "%d planning evaluations for N=2 M=2, no suffix integration); "
+                    "x+(1-s)v agreement: %s; diagnostics add %d evaluations and %d "
+                    "[image, stage] rows while every algorithmic counter is unchanged"
+                    % (forwards, plain.model_evals_planning,
+                       "n/a (MeanFlow)" if adapter.spec.dynamics_family != STANDARD_FLOW
+                       else ("yes" if recovers else "NO"),
+                       with_diag.diagnostic_model_evals, rows))
+
     def rhso_state_regularization():
         """mu adds a state-anchor penalty and NOTHING else.
 
@@ -1074,6 +1146,8 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
         report.run(scope, "dflow_optimisation", dflow_optimisation, verbose)
     if "rhso" in wanted:
         report.run(scope, "rhso_receding_horizon", rhso_receding_horizon, verbose)
+        report.run(scope, "rhso_direct_terminal_planning", rhso_direct_terminal_planning,
+                   verbose)
         report.run(scope, "rhso_state_regularization", rhso_state_regularization, verbose)
     for name, fn in adapter.sanity_checks().items():
         report.run(scope, name, lambda f=fn: f(ctx), verbose)

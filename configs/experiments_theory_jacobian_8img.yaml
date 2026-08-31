@@ -1,0 +1,156 @@
+# JACOBIAN / ANISOTROPY DIAGNOSTIC RUN -- 8 images, batch 4.
+#
+# Tests the claim that the terminal map becomes progressively LESS anisotropic as the
+# trajectory advances, at the main RHSO setting (N=4, M=40, t0=1, beta=1, mu=0) with the
+# frozen benchmark's learning rates.
+#
+# What is measured, per REAL image and per stage, at the state ENTERING the stage (never
+# after an Adam step):
+#     pMF         J_k = D_x T_theta(x_{s_k}; s_k -> 1)
+#     JiT-direct  J_k = D_x x_hat_1(x_{s_k}, s_k)
+#
+# The full Jacobian is never formed. Only JVPs, VJPs and J^T J products are used, and each
+# image is probed in ISOLATION with batch-masked tangents, so nothing here is a condition
+# number of the concatenated four-image batch. Padded rows are skipped.
+#
+# HONEST LIMITS, and they matter for how these numbers may be reported:
+#   * `sigma_max` is a POWER-ITERATION estimate of the dominant singular scale. Power
+#     iteration says nothing about sigma_min, so no condition number is derived from it.
+#   * `empirical_gain_ratio` = p95/p05 of the sampled directional gains is a sample-based
+#     anisotropy statistic and a LOWER BOUND on the true condition number -- random
+#     directions concentrate in high dimension, so the smallest sampled gain is almost
+#     never near sigma_min.
+#   * These are Jacobians of the LEARNED terminal maps, not of the theoretical AGPP map.
+#
+# 8 images = 2 full batches of 4, so no padding is needed and the per-image rows are all
+# real. Probes and power iterations are conservative but useful; raise them here.
+# Runtime and memory from THIS config are not paper numbers: the probes are expensive.
+# Use configs/experiments_theory_resources_batch4.yaml for those.
+#
+# Expected scale: 5 tasks x 2 models x 1 setting = 10 atomic jobs.
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 64
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    # batch_size 4 for BOTH models. The optimisation objective is SUMMED over the batch, so
+    # a sample's own gradient is unchanged by its batch companions; the memory and runtime
+    # numbers below are therefore batch-4 JOB figures, not per-image ones.
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_jacobian8:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+
+  deblurring_jacobian8:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+
+  super_resolution_jacobian8:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+
+  box_inpainting_jacobian8:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+
+  random_inpainting_jacobian8:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917}

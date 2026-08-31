@@ -37,6 +37,10 @@ from .base import (AdapterSpec, Conditioning, StandardFlowAdapter, register_adap
 
 class JiTAdapter(StandardFlowAdapter):
 
+    # JiT's network natively predicts the clean image, so `clean_prediction` is the model's
+    # own output rather than an extrapolation of a velocity field.
+    terminal_prediction_kind = "direct_clean_endpoint_prediction"
+
     def __init__(self, registry: Dict[str, Any], repo_dir: Path, cache_dir: Path, device, dtype):
         import torch
         super().__init__("jit", registry)
@@ -229,8 +233,22 @@ class JiTAdapter(StandardFlowAdapter):
         self.count_forwards(1)
         return native.float()
 
-    def velocity(self, state, s: float, conditioning: Conditioning):
-        """v_theta(x, s), derived from JiT's clean-image prediction."""
+    def _guided_clean(self, state, s: float, conditioning: Conditioning):
+        """THE guided clean-image prediction x_hat_1(x, s), and the pieces derived from it.
+
+        This is the single authoritative implementation of JiT's native output: the dtype
+        policy, the native-time mapping, the classifier-free-guidance rule and its
+        per-sample interval gating live here and nowhere else.  Both `velocity` (which
+        divides by 1 - t) and `clean_prediction` (which returns it directly) call this, so
+        the two can never drift apart -- an RHSO direct terminal objective and an SDEdit
+        integration are guided by the same arithmetic by construction.
+
+        Returns (clean, state_cast, t_batch, t_eps):
+            clean       x_hat_1, FP32, differentiable w.r.t. `state`
+            state_cast  the input cast to the integration dtype (what `clean` is relative to)
+            t_batch     the per-sample native time actually used
+            t_eps       the resolved velocity-denominator stabiliser
+        """
         torch = self.torch
         t = native_time(s, self.spec.native_time_mapping)               # = s
         state = state.to(device=self.device, dtype=self.integration_dtype)
@@ -259,6 +277,27 @@ class JiTAdapter(StandardFlowAdapter):
             sv = effective.reshape(-1, *([1] * (state.ndim - 1)))
             clean = unconditional + sv * (conditional - unconditional)
 
+        return clean, state, t_batch, t_eps
+
+    def clean_prediction(self, state, s: float, conditioning: Conditioning):
+        """x_hat_1(x, s): JiT's NATIVE guided clean-image prediction, returned directly.
+
+        This is what RHSO's `direct` terminal planner uses: ONE endpoint prediction from
+        the current state, with no integration of the remaining trajectory.  It is an
+        endpoint predictor, not a learned finite-interval transport map -- see
+        docs/schedule_and_rhso.md.
+
+        Differentiable with respect to `state`; the parameters stay frozen.
+        """
+        clean, _state, _t, _eps = self._guided_clean(state, s, conditioning)
+        return clean
+
+    def velocity(self, state, s: float, conditioning: Conditioning):
+        """v_theta(x, s), derived from JiT's clean-image prediction.
+
+            v = (x_hat_1(x, s) - x) / max(1 - t, t_eps)
+        """
+        clean, state, t_batch, t_eps = self._guided_clean(state, s, conditioning)
         t_view = t_batch.reshape(-1, *([1] * (state.ndim - 1)))
         denominator = (1.0 - t_view).clamp_min(t_eps)
         return (clean - state) / denominator
@@ -272,8 +311,35 @@ class JiTAdapter(StandardFlowAdapter):
         return {"identity_pixels": self._check_identity,
                 "dtype_policy": self._check_dtype_policy,
                 "clean_to_velocity": self._check_clean_to_velocity,
+                "direct_clean_prediction": self._check_direct_clean_prediction,
                 "t_eps": self._check_t_eps,
                 "guidance": self._check_guidance}
+
+    def _check_direct_clean_prediction(self, ctx) -> Tuple[bool, str]:
+        """x + (1-s) v == clean_prediction, and the same guidance cost, to the same t_eps.
+
+        The identity is exact away from the t_eps clamp because both quantities come from
+        ONE `_guided_clean` call; this check exists so a future refactor cannot silently
+        reintroduce a second guidance implementation.
+        """
+        torch = self.torch
+        with torch.no_grad():
+            state = self.prior_sample(range(2))
+            cond = Conditioning(labels=np.asarray(ctx["conditioning"].labels[:1],
+                                                  np.int32).repeat(2))
+            s = 0.4
+            self.reset_counters()
+            clean = self.clean_prediction(state, s, cond)
+            direct_forwards = self.forward_counter
+            self.reset_counters()
+            v = self.velocity(state, s, cond)
+            velocity_forwards = self.forward_counter
+            recovered = state + max(1.0 - s, self.t_eps) * v
+            err = float((recovered - clean).abs().max())
+        ok = err < 1e-4 and direct_forwards == velocity_forwards
+        return ok, ("x + (1-s)v recovers x_hat_1 to %.2e; the direct predictor costs the "
+                    "same %d network forward(s) as velocity"
+                    % (err, direct_forwards))
 
     def _check_identity(self, ctx) -> Tuple[bool, str]:
         native = self.encode_pixels(ctx["pixels"])

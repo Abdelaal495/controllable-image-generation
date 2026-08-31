@@ -356,3 +356,263 @@ every method that has no such split. `mu` itself, and where it came from, are co
 
 Nothing else in either file changed, and a configuration that mentions neither `beta` nor
 `rhso` resolves exactly as it did before.
+
+---
+
+## D. Direct terminal planning and the theory-validation diagnostics
+
+This section documents the RHSO additions made for the theory-validation experiments:
+a configurable **terminal planner**, three families of **diagnostic**, the **batch-4**
+memory/runtime interpretation, and the matched-budget experiment.
+
+Nothing here changes what RHSO computes at the settings that already existed. A
+configuration that mentions none of the fields below resolves to the same jobs, the same
+job ids and the same output directories as before.
+
+### D.1 What the inner objective predicts: `rhso_terminal_mode`
+
+At outer stage `k`, one inner objective is
+
+```
+Φ( to_pixels( P(q ; s_k) ) )  +  μ · R(q, x_k)
+```
+
+and `rhso_terminal_mode` chooses `P`:
+
+| value | `P(q; s_k)` | who |
+|---|---|---|
+| `auto` (default) | MeanFlow → `direct`, standard flow → `suffix` | reproduces the pre-field behaviour exactly |
+| `direct` | ONE terminal prediction from the current state | pMF and JiT-direct |
+| `suffix` | differentiable integration of `[s_k, …, 1]` | legacy JiT/SiT only; **rejected** for MeanFlow |
+
+**pMF direct terminal planning.** `P = T_θ(q; s_k → 1)` — one evaluation of the model's
+**learned finite-interval transport map**. This is what MeanFlow RHSO always did; the
+field simply names it.
+
+**JiT legacy suffix terminal planning.** `P = G(q; s_k → 1)`, a differentiable fixed-step
+solve over the remaining suffix of the outer grid, with the repository's existing solver
+semantics. Still available, still the default for a standard flow, and still what an old
+config runs. It is **not** used by any new experiment.
+
+**JiT new direct endpoint planning.** `P = x̂₁(q, s_k)` — JiT's own network output. JiT
+predicts the clean image and *derives* its velocity as `v = (x̂₁ − x)/max(1−s, t_eps)`;
+`JiTAdapter._guided_clean` is now the single authoritative implementation of that guided
+prediction, and both `velocity()` and the new `clean_prediction()` call it. There is
+therefore one copy of the classifier-free-guidance rule, the interval gating, the dtype
+policy and the native-time mapping, and the planner cannot drift away from the sampler.
+The clean prediction is **not** obtained by integrating anything.
+
+> **Terminology, and it matters.** `T_θ` is a *learned family of finite-interval transport
+> maps*. `x̂₁` is a *direct endpoint prediction* — a one-step terminal surrogate. Both give
+> one differentiable terminal prediction per inner objective, and that shared cost profile
+> is the point of the comparison, but they are **not** the same mathematical object and the
+> repository never labels them as one: `rhso_terminal_planner` records
+> `learned_finite_interval_map` or `direct_clean_endpoint_prediction` on every row.
+
+**Execution is unchanged.** In both modes a stage still executes exactly one interval
+`s_k → s_{k+1}` — one `flow_step` for a standard flow (including the Heun→Euler policy on
+the interval that lands on `s = 1`), one `T_θ(q*; s_k → s_{k+1})` for a MeanFlow. This is
+not a new sampler.
+
+**Cost.** A direct objective costs **one terminal-planner evaluation** at every stage, for
+both families. A model evaluation is not a network forward: classifier-free guidance still
+costs two forwards per JiT prediction, and `network_forwards` is what records that.
+`rhso.rhso_cost_estimate` covers all three cases, so the dry-run plan and the measured
+counters cannot drift apart.
+
+### D.2 Per-stage optimisation-efficiency diagnostics
+
+`rhso_stage_diagnostics: true` records, for **every real image** and every stage `k`:
+
+| field | meaning |
+|---|---|
+| `s_from`, `s_to` | `s_k` and `s_{k+1}` |
+| `v_pre` | terminal fidelity at the state *entering* the stage, before any Adam update |
+| `v_post` | terminal fidelity at the **final** `q`, after all `M` updates |
+| `delta`, `delta_per_step` | `V_pre − V_post` and `Δ/M` |
+| `theta` | `1 − V_post/V_pre`, NaN when `V_pre` is not positive and finite |
+| `anchor_penalty_post` | the displacement `R(q*, x_k)`, whatever `μ` is |
+| `stage_seconds` | the stage's **algorithm** time, with diagnostic time removed |
+
+`V_post` is evaluated explicitly. It is **not** read off the last entry of `loss_history`:
+that value was computed *before* the final Adam update and belongs to a state that no
+longer exists. A test re-runs a stage by hand and confirms the two differ.
+
+Per-image values come from `problems.make_phi_per_sample`, which is the same fidelity the
+optimiser sums, written per batch element. `sum_b per_sample == make_phi` holds to
+floating-point tolerance (tested for all four normalisations) and the per-sample vector is
+never differentiated, so **no gradient anywhere changes**.
+
+### D.3 Execution / replanning consistency
+
+`rhso_consistency_diagnostics: true` measures what executing an optimised state does to the
+predicted endpoint. At the optimised `q_k*`:
+
+```
+p_k = P(q_k*, s_k)          predict
+x_{k+1} = execute one interval
+r_k = P(x_{k+1}, s_{k+1})   re-predict from the state actually reached
+```
+
+`r_k` is exactly the next stage's `V_pre` prediction, so the pair costs no model call beyond
+the two per stage the stage diagnostics already make.
+
+**The measurement is the same; the claim is not.**
+
+| model | `consistency_kind` | what `‖p_k − r_k‖` is |
+|---|---|---|
+| pMF, iMF | `meanflow_semigroup_defect` | two members of the **learned family of finite-interval maps** applied to the same trajectory: `T(·; s_k → 1)` against `T(·; s_{k+1} → 1) ∘ T(·; s_k → s_{k+1})`. A genuine semigroup defect. |
+| JiT-direct | `terminal_prediction_inconsistency` | how far the model's **endpoint prediction** moves once the state is executed. `x̂₁` is a predictor, not a learned family of finite-interval maps, so calling this a semigroup defect would assert structure JiT does not have. |
+| JiT-suffix | `suffix_integration_endpoint_shift` | mixes model error with solver discretisation error; reported for completeness only. |
+
+The label and a one-paragraph explanation of it are written into every job's
+`metadata.json`, so a later analysis cannot mislabel one as the other.
+
+Recorded per image and stage: `endpoint_shift_l2`, `endpoint_shift_native_rmse`,
+`endpoint_shift_native_relative`, `endpoint_shift_pixel_rmse` (both a normalised native
+error and a pixel-space RMSE, so no cross-model comparison rests on a
+dimensionality-dependent norm), `fidelity_shift_execution` (`V_pre(k+1) − V_post(k)`: what
+execution and replanning did to the measurement fidelity of the predicted endpoint) and
+`next_stage_recovery` (`Δ_{k+1}`: how much of that the next stage's optimisation recovered).
+
+**The final stage has no successor.** Its consistency, `fidelity_shift_execution` and
+`next_stage_recovery` entries are **NaN** by convention rather than fabricated.
+
+### D.4 Jacobian anisotropy diagnostics, and their limits
+
+`rhso_jacobian_diagnostics: true` probes the terminal planner's Jacobian at the state
+**entering** each stage — never after an Adam step, and never during the inner loop:
+
+```
+pMF         J_k = D_x T_θ(x_{s_k}; s_k → 1)
+JiT-direct  J_k = D_x x̂₁(x_{s_k}, s_k)
+```
+
+The full Jacobian is never formed (at 256×256×3 it has ~4.3·10¹⁰ entries). Only JVPs, VJPs
+and their composition `JᵀJ` are used; both backends build **one** linearisation per stage
+and reuse it (`jax.linearize` + `jax.vjp`; the version-independent double-backward trick in
+PyTorch), so cost follows the probe budget rather than the state dimension.
+
+**Batch isolation.** The theory concerns one image's Jacobian. Every tangent and cotangent
+is masked to a single batch row and only that row of the output is read, so a batch of four
+yields four per-image probes — never one condition number for the concatenated batch.
+Padded rows are skipped.
+
+**What is claimed, and what is not:**
+
+* `sigma_max_estimate` — power iteration on `JᵀJ`. It estimates the **dominant singular
+  scale and nothing else**. Power iteration says nothing about `σ_min`, so no condition
+  number is derived from it.
+* `gains` — the raw directional gains `g_i = ‖J r_i‖/‖r_i‖` for `rhso_jacobian_probes`
+  deterministic random unit directions, kept in full alongside
+  `gain_min/max/mean/std/p05/p50/p95`.
+* `empirical_gain_ratio = p95/p05` and `empirical_log_anisotropy = log(p95/p05)` — an
+  **empirical, sample-based** anisotropy statistic and a *lower bound* on the true condition
+  number. Random directions concentrate in high dimension, so the smallest sampled gain is
+  almost never near `σ_min`. Nothing here is called `sigma_min` or a condition number.
+* These are Jacobians of the **learned** terminal maps. They are not the theoretical AGPP
+  Jacobian, and the repository does not claim they are.
+
+Settings: `rhso_jacobian_probes` (default 8), `rhso_jacobian_power_iters` (default 8),
+`rhso_jacobian_seed` (default `20240917` — fixed, so a diagnostic run is reproducible).
+Directions are seeded per `(seed, job, stage, row)`, so an image's probes do not depend on
+which other images share its batch.
+
+These are expensive. Keep them off for anything whose runtime or memory you intend to
+report.
+
+### D.5 Diagnostic cost is never algorithmic cost
+
+Stage-end evaluations, consistency predictions, JVPs, VJPs and randomised probes are
+measurements *about* the method, not compute the method spends. They are counted and timed
+separately:
+
+```
+diagnostic_model_evaluations   diagnostic_network_forwards
+diagnostic_jvps                diagnostic_vjps                diagnostic_seconds
+```
+
+`model_evaluations`, `planning_model_evaluations`, `network_forwards`,
+`backprops_through_model` and **`runtime`** keep exactly their previous meaning:
+`rhso._finalise` subtracts the diagnostic seconds, so the reported runtime stays *algorithm*
+runtime rather than "algorithm + spectral analysis". A regression test runs the same job
+with diagnostics on and off and asserts that all eight algorithmic counters are identical
+and the reconstruction is bitwise the same.
+
+### D.6 Batch size 4: what the memory and runtime numbers mean
+
+The new suite runs `batch_size: 4` for both models. The optimisation objective is summed
+over the batch, so a sample's own gradient is unchanged by its companions, and the final
+short chunk still follows the repository's existing repeat-padding rule — padded rows never
+appear as diagnostic samples.
+
+`src/memory.py` now reports, in addition to the framework-specific columns it always had,
+**one metric comparable across PyTorch and JAX**:
+
+```
+gpu_process_baseline_gib   gpu_process_peak_gib
+gpu_process_incremental_peak_gib   gpu_process_memory_source
+```
+
+sampled through NVML, restricted to this process where the driver exposes per-process
+accounting, with a **fresh sampler for every atomic job** and framework-correct
+synchronisation at the boundaries. Model loading and the untimed warm-up are outside the
+measured region.
+
+* This is a **job peak at batch size 4**. It is not divided by the batch and it is not
+  per-image memory. The runtime column at batch 4 is a throughput figure, **not**
+  single-image latency.
+* When NVML process measurement is unavailable the process fields report `unavailable`.
+  JAX's `peak_bytes_in_use` is a **lifetime** high-water mark with no reset API — once an
+  earlier job has peaked higher it reports that earlier job — and it is **never**
+  substituted for the process metric. It remains available in its own clearly-labelled
+  column. This substitution is what previously made pMF's memory look suspiciously
+  constant across jobs.
+* `gpu_memory_source` and `gpu_process_memory_source` record how each number was obtained.
+  Never compare across sources.
+
+### D.7 The matched-budget experiment
+
+`configs/experiments_theory_validation_final100.yaml` holds the main suite: 100 images,
+batch 4, both models, all five inverse problems, 70 atomic jobs.
+
+At a fixed total optimisation budget `B = N·M = 160`, the only pairs are
+
+```
+(N, M) = (1, 160)   (2, 80)   (4, 40)   (8, 20)
+```
+
+Each pair is its own **named experiment block**. That is deliberate and is the least
+invasive correct solution: `num_rhso_steps` and `num_opt_steps` are independent sweep axes,
+so writing them as two lists in one block would expand to the 16-job Cartesian product
+rather than these four matched-budget points. The sweep engine is unchanged; a test asserts
+that every resolved pair satisfies `N·M = 160` and that none of the 12 spurious combinations
+appears.
+
+The `t0` ablation reuses the same block structure at the main setting (`N=4, M=40`) for
+`t0 ∈ {0.8, 0.6, 0.4}`. `t0 = 1.0` is **not** repeated — it is already the `(4, 40)`
+matched-budget job. Initialisation follows the repository's existing shared rule unchanged
+(`z_t0 = (1−t0)·g(y) + t0·ε`, and the prior noise itself at `t0 = 1`); both `t0` and
+`canonical_start_time = 1 − t0` are recorded on every row.
+
+Learning rates are copied verbatim from `configs/experiments_imagenet100_final.yaml` and are
+**not** retuned per `N`. A test compares all ten `(model, task)` rates against the frozen
+config directly, so the two cannot silently diverge.
+
+### D.8 Persistence
+
+Per job, `results.npz` gains `[image, stage]` arrays — `stage_v_pre`, `stage_v_post`,
+`stage_delta`, `stage_delta_per_step`, `stage_theta`, `stage_stage_seconds`, the endpoint
+and fidelity-shift metrics, `stage_next_stage_recovery`, and the spectral fields including
+`stage_jacobian_gains` of shape `[image, stage, probe]`. The `[image, stage]` structure is
+never flattened.
+
+`metadata.json` gains an `rhso_diagnostics` block naming the model, the terminal mode and
+planner, the consistency kind **and its meaning in words**, the diagnostic settings and
+seed, the batch size, `N`/`M`, `t0` and `canonical_start_time`, the outer times, the
+diagnostic cost and both memory sources.
+
+`results.csv` carries job-level **summaries** only (`stage_delta_first/last`,
+`stage_theta_first/last`, the mean endpoint shift and recovery, the first/last
+`jacobian_sigma_max` and log-anisotropy) plus the diagnostic counters. Large arrays stay in
+the per-job artefact. Resume and `--aggregate` are unaffected.

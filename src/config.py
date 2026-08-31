@@ -32,6 +32,8 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .rhso_diagnostics import (DEFAULT_JACOBIAN_POWER_ITERATIONS, DEFAULT_JACOBIAN_PROBES,
+                               DEFAULT_JACOBIAN_SEED)
 from .schedule import (DEFAULT_BETA, canonical_time_grid, grid_intervals,
                        nominal_uniform_delta, resolve_beta)
 from .utils import (FLOW_ASCENDING, MEANFLOW, MEANFLOW_DESCENDING, STANDARD_FLOW,
@@ -309,9 +311,21 @@ DFLOW_FIELDS: Tuple[str, ...] = (
 # `mu` is RHSO's OWN state-anchor regularisation weight and is deliberately not named
 # `lam`: MPC's lambda weights an added control signal, this weights a displacement of the
 # state from where the trajectory actually was.  It defaults to 0.0 (penalty off).
+# `rhso_terminal_mode` selects WHAT ONE INNER OBJECTIVE PREDICTS, and nothing else:
+#   auto    (default) MeanFlow -> direct, standard flow -> suffix.  Exactly the behaviour
+#           every configuration written before this field existed already had.
+#   direct  ONE terminal prediction from the current state: T_theta(q; s_k -> 1) for a
+#           MeanFlow, x_hat_1(q, s_k) for a standard flow.
+#   suffix  the legacy standard-flow planner: differentiable integration of [s_k, ..., 1].
+#           Rejected for MeanFlow models, which have no ODE to integrate.
+# The `rhso_*_diagnostics` fields switch on EXTRA measurements (see src/rhso_diagnostics.py).
+# They never change the objective, the gradients or the executed trajectory, and their cost
+# is accounted separately from the algorithm's.
 RHSO_FIELDS: Tuple[str, ...] = (
     "num_rhso_steps", "num_opt_steps", "lr", "mu", "optimizer", "phi_normalization",
-    "solver")
+    "solver", "rhso_terminal_mode", "rhso_stage_diagnostics",
+    "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
+    "rhso_jacobian_power_iters", "rhso_jacobian_seed")
 
 METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
     "sdedit": MethodDeclaration(
@@ -371,6 +385,10 @@ SWEEPABLE_FIELDS: Tuple[str, ...] = (
     "num_opt_steps",
     # RHSO
     "num_rhso_steps", "mu",
+    # RHSO terminal planner and theory-validation diagnostics
+    "rhso_terminal_mode", "rhso_stage_diagnostics", "rhso_consistency_diagnostics",
+    "rhso_jacobian_diagnostics", "rhso_jacobian_probes", "rhso_jacobian_power_iters",
+    "rhso_jacobian_seed",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -455,11 +473,42 @@ RHSO_DEFAULTS: Dict[str, Any] = {
     "num_opt_steps": 10,
     "lr": 0.01,
     "optimizer": "adam",
+    # NOT untuned guesses either: "auto" is "whatever this family already did", and every
+    # diagnostic defaults to OFF so an existing configuration runs exactly as before.
+    "rhso_terminal_mode": "auto",
+    "rhso_stage_diagnostics": False,
+    "rhso_consistency_diagnostics": False,
+    "rhso_jacobian_diagnostics": False,
     # NOT an untuned guess but a deliberate OFF switch: 0.0 is the vanilla objective, so
     # every RHSO configuration written before this field existed keeps its exact meaning.
     "mu": 0.0,
 }
 UNTUNED = "repository_default_untuned"
+
+
+def _legacy_terminal_mode(dynamics_family: str) -> str:
+    """What `rhso_terminal_mode: auto` resolves to -- i.e. the pre-field behaviour."""
+    from .rhso import legacy_terminal_mode
+    return legacy_terminal_mode(dynamics_family)
+
+
+def rhso_terminal_planner(terminal_mode: str, model: str) -> str:
+    """An honest name for the object one inner RHSO objective differentiates through.
+
+    Resolved from the MODEL REGISTRY (no adapter exists at planning time) and deliberately
+    NOT collapsed into one label: a MeanFlow's T_theta is a learned family of
+    finite-interval transport maps, a clean-prediction model's x_hat_1 is a direct endpoint
+    prediction, and a velocity model's one-step endpoint is an extrapolation. Three
+    different objects, three different names, one shared cost per inner objective.
+    """
+    if terminal_mode == "suffix":
+        return "suffix_integration"
+    caps = MODEL_CAPABILITIES[model]
+    if caps.dynamics_family == MEANFLOW:
+        return "learned_finite_interval_map"
+    if caps.prediction_kind == "clean":
+        return "direct_clean_endpoint_prediction"
+    return "velocity_extrapolation"
 
 
 def resolve_mpc_hyperparameters(problem: str, method: str,
@@ -723,6 +772,41 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                     "    mu weights RHSO's state-anchor penalty "
                     "R = sum_b ||q_b - x_k,b||^2 / (2 d_b); mu = 0 (the default) disables "
                     "it and reproduces the plain terminal-fidelity objective." % (tag, v))
+        elif field_name == "rhso_terminal_mode":
+            from .rhso import VALID_TERMINAL_MODES, resolve_terminal_mode
+            if v not in VALID_TERMINAL_MODES:
+                raise ConfigError(
+                    "%s: unknown rhso_terminal_mode %r; valid: %s.\n"
+                    "    'direct' plans with ONE terminal prediction from the current "
+                    "state; 'suffix' is the legacy standard-flow planner that integrates "
+                    "the remaining trajectory; 'auto' (the default) picks whichever the "
+                    "model's family already used."
+                    % (tag, v, list(VALID_TERMINAL_MODES)))
+            if model:
+                try:
+                    resolve_terminal_mode(v, MODEL_CAPABILITIES[model].dynamics_family)
+                except ValueError as exc:
+                    raise ConfigError("%s: %s" % (tag, exc))
+        elif field_name in ("rhso_stage_diagnostics", "rhso_consistency_diagnostics",
+                            "rhso_jacobian_diagnostics"):
+            if not isinstance(v, bool):
+                raise ConfigError("%s: %s must be a boolean, got %r."
+                                  % (tag, field_name, v))
+        elif field_name in ("rhso_jacobian_probes", "rhso_jacobian_power_iters"):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ConfigError("%s: %s must be an integer >= 1, got %r."
+                                  % (tag, field_name, v))
+            if v > 64:
+                warnings_.append(
+                    "%s = %d: every probe is another JVP (and every power iteration a "
+                    "JVP and a VJP) through the terminal planner. These are DIAGNOSTIC "
+                    "evaluations -- they are excluded from the reported runtime and from "
+                    "the algorithmic counters, but they still cost wall-clock time."
+                    % (tag, v))
+        elif field_name == "rhso_jacobian_seed":
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ConfigError("%s: rhso_jacobian_seed must be an integer, got %r."
+                                  % (tag, v))
         else:                                                       # pragma: no cover
             raise ConfigError("Sweepable field %r has no validation rule." % field_name)
 
@@ -1027,6 +1111,12 @@ def _validate_method_entry(config, problem, decl, problem_params, model_name, ca
                     "method that optimises a state in place.\n    MPC's control penalty is "
                     "a different quantity with a different name ('lam')."
                     % (where, method_decl.title))
+            if key.startswith("rhso_"):
+                raise ConfigError(
+                    "%s: %r configures RHSO's terminal planner / theory diagnostics and "
+                    "does not apply to %s.\n    Only a method that optimises a state "
+                    "against its own terminal prediction has a terminal planner to choose "
+                    "or per-stage diagnostics to record." % (where, key, method_decl.title))
             if key in ("lam", "control_cost_normalization") and method_name == "rhso":
                 raise ConfigError(
                     "%s: %r is meaningless for RHSO and is rejected.\n"
@@ -1193,6 +1283,25 @@ class JobSpec:
     # State-anchor regularisation weight. 0.0 = off = the objective RHSO had before this
     # field existed; None for every method that is not RHSO.
     mu: Optional[float] = None
+    # RESOLVED terminal planner: "direct" | "suffix", never "auto". The resolution against
+    # the model's dynamics family happens once, here, so nothing downstream re-derives it.
+    rhso_terminal_mode: Optional[str] = None
+    # What that planner IS, named honestly per family:
+    #   "learned_finite_interval_map"      pMF / iMF: T_theta(q; s_k -> 1)
+    #   "direct_clean_endpoint_prediction" JiT: x_hat_1(q, s_k)
+    #   "suffix_integration"               the legacy integrated remaining suffix
+    rhso_terminal_planner: Optional[str] = None
+    # What ||p_k - r_k|| would MEAN for this job: a MeanFlow semigroup defect and a direct
+    # predictor's endpoint shift are different claims about different objects.
+    rhso_consistency_kind: Optional[str] = None
+    # Theory-validation diagnostics. All default to off; they are EXTRA measurements and
+    # are never counted as algorithmic compute.
+    rhso_stage_diagnostics: Optional[bool] = None
+    rhso_consistency_diagnostics: Optional[bool] = None
+    rhso_jacobian_diagnostics: Optional[bool] = None
+    rhso_jacobian_probes: Optional[int] = None
+    rhso_jacobian_power_iters: Optional[int] = None
+    rhso_jacobian_seed: Optional[int] = None
 
     # -- resolved schedule metadata (derived; see src/schedule.py) ----------------------
     # delta_nominal_uniform is (1 - s0)/N for this method's own trajectory and is reported
@@ -1276,6 +1385,20 @@ class JobSpec:
             # pre-mu run would have produced, and job_id disambiguates regardless.
             if self.mu:
                 parts.append("mu=%g" % self.mu)
+            # Likewise for the terminal planner: named only when it is NOT the one this
+            # family already used, so pre-existing paths are unchanged. A pMF job is
+            # `direct` because it always was; a JiT job saying `direct` is the new planner
+            # and says so in its path.
+            if (self.rhso_terminal_mode
+                    and self.rhso_terminal_mode != _legacy_terminal_mode(
+                        self.dynamics_family)):
+                parts.append("terminal=%s" % self.rhso_terminal_mode)
+            flags = "".join(letter for letter, on in
+                            (("s", self.rhso_stage_diagnostics),
+                             ("c", self.rhso_consistency_diagnostics),
+                             ("j", self.rhso_jacobian_diagnostics)) if on)
+            if flags:
+                parts.append("diag=%s" % flags)
             if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
                 parts.append("phi=%s" % self.phi_normalization)
         else:
@@ -1318,17 +1441,31 @@ class JobSpec:
                        (" %s" % self.solver) if self.solver else "", self.num_opt_steps,
                        self.lr, self._beta_suffix))
         if self.method == "rhso":
-            return ("%s | %s/%s | RHSO | t0=%.2f N=%d%s opt=%d lr=%g%s%s"
-                    % (self.experiment, self.model, self.problem, self.t0,
+            return ("%s | %s/%s | RHSO[%s] | t0=%.2f N=%d%s opt=%d lr=%g%s%s%s"
+                    % (self.experiment, self.model, self.problem,
+                       self.rhso_terminal_mode or "auto", self.t0,
                        self.num_rhso_steps, (" %s" % self.solver) if self.solver else "",
                        self.num_opt_steps, self.lr,
-                       (" mu=%g" % self.mu) if self.mu else "", self._beta_suffix))
+                       (" mu=%g" % self.mu) if self.mu else "", self._beta_suffix,
+                       self._diagnostic_suffix))
         return ("%s | %s/%s | %s | t0=%.2f N=%d %s=%.4g lam=%g nctrl=%d lr=%g%s"
                 % (self.experiment, self.model, self.problem, self.method_title, self.t0,
                    self.num_mpc_steps,
                    "delta" if self.delta is not None else "dt_max",
                    self.delta if self.delta is not None else (self.delta_max or 0.0),
                    self.lam, self.n_ctrl, self.lr, self._beta_suffix))
+
+    @property
+    def _diagnostic_suffix(self) -> str:
+        """' +diag(...)' naming the EXTRA measurements this job takes, or ''.
+
+        Printed separately from the method's own settings because none of it changes the
+        reconstruction -- it only adds measurements about it.
+        """
+        on = [name for name, flag in (("stage", self.rhso_stage_diagnostics),
+                                      ("consistency", self.rhso_consistency_diagnostics),
+                                      ("jacobian", self.rhso_jacobian_diagnostics)) if flag]
+        return (" +diag(%s)" % ",".join(on)) if on else ""
 
     @property
     def _beta_suffix(self) -> str:
@@ -1474,6 +1611,13 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rhso_lr": RHSO_DEFAULTS["lr"],
     "rhso_optimizer": RHSO_DEFAULTS["optimizer"],
     "mu": RHSO_DEFAULTS["mu"],
+    "rhso_terminal_mode": RHSO_DEFAULTS["rhso_terminal_mode"],
+    "rhso_stage_diagnostics": RHSO_DEFAULTS["rhso_stage_diagnostics"],
+    "rhso_consistency_diagnostics": RHSO_DEFAULTS["rhso_consistency_diagnostics"],
+    "rhso_jacobian_diagnostics": RHSO_DEFAULTS["rhso_jacobian_diagnostics"],
+    "rhso_jacobian_probes": DEFAULT_JACOBIAN_PROBES,
+    "rhso_jacobian_power_iters": DEFAULT_JACOBIAN_POWER_ITERATIONS,
+    "rhso_jacobian_seed": DEFAULT_JACOBIAN_SEED,
 }
 
 # Every field a JobSpec can carry from the sweep grid.  Fields a method does not use are
@@ -1485,6 +1629,9 @@ SWEEP_ORDER: Tuple[str, ...] = (
     "control_cost_normalization", "delta_t_lambda_scaling",
     "num_pnp_steps", "gamma0", "alpha", "noise_samples", "num_opt_steps",
     "num_rhso_steps", "mu",
+    "rhso_terminal_mode", "rhso_stage_diagnostics", "rhso_consistency_diagnostics",
+    "rhso_jacobian_diagnostics", "rhso_jacobian_probes", "rhso_jacobian_power_iters",
+    "rhso_jacobian_seed",
 )
 
 
@@ -1665,6 +1812,13 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     # feature being off. A row whose source reads `builtin` had no penalty.
                     axis("mu", BUILTIN_DEFAULTS["mu"])
                     axis("optimizer", BUILTIN_DEFAULTS["rhso_optimizer"])
+                    # `builtin` again, not UNTUNED: "auto" reproduces the family's existing
+                    # planner and every diagnostic starts off.
+                    for name in ("rhso_terminal_mode", "rhso_stage_diagnostics",
+                                 "rhso_consistency_diagnostics",
+                                 "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
+                                 "rhso_jacobian_power_iters", "rhso_jacobian_seed"):
+                        axis(name, BUILTIN_DEFAULTS[name])
                     # MeanFlow adapters have default_solver None, so a MeanFlow RHSO job
                     # resolves to no solver and the validator rejects any explicit one.
                     axis("solver", reg.get("default_solver"), "model_registry")
@@ -1763,11 +1917,37 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     else:
                         delta_nominal = delta_min = delta_max = None
 
+                    # RHSO's terminal planner is resolved ONCE, against the model's family:
+                    # "auto" becomes the concrete planner this job runs, and an impossible
+                    # combination (a MeanFlow asked to integrate a suffix) fails here rather
+                    # than deep inside a reconstruction.
+                    if method_name == "rhso":
+                        from .rhso import resolve_terminal_mode
+                        from .rhso_diagnostics import consistency_kind
+                        try:
+                            values["rhso_terminal_mode"] = resolve_terminal_mode(
+                                values["rhso_terminal_mode"], reg["dynamics_family"])
+                        except ValueError as exc:
+                            raise ConfigError(
+                                "experiments.%s.models.%s.methods.rhso: %s"
+                                % (exp_name, model_name, exc))
+                        terminal_planner = rhso_terminal_planner(
+                            values["rhso_terminal_mode"], model_name)
+                        consistency = consistency_kind(reg["dynamics_family"],
+                                                       values["rhso_terminal_mode"])
+                        # A consistency measurement compares two stage-terminal predictions,
+                        # so it implies the stage bookkeeping (mirrors
+                        # rhso_diagnostics.settings_from_spec).
+                        if values["rhso_consistency_diagnostics"]:
+                            values["rhso_stage_diagnostics"] = True
+                    else:
+                        terminal_planner = consistency = None
+
                     cost = _estimate_cost(method_name, values, reg["dynamics_family"],
                                           bool(reg.get("euler_final_step_for_heun", False)))
                     # Every field that can change what runs takes part in the identity, so a
                     # different gamma0 / alpha / steps can never reuse another job's result.
-                    job_id = stable_hash(run_id, exp_name, problem, params_key, model_name,
+                    hash_parts = [run_id, exp_name, problem, params_key, model_name,
                                          method_name, values["K"], t0, values["steps"],
                                          values["solver"], n_steps, hp["lam"], hp["n_ctrl"],
                                          hp["lr"], values["optimizer"], values["warm_start"],
@@ -1780,7 +1960,30 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                          # beta and the RHSO horizon change what runs, so two
                                          # jobs differing only in them can never collide.
                                          values["num_rhso_steps"], values["mu"], beta,
-                                         num_images, replicate, size=6)
+                                         num_images, replicate]
+                    # Appended ONLY when a job uses one of the new RHSO features, so a
+                    # configuration that does not touch them keeps the job ids -- and
+                    # therefore the output directories and the resume behaviour -- it had
+                    # before these fields existed.
+                    identity_extras = []
+                    if method_name == "rhso":
+                        if values["rhso_terminal_mode"] != _legacy_terminal_mode(
+                                reg["dynamics_family"]):
+                            identity_extras.append(("terminal_mode",
+                                                    values["rhso_terminal_mode"]))
+                        for name in ("rhso_stage_diagnostics",
+                                     "rhso_consistency_diagnostics",
+                                     "rhso_jacobian_diagnostics"):
+                            if values[name]:
+                                identity_extras.append((name, True))
+                        if values["rhso_jacobian_diagnostics"]:
+                            identity_extras.append(
+                                ("jacobian", values["rhso_jacobian_probes"],
+                                 values["rhso_jacobian_power_iters"],
+                                 values["rhso_jacobian_seed"]))
+                    if identity_extras:
+                        hash_parts.append(tuple(identity_extras))
+                    job_id = stable_hash(*hash_parts, size=6)
 
                     specs.append(JobSpec(
                         job_id=job_id, experiment=exp_name, problem=problem,
@@ -1831,6 +2034,27 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         num_rhso_steps=(int(values["num_rhso_steps"])
                                         if values["num_rhso_steps"] is not None else None),
                         mu=(float(values["mu"]) if values["mu"] is not None else None),
+                        rhso_terminal_mode=values["rhso_terminal_mode"],
+                        rhso_terminal_planner=terminal_planner,
+                        rhso_consistency_kind=consistency,
+                        rhso_stage_diagnostics=(
+                            None if values["rhso_stage_diagnostics"] is None
+                            else bool(values["rhso_stage_diagnostics"])),
+                        rhso_consistency_diagnostics=(
+                            None if values["rhso_consistency_diagnostics"] is None
+                            else bool(values["rhso_consistency_diagnostics"])),
+                        rhso_jacobian_diagnostics=(
+                            None if values["rhso_jacobian_diagnostics"] is None
+                            else bool(values["rhso_jacobian_diagnostics"])),
+                        rhso_jacobian_probes=(
+                            None if values["rhso_jacobian_probes"] is None
+                            else int(values["rhso_jacobian_probes"])),
+                        rhso_jacobian_power_iters=(
+                            None if values["rhso_jacobian_power_iters"] is None
+                            else int(values["rhso_jacobian_power_iters"])),
+                        rhso_jacobian_seed=(
+                            None if values["rhso_jacobian_seed"] is None
+                            else int(values["rhso_jacobian_seed"])),
                         delta_nominal_uniform=delta_nominal,
                         delta_min=delta_min, delta_max=delta_max,
                         expected_objective_evals=cost["objective_evals"],
@@ -2095,6 +2319,23 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                                  _axis(sel, "num_opt_steps", "%s"), _axis(sel, "lr", "%g")))
                         print("      mu %s   (0 = no state-anchor penalty)"
                               % _axis(sel, "mu", "%g"))
+                        print("      terminal planner %s -> %s"
+                              % (_axis(sel, "rhso_terminal_mode"),
+                                 _axis(sel, "rhso_terminal_planner")))
+                        diag = sorted({(job._diagnostic_suffix.strip() or "none")
+                                       for job in sel})
+                        print("      theory diagnostics %s   (EXTRA measurements; excluded "
+                              "from the runtime and the algorithmic counters)"
+                              % ", ".join(diag))
+                        if any(s.rhso_jacobian_diagnostics for s in sel):
+                            print("      jacobian probes %s | power iters %s | seed %s"
+                                  % (_axis(sel, "rhso_jacobian_probes", "%s"),
+                                     _axis(sel, "rhso_jacobian_power_iters", "%s"),
+                                     _axis(sel, "rhso_jacobian_seed", "%s")))
+                        print("      (N, M) pairs %s"
+                              % ", ".join(sorted({"(%d, %d)" % (s.num_rhso_steps,
+                                                                s.num_opt_steps)
+                                                  for s in sel})))
                         print("      executed dt %s | phi %s | source %s"
                               % (_dt_axis(sel), _axis(sel, "phi_normalization"),
                                  ", ".join(sorted({s.hyperparameter_sources.get("lr", "?")
@@ -2158,6 +2399,14 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
     print("  * RHSO's mu weights a STATE-anchor penalty (how far the optimised state moved")
     print("    from the state the trajectory reached); it is NOT MPC's control lambda, and")
     print("    mu = 0 is the plain terminal-fidelity objective.")
+    print("  * RHSO's terminal planner: pMF plans with the LEARNED FINITE-INTERVAL MAP")
+    print("    T_theta(q; s_k -> 1); JiT-direct plans with the DIRECT ENDPOINT PREDICTION")
+    print("    x_hat_1(q, s_k). Both cost one terminal-planner evaluation per inner")
+    print("    objective, but they are not the same learned object and are never reported")
+    print("    as one. `suffix` is the legacy JiT planner that integrates the remainder.")
+    print("  * Theory diagnostics are EXTRA measurements: their model evaluations, JVPs and")
+    print("    VJPs are counted in the diagnostic_* columns and their time is subtracted")
+    print("    from the reported runtime, so `runtime` stays algorithm runtime.")
     print("  * All methods share one epsilon per (model, image, replicate), so SDEdit, MPC,")
     print("    PnP, D-Flow and RHSO start from a bit-identical z_t0 at equal t0.")
     print(RULE_)

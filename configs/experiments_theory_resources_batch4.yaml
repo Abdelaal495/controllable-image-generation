@@ -1,0 +1,149 @@
+# RESOURCE PROFILING -- batch size 4, theory diagnostics DISABLED.
+#
+# The ONLY purpose of this configuration is to report, for pMF-direct and JiT-direct at the
+# main RHSO setting (N=4, M=40, t0=1, beta=1, mu=0):
+#
+#     "peak GPU process memory at batch size 4"      gpu_process_peak_gib
+#     throughput-oriented runtime at batch size 4    runtime, runtime_per_image
+#
+# gpu_process_peak_gib is sampled through NVML with a fresh sampler per atomic job and is
+# the one memory metric comparable between the PyTorch and JAX models. It is a JOB peak at
+# batch 4: it is NOT divided by the batch, it is NOT per-image memory, and the runtime is
+# NOT single-image latency -- runtime_per_image here is a throughput figure at batch 4.
+#
+# EVERY theory diagnostic is off. Stage-end evaluations, endpoint-consistency predictions
+# and spectral probes are extra model calls; even though they are timed and counted
+# separately, a memory or throughput number for a paper should be measured without them
+# running at all.
+#
+# num_images = 16 (4 full batches of 4): enough repeated batches for a stable throughput
+# average and a settled memory high-water mark, while staying far cheaper than the 100-image
+# suite. No padding is needed, since 16 is a multiple of 4.
+#
+# Expected scale: 5 tasks x 2 models = 10 atomic jobs.
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 64
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    # batch_size 4 for BOTH models. The optimisation objective is SUMMED over the batch, so
+    # a sample's own gradient is unchanged by its batch companions; the memory and runtime
+    # numbers below are therefore batch-4 JOB figures, not per-image ones.
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_resources_b4:
+    enabled: true
+    problem: denoising
+    num_images: 16
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+
+  deblurring_resources_b4:
+    enabled: true
+    problem: deblur
+    num_images: 16
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+
+  super_resolution_resources_b4:
+    enabled: true
+    problem: super_resolution
+    num_images: 16
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_resources_b4:
+    enabled: true
+    problem: box_inpaint
+    num_images: 16
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_resources_b4:
+    enabled: true
+    problem: random_inpaint
+    num_images: 16
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: false, rhso_consistency_diagnostics: false, rhso_jacobian_diagnostics: false}

@@ -57,6 +57,8 @@ from src.models.base import PREFETCH_HOOKS
 from src.models.base import Conditioning
 from src.reconstruction import select_reconstructor
 from src.problems import ProblemStore
+from src.rhso import rhso_time_grid
+from src.rhso_diagnostics import CONSISTENCY_MEANING, stage_arrays, stage_summary
 from src.sdedit import ReconstructionStats
 from src.utils import (RULE, THIN, apply_offline_mode, detect_accelerator,
                        detect_environment, env_default, free_memory, in_ipython, jsonable,
@@ -398,7 +400,10 @@ def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
             chunk = chunk + [chunk[-1]] * pad
             padded_items += pad
 
-        sub_problem = problem.subset(chunk)
+        # `pad` is recorded on the subset so per-image diagnostics can drop the repeated
+        # rows. It changes no measurement, no objective and no gradient: the fidelity is
+        # summed over the batch, so a padded row only ever feeds its own duplicate.
+        sub_problem = problem.subset(chunk, padded_rows=pad)
         labels = (problem.labels[np.asarray(chunk, np.int64)] if problem.labels is not None
                   else np.zeros((len(chunk),), np.int32))
         # Every strategy receives the SAME conditioning object for an image.
@@ -456,6 +461,12 @@ def warm_up(adapter, spec, problem, manager, verbose: bool = True) -> float:
         reductions["n_ctrl"] = 1
     if spec.method in ("dflow", "rhso"):
         reductions["num_opt_steps"] = 1
+    if spec.method == "rhso" and spec.rhso_jacobian_diagnostics:
+        # The probes and power iterations re-run the SAME traced computation, so one of
+        # each compiles everything the timed job needs. Their number is a cost, not a
+        # shape -- and the diagnostics are excluded from the timed number anyway.
+        reductions["rhso_jacobian_probes"] = 1
+        reductions["rhso_jacobian_power_iters"] = 1
     tiny = dataclasses.replace(spec, **reductions)
     started = time.perf_counter()
     run_job(adapter, tiny, problem, manager, profiler=None)
@@ -483,8 +494,12 @@ def warmup_key(spec, problem) -> Tuple:
             # D-Flow: the trajectory graph, not the number of Adam updates.
             spec.optimizer,
             # RHSO: N fixes the outer grid AND, for a standard flow, every planning suffix;
-            # mu changes the objective that is traced and differentiated.
-            spec.num_rhso_steps, spec.mu)
+            # mu changes the objective that is traced and differentiated; the terminal mode
+            # decides WHICH computation the objective is (one endpoint prediction versus an
+            # integrated suffix), and the diagnostics add traced computations of their own.
+            spec.num_rhso_steps, spec.mu, spec.rhso_terminal_mode,
+            spec.rhso_stage_diagnostics, spec.rhso_consistency_diagnostics,
+            spec.rhso_jacobian_diagnostics)
 
 
 # =====================================================================================
@@ -514,8 +529,26 @@ RESULT_COLUMNS = [
     # compute accounting added with PnP-Flow / D-Flow
     "objective_evaluations", "data_gradient_evaluations", "optimizer_iterations",
     "denoiser_samples", "expected_objective_evaluations", "expected_data_gradients",
+    # RHSO terminal planner and theory diagnostics
+    "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
+    "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
+    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    # DIAGNOSTIC cost, kept strictly apart from the algorithmic counters above
+    "diagnostic_model_evaluations", "diagnostic_network_forwards", "diagnostic_jvps",
+    "diagnostic_vjps", "diagnostic_seconds",
+    # job-level summaries of the per-(image, stage) arrays in results.npz
+    "stage_count", "stage_delta_first", "stage_delta_last", "stage_delta_per_step_first",
+    "stage_delta_per_step_last", "stage_theta_first", "stage_theta_last",
+    "stage_v_pre_first", "stage_v_post_last",
+    "endpoint_shift_native_relative_mean", "endpoint_shift_pixel_rmse_mean",
+    "fidelity_shift_execution_mean", "next_stage_recovery_mean",
+    "jacobian_sigma_max_first", "jacobian_sigma_max_last",
+    "jacobian_log_anisotropy_first", "jacobian_log_anisotropy_last",
     # GPU memory (job peak at the configured batch size -- never per image)
     "gpu_baseline_gib", "gpu_peak_gib", "gpu_incremental_peak_gib", "gpu_memory_source",
+    # The ONE memory metric that is comparable between PyTorch and JAX (see src/memory.py)
+    "gpu_process_baseline_gib", "gpu_process_peak_gib", "gpu_process_incremental_peak_gib",
+    "gpu_process_memory_source",
     "batch_size", "num_images", "padded_items", "warmup_seconds", "model_load_seconds",
     "seed", "replicate", "generative_noise_id", "measurement_id", "guide_id",
     "initial_state_fingerprint", "conditioning_label", "cfg_scale",
@@ -588,10 +621,36 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "denoiser_samples": stats.denoiser_samples,
         "expected_objective_evaluations": spec.expected_objective_evals * spec.num_chunks,
         "expected_data_gradients": spec.expected_data_gradients * spec.num_chunks,
+        "rhso_terminal_mode": spec.rhso_terminal_mode,
+        "rhso_terminal_planner": spec.rhso_terminal_planner,
+        # What ||p_k - r_k|| means for this job. A pMF semigroup defect and a JiT endpoint
+        # predictor's shift are different claims; the column keeps them apart.
+        "rhso_consistency_kind": (spec.rhso_consistency_kind
+                                  if spec.rhso_consistency_diagnostics else None),
+        "rhso_stage_diagnostics": spec.rhso_stage_diagnostics,
+        "rhso_consistency_diagnostics": spec.rhso_consistency_diagnostics,
+        "rhso_jacobian_diagnostics": spec.rhso_jacobian_diagnostics,
+        "rhso_jacobian_probes": (spec.rhso_jacobian_probes
+                                 if spec.rhso_jacobian_diagnostics else None),
+        "rhso_jacobian_power_iters": (spec.rhso_jacobian_power_iters
+                                      if spec.rhso_jacobian_diagnostics else None),
+        "rhso_jacobian_seed": (spec.rhso_jacobian_seed
+                               if spec.rhso_jacobian_diagnostics else None),
+        # Diagnostic compute, never added to model_evaluations / network_forwards /
+        # runtime: those keep their existing meaning as the ALGORITHM's cost.
+        "diagnostic_model_evaluations": stats.diagnostic_model_evals,
+        "diagnostic_network_forwards": stats.diagnostic_network_forwards,
+        "diagnostic_jvps": stats.diagnostic_jvps,
+        "diagnostic_vjps": stats.diagnostic_vjps,
+        "diagnostic_seconds": round(float(stats.diagnostic_seconds), 4),
         "gpu_baseline_gib": memory.get("gpu_baseline_gib"),
         "gpu_peak_gib": memory.get("gpu_peak_gib"),
         "gpu_incremental_peak_gib": memory.get("gpu_incremental_peak_gib"),
         "gpu_memory_source": memory.get("gpu_memory_source"),
+        "gpu_process_baseline_gib": memory.get("gpu_process_baseline_gib"),
+        "gpu_process_peak_gib": memory.get("gpu_process_peak_gib"),
+        "gpu_process_incremental_peak_gib": memory.get("gpu_process_incremental_peak_gib"),
+        "gpu_process_memory_source": memory.get("gpu_process_memory_source"),
         "batch_size": spec.batch_size, "num_images": spec.num_images,
         "padded_items": (run or {}).get("padded_items", 0),
         "warmup_seconds": round(float(warmup_seconds), 4),
@@ -607,6 +666,9 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "cfg_scale": guidance.get("scale"),
         "status": status, "failure": failure, "output_dir": None, "timestamp": now_iso(),
     }
+    # Job-level summaries of the per-(image, stage) diagnostics. The RAW [image, stage]
+    # arrays stay in the per-job results.npz -- results.csv gets scalars only.
+    record.update(stage_summary(stats.stage_records))
     return record
 
 
@@ -692,6 +754,46 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
     payload["problem_metadata"] = problem.to_metadata()
     payload["per_image"] = {k: metrics.get(k) for k in
                             ("psnr_per_image", "ssim_per_image", "lpips_per_image")}
+    stats = run["stats"]
+    if stats.stage_records:
+        # Everything a later analysis needs to interpret the arrays in results.npz without
+        # rerunning a single model.
+        payload["rhso_diagnostics"] = {
+            "model": spec.model,
+            "dynamics_family": spec.dynamics_family,
+            "terminal_mode": spec.rhso_terminal_mode,
+            "terminal_planner": stats.terminal_planner_kind or spec.rhso_terminal_planner,
+            "consistency_kind": stats.consistency_kind,
+            "consistency_meaning": CONSISTENCY_MEANING.get(stats.consistency_kind or ""),
+            "settings": stats.diagnostic_settings,
+            "batch_size": spec.batch_size,
+            "num_images": spec.num_images,
+            "padded_items": run.get("padded_items", 0),
+            "num_rhso_steps": spec.num_rhso_steps,
+            "num_opt_steps": spec.num_opt_steps,
+            "t0": spec.t0, "canonical_start_time": spec.canonical_start_time,
+            "beta": spec.beta, "mu": spec.mu, "lr": spec.lr,
+            "phi_normalization": spec.phi_normalization,
+            "outer_times": rhso_time_grid(spec),
+            "diagnostic_cost": {
+                "model_evals": stats.diagnostic_model_evals,
+                "network_forwards": stats.diagnostic_network_forwards,
+                "jvps": stats.diagnostic_jvps, "vjps": stats.diagnostic_vjps,
+                "seconds": round(float(stats.diagnostic_seconds), 4)},
+            "gpu_memory_source": record.get("gpu_memory_source"),
+            "gpu_process_memory_source": record.get("gpu_process_memory_source"),
+            "conventions": (
+                "Arrays are [image, stage] (gains are [image, stage, probe]); rows follow "
+                "problem.image_ids and padded batch rows are excluded. V_pre / V_post are "
+                "PER-IMAGE terminal fidelities from problems.make_phi_per_sample, and "
+                "V_post is evaluated AFTER the final Adam update, never read off the loss "
+                "history. The final stage has no successor, so its consistency, "
+                "fidelity_shift_execution and next_stage_recovery entries are NaN by "
+                "convention rather than fabricated. jacobian_sigma_max is a power-iteration "
+                "estimate of the DOMINANT singular scale only; the gain statistics are "
+                "empirical sample-based anisotropy, and neither is an exact condition "
+                "number."),
+        }
     save_json(out / "metadata.json", payload)
     arrays: Dict[str, Any] = {"reconstruction": to_uint8(run["pixels"])}
     if spec.record_loss_history and run["stats"].loss_history:
@@ -704,6 +806,9 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
                                                     np.float32)
             arrays["state_penalty_history"] = np.asarray(
                 run["stats"].state_penalty_history, np.float32)
+    # [image, stage] structure is preserved deliberately: the whole point of these
+    # diagnostics is to compare stage k with stage k+1 for the SAME image.
+    arrays.update(stage_arrays(run["stats"].stage_records, problem.image_ids))
     np.savez_compressed(out / "results.npz", **arrays)
     if save_images:
         img_dir = out / "images"
@@ -712,6 +817,63 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
         for i, pix in enumerate(run["pixels"]):
             Image.fromarray(to_uint8(pix)).save(img_dir / ("%s.png" % problem.image_ids[i]))
     return out
+
+
+# Fields added to JobSpec AFTER runs may already have been written to disk.  A stored job
+# that predates them can only be reused when the new job would run the SAME computation.
+NEW_SPEC_FIELDS: Tuple[str, ...] = (
+    "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
+    "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
+    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed")
+
+
+def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
+    """Would this NEW field's value reproduce what a run predating it did?
+
+    * `rhso_terminal_mode` must resolve to the planner its family already used -- a job
+      that now asks a standard flow for DIRECT planning is a different experiment and must
+      re-run.
+    * `rhso_terminal_planner` and `rhso_consistency_kind` are derived LABELS, not settings:
+      they are functions of the mode and the model, so they cannot change what is computed.
+    * every diagnostic flag must be off; diagnostics add measurements a stored run does not
+      contain, so a job that wants them cannot be satisfied by an old artefact.
+    * the probe budget and seed only matter when the Jacobian diagnostic is on, which the
+      previous rule has already excluded.
+    """
+    from src.rhso import legacy_terminal_mode
+    value = current.get(name)
+    if name == "rhso_terminal_mode":
+        return value is None or value == legacy_terminal_mode(current.get("dynamics_family"))
+    if name in ("rhso_terminal_planner", "rhso_consistency_kind"):
+        return True
+    if name in ("rhso_stage_diagnostics", "rhso_consistency_diagnostics",
+                "rhso_jacobian_diagnostics"):
+        return not value
+    return True
+
+
+def _resolved_spec_matches(stored: Any, current: Dict[str, Any]) -> bool:
+    """Is a stored resolved spec the same experiment as the one about to run?
+
+    Every field they share must agree exactly -- that is the existing rule, and it is what
+    stops a job differing only in gamma0 or lr from reusing another's reconstruction.  The
+    one concession is to fields that did not EXIST when the stored job ran: an artefact
+    written before the RHSO terminal-planner and diagnostic fields were added is still
+    resumable, but only when the new job's values for them describe the same computation
+    (see `_describes_legacy_behaviour`).
+    """
+    if not isinstance(stored, dict):
+        return False
+    if stored == current:
+        return True
+    if set(stored) - set(current):
+        return False                              # the stored run knew fields we do not
+    added = set(current) - set(stored)
+    if any(name not in NEW_SPEC_FIELDS for name in added):
+        return False
+    if not all(_describes_legacy_behaviour(name, current) for name in added):
+        return False
+    return all(current[name] == value for name, value in stored.items())
 
 
 def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
@@ -731,7 +893,7 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
         return None
     if payload.get("status") != "ok" or payload.get("job_id") != spec.job_id:
         return None
-    if payload.get("resolved_spec") != jsonable(spec.to_dict()):
+    if not _resolved_spec_matches(payload.get("resolved_spec"), jsonable(spec.to_dict())):
         return None
     with np.load(array_path) as z:
         pixels = z["reconstruction"]
@@ -1394,6 +1556,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "checks": report.to_dict(),
         "timing": timing_summary(),
         "figures": [str(p) for p in figures],
+        "gpu_memory_policy_process": (
+            "gpu_process_peak_gib is the peak GPU memory of THIS PROCESS during the "
+            "measured reconstruction, sampled through NVML with a FRESH sampler per atomic "
+            "job. It is the only memory number that is comparable between the PyTorch and "
+            "JAX models, and it is the one a batch-size-4 memory table should use: it is a "
+            "JOB peak at the configured batch size and is never divided by the batch, so it "
+            "is not single-image latency or per-image memory. When NVML process accounting "
+            "is unavailable the field reports 'unavailable'; JAX's peak_bytes_in_use is a "
+            "LIFETIME high-water mark with no reset API and is never substituted for it."),
+        "rhso_diagnostic_cost_policy": (
+            "diagnostic_model_evaluations, diagnostic_network_forwards, diagnostic_jvps, "
+            "diagnostic_vjps and diagnostic_seconds cover the theory-validation "
+            "measurements only. They are EXCLUDED from model_evaluations, network_forwards, "
+            "backprops_through_model and runtime, so those columns keep their meaning as "
+            "the algorithm's own cost."),
         "gpu_memory_policy": (
             "gpu_peak_gib is the peak GPU memory during the measured reconstruction of one "
             "atomic job at its configured batch size; gpu_baseline_gib is the steady state "

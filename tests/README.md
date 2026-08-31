@@ -9,6 +9,7 @@ python tests/test_meanflow_pnp_dflow.py     # needs jax + optax
 python tests/test_flow_trajectory.py        # needs jax
 python tests/test_beta_schedule.py          # pure Python (+ pyyaml for the config checks)
 python tests/test_rhso.py                   # needs jax + optax
+python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
 ```
 
 `test_meanflow_pnp_dflow.py` executes `pnp.meanflow_pnp` and `dflow.meanflow_dflow`
@@ -58,6 +59,28 @@ both loops are shown (by scanning their bytecode, nested closures included) to c
 backend-generic `rhso.state_anchor_penalty`, whose NumPy and JAX evaluations agree — because
 `flow_rhso` itself cannot run here.
 
+`test_rhso_theory.py` covers the direct terminal planner and the theory-validation
+diagnostics. It executes a JiT-shaped toy standard flow (native clean prediction, guidance
+applied to it, velocity **derived** from it) and the toy MeanFlow, and checks: that
+`x + (1-s)·v` recovers the direct prediction at equal guidance cost; that direct planning
+performs exactly one endpoint prediction with `integrate_flow` replaced by a tripwire, while
+the legacy suffix planner still integrates; that `auto` resolves to each family's previous
+planner and that a MeanFlow refuses `suffix`; that the one-interval execution rule and the
+executed trajectory are bitwise unchanged with diagnostics on; that direct JiT planning costs
+one evaluation per objective in the planner's cost model; that every algorithmic counter is
+identical with diagnostics on and off while the JVP/VJP/eval/second counters fill separately;
+that the matched-budget config yields exactly `(1,160) (2,80) (4,40) (8,20)` and 70 jobs with
+the frozen learning rates; that `sum(per-sample fidelity) == batch fidelity` for all four
+normalisations; that a batch of 4 with one padded row gives three distinct per-image rows per
+stage; that `V_pre`/`V_post` match an independent re-run and `V_post` differs from the last
+recorded inner loss; that the final stage's replanning fields are NaN rather than invented;
+that the pMF consistency metric equals an independently computed predict/execute/re-predict
+discrepancy and that the JiT metric is labelled `terminal_prediction_inconsistency` rather
+than a semigroup defect; that the Jacobian probes are matrix-free, per-image isolated,
+seed-deterministic and claim no condition number; that the stage and spectral arrays survive
+`results.npz` round-tripping; and that the per-job process memory sampler resets while JAX's
+lifetime high-water mark is never reported as a process peak.
+
 `tests/spec_support.py` builds every spec through the **real** validator and planner: it
 assembles a small in-memory configuration, runs `validate_config` and `resolve_run_plan`,
 and splits overrides automatically between the configuration (where they are validated) and
@@ -75,6 +98,13 @@ jobs. A documented stand-in remains as a fallback if
 The toy adapters are not the real models, so nothing here says anything about
 reconstruction *quality*. More specifically:
 
+* **JiT-direct is not executed end to end here.** `rhso.flow_rhso` and the real
+  `JiTAdapter` both need PyTorch. What is covered for that path is structural: the shared
+  `make_terminal_planner` factory is executed against a JiT-shaped toy adapter, and
+  `JiTAdapter.velocity` / `JiTAdapter.clean_prediction` are shown by bytecode scan to be
+  wrappers around one `_guided_clean` with no duplicated guidance. The torch glue itself is
+  checked on a GPU by `run.py --check`, which now runs `rhso_direct_terminal_planning`
+  against the loaded model.
 * `pnp.flow_pnp`, `dflow.flow_dflow` and `rhso.flow_rhso` are **not** executed — they call
   `torch.autograd.grad`, `torch.optim.Adam` and `torch.no_grad`, which need PyTorch. Their
   trajectory arithmetic and counters are covered indirectly (the integrator above and the

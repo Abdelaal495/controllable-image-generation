@@ -209,12 +209,45 @@ class ModelAdapter(ABC):
 class StandardFlowAdapter(ModelAdapter):
     """Adapters whose dynamics are an instantaneous velocity field (JiT, SiT)."""
 
+    # What ONE call to `terminal_prediction` actually is for this adapter.  Recorded in
+    # results metadata, because the two families produce different mathematical objects and
+    # must never be described as the same learned map.
+    terminal_prediction_kind: str = "velocity_extrapolation"
+
     @abstractmethod
     def velocity(self, state: Any, s: float, conditioning: Conditioning) -> Any:
         """v_theta(x, s) on the CANONICAL clock.  Differentiable w.r.t. `state`.
 
         The adapter maps s to its native time and applies its own published guidance rule.
         """
+
+    def clean_prediction(self, state: Any, s: float, conditioning: Conditioning) -> Any:
+        """x_hat_1(x, s): the model's DIRECT prediction of the clean endpoint from (x, s).
+
+        The generic implementation here is the one-step extrapolation implied by the
+        adapter's own velocity field,
+
+            x_hat_1(x, s) = x + (1 - s) * v_theta(x, s),
+
+        which for a velocity-parameterised model (SiT) is an EXTRAPOLATION and is labelled
+        as such by `terminal_prediction_kind`.  An adapter whose network natively predicts
+        the clean image (JiT) overrides this with its own authoritative guided prediction,
+        so that no clean image is ever recovered by inverting a velocity that was itself
+        derived from a clean image.
+
+        Differentiable with respect to `state`; model parameters stay frozen.
+        """
+        s = float(s)
+        v = self.velocity(state, s, conditioning)
+        return state + max(1.0 - s, 1e-8) * v
+
+    def terminal_prediction(self, state: Any, s: float, conditioning: Conditioning) -> Any:
+        """ONE direct prediction of the clean endpoint at s = 1 from (state, s).
+
+        For a standard flow this is `clean_prediction`; it is NOT an integration of the
+        remaining trajectory, and it is NOT a learned finite-interval transport map.
+        """
+        return self.clean_prediction(state, s, conditioning)
 
 
 class MeanFlowAdapter(ModelAdapter):
@@ -224,10 +257,18 @@ class MeanFlowAdapter(ModelAdapter):
     `transition` is the repositories' own `sample_one_step` on the reversed MeanFlow clock.
     """
 
+    # A MeanFlow terminal prediction is a member of a LEARNED FAMILY of finite-interval
+    # transport maps, which is a stronger object than a standard flow's endpoint predictor.
+    terminal_prediction_kind: str = "learned_finite_interval_map"
+
     @abstractmethod
     def transition(self, state: Any, s_from: float, s_to: float,
                    conditioning: Conditioning) -> Any:
         """T_theta(x; s_from -> s_to) on the CANONICAL clock.  Differentiable w.r.t. `state`."""
+
+    def terminal_prediction(self, state: Any, s: float, conditioning: Conditioning) -> Any:
+        """T_theta(x; s -> 1): the learned finite-interval map to the clean endpoint."""
+        return self.transition(state, float(s), 1.0, conditioning)
 
 
 # =====================================================================================
