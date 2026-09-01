@@ -857,10 +857,26 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     sub_problem = problem.subset(indices)
 
     def _probe_spec(method: str, **overrides):
+        """A small spec for `method`, with DEFAULTS a caller may freely override.
+
+        The defaults and the caller's overrides are merged into ONE mapping before
+        `dataclasses.replace` is called.  Passing them as separate keyword arguments --
+        `replace(base, record_loss_history=False, **overrides)` -- raises
+
+            TypeError: dataclasses.replace() got multiple values for keyword argument
+                       'record_loss_history'
+
+        the moment any caller asks for a default it also sets (which
+        `rhso_receding_horizon` and `rhso_state_regularization` both do, for
+        `record_loss_history=True`).  Merging first makes an explicit override win for
+        EVERY field rather than only for the two that happened to be noticed.
+        """
         import dataclasses
         base = by_method.get(method, spec)
-        return dataclasses.replace(base, method=method, num_images=n,
-                                   record_loss_history=False, **overrides)
+        fields: Dict[str, Any] = {"method": method, "num_images": n,
+                                  "record_loss_history": False}
+        fields.update(overrides)                      # explicit overrides win, always
+        return dataclasses.replace(base, **fields)
 
     def pnp_initial_projection():
         """The initial prior projection happens exactly once and is counted."""
@@ -1029,8 +1045,17 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
         from . import rhso as rhso_module
         from .rhso import make_terminal_planner, rhso_reconstruct, rhso_time_grid
 
-        tiny = _dc.replace(_probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2),
-                           rhso_terminal_mode="direct")
+        # The BASELINE must have every theory diagnostic OFF explicitly.  It is derived
+        # from the job's own resolved spec, and a theory-validation configuration (the
+        # smoke config, for one) already switches the diagnostics ON -- so inheriting them
+        # here would make the `plain.diagnostic_model_evals == 0` requirement below fail
+        # for a run that is behaving perfectly.  The diagnostics-enabled probe is then
+        # built from this baseline deliberately, one field at a time.
+        tiny = _probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2,
+                           rhso_terminal_mode="direct",
+                           rhso_stage_diagnostics=False,
+                           rhso_consistency_diagnostics=False,
+                           rhso_jacobian_diagnostics=False)
         eps = adapter.prior_sample(ids)
         guide = manager.encoded_guide(
             adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
@@ -1067,20 +1092,32 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                         rhso_consistency_diagnostics=True))[1]
         counters = ("model_evals_total", "model_evals_planning", "network_forwards",
                     "backprops_through_model", "objective_evals", "optimizer_iterations")
-        same = all(getattr(plain, c) == getattr(with_diag, c) for c in counters)
+        differing = [(c, getattr(plain, c), getattr(with_diag, c)) for c in counters
+                     if getattr(plain, c) != getattr(with_diag, c)]
+        same = not differing
         rows = len(with_diag.stage_records)
+        baseline_clean = plain.diagnostic_model_evals == 0
         ok = (recovers and same and plain.model_evals_planning == 2 * 2
               and with_diag.diagnostic_model_evals > 0
-              and plain.diagnostic_model_evals == 0
+              and baseline_clean
               and rows == 2 * len(sub_problem.image_ids))
+        # Say what actually happened: an unconditional "every algorithmic counter is
+        # unchanged" is a false claim on the very run where the equality test failed.
+        if same:
+            counter_note = "every algorithmic counter is unchanged"
+        else:
+            counter_note = ("ALGORITHMIC COUNTERS CHANGED: %s"
+                            % ", ".join("%s %s->%s" % (c, a, b) for c, a, b in differing))
         return ok, ("one direct terminal prediction per objective (%d network forward(s), "
                     "%d planning evaluations for N=2 M=2, no suffix integration); "
-                    "x+(1-s)v agreement: %s; diagnostics add %d evaluations and %d "
-                    "[image, stage] rows while every algorithmic counter is unchanged"
+                    "x+(1-s)v agreement: %s; the baseline probe ran with all theory "
+                    "diagnostics OFF (%d diagnostic eval(s)); diagnostics add %d "
+                    "evaluations and %d [image, stage] rows while %s"
                     % (forwards, plain.model_evals_planning,
                        "n/a (MeanFlow)" if adapter.spec.dynamics_family != STANDARD_FLOW
                        else ("yes" if recovers else "NO"),
-                       with_diag.diagnostic_model_evals, rows))
+                       plain.diagnostic_model_evals,
+                       with_diag.diagnostic_model_evals, rows, counter_note))
 
     def rhso_state_regularization():
         """mu adds a state-anchor penalty and NOTHING else.

@@ -42,10 +42,20 @@ dm-tree>=0.1.8
 cached_property>=1.5
 absl-py>=2.0
 
-# OPTIONAL: NVIDIA management-library bindings, used only to report GPU peak memory for
-# JAX jobs, where the framework's own `peak_bytes_in_use` is a lifetime high-water mark
-# with no reset API and therefore cannot describe a single job.  Nothing depends on it:
-# without it the gpu_* columns read `unavailable` and reconstruction is unaffected.  It is
-# usually already present via the NVIDIA driver packages on a cluster.
+# NVIDIA management-library bindings.  The importable module is `pynvml`; the
+# distribution that provides it is `nvidia-ml-py`.  This is what src/memory.py uses to
+# sample PID-RESIDENT GPU memory, and that is the ONLY memory number comparable between
+# the PyTorch (JiT) and JAX (pMF) models -- torch.cuda.max_memory_allocated is
+# PyTorch-specific and JAX's peak_bytes_in_use is a lifetime high-water mark with no reset
+# API, so neither substitutes for it.
 #
-#     pip install nvidia-ml-py
+# It is a pure-Python package and installs anywhere, including on machines with no GPU.
+# Reconstruction still works without it, but every job then reports
+# gpu_process_memory_source=unavailable and the JiT-vs-pMF memory comparison is lost --
+# which is what happened on the first Rorqual run, so it is listed as a real dependency
+# rather than a comment.  setup_cluster.sh installs it from the Alliance wheelhouse when
+# it can (`pip install --no-index nvidia-ml-py`) and from PyPI otherwise.
+#
+# NOTE: importing pynvml on a LOGIN node succeeds; pynvml.nvmlInit() there fails with
+# NVMLError_DriverNotLoaded because login nodes expose no GPU driver.  That is expected.
+nvidia-ml-py>=12.0

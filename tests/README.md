@@ -10,7 +10,11 @@ python tests/test_flow_trajectory.py        # needs jax
 python tests/test_beta_schedule.py          # pure Python (+ pyyaml for the config checks)
 python tests/test_rhso.py                   # needs jax + optax
 python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
+python tests/test_cluster_and_aggregation.py  # needs pyyaml + bash (no jax/torch)
 ```
+
+> These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
+> each file directly; each prints `N/N checks passed` and exits non-zero on failure.
 
 `test_meanflow_pnp_dflow.py` executes `pnp.meanflow_pnp` and `dflow.meanflow_dflow`
 end to end against a toy MeanFlow adapter and checks: the `1 + N·M` denoiser accounting and
@@ -92,6 +96,28 @@ distinct job ids and output paths while leaving the cost estimate untouched, `mu
 refused for every non-RHSO method, and the warm-up key separating beta- and mu-distinct
 jobs. A documented stand-in remains as a fallback if
 `src/config.py` cannot be imported at all; each script prints which path it used.
+
+`test_cluster_and_aggregation.py` is the regression suite for the bugs found by the first
+real Rorqual H100 smoke run. It needs neither JAX nor PyTorch and checks: that the
+`_probe_spec` helper lets an explicit override win instead of raising
+`dataclasses.replace() got multiple values ...` (and that the *old* form really did raise,
+so the test proves the bug rather than assuming it); that the direct-terminal-planning
+check's baseline probe disables all three theory diagnostics explicitly rather than
+inheriting them from a theory config; that every mutable top-level file an array task writes
+is shard-private, that `collect_finished_jobs` merges a 4-job x 4-image run into exactly 16
+per-image rows with no duplicates, deterministic ordering and correct partial-completion
+behaviour; that merged `checks.json` contains **both** model families and that a failure in
+any one shard survives the merge; that merged `run_metadata.json` unions per-model
+provenance and preserves each shard's complete payload; that the "REMAINING suffix" warning
+appears for `suffix` jobs (including `auto` on JiT) and never for JiT-`direct`; that Rorqual
+resolves to `cuda/12.9` + `cudnn/9.13.1.26` while **Narval's module line is byte-identical
+to the previous behaviour** and never contains `12.9`; that `setup_cluster.sh` contains no
+hard-coded `module load cuda` and installs `nvidia-ml-py` with a wheelhouse-first fallback;
+that `src/memory.py` never calls `nvmlDeviceGetMemoryInfo` (checked by parsing its AST, not
+by substring search, since the docstring forbidding it names it) and never fills
+`gpu_process_peak_gib` from a framework counter; and that the four theory configs still
+resolve to 4 / 70 / 10 / 10 atomic jobs with the matched-budget pairs and the two distinct
+terminal-planner identities intact.
 
 ## What these tests do NOT cover
 

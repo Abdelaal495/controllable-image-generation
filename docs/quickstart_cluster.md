@@ -1,7 +1,12 @@
 # Running Controllable Image Generation for Inverse Problems on Alliance clusters
 
-Tested on **Narval**; the same procedure applies to **Nibi** and **Rorqual**, and to any
-other Digital Research Alliance of Canada cluster with the same software stack.
+Tested on **Narval** (A100) and **Rorqual** (H100); the same procedure applies to **Nibi**
+and to any other Digital Research Alliance of Canada cluster with the same software stack.
+
+> **Cluster differences, local files, memory metrics and shard aggregation are documented in
+> [`clusters_narval_rorqual.md`](clusters_narval_rorqual.md).** Read that first if you are
+> setting up Rorqual, updating an existing checkout after a `git pull`, or merging a job
+> array. This page is the step-by-step walkthrough.
 
 This repository benchmarks several reconstruction/control strategies — **SDEdit, MPC-RHC,
 MPC-Δt, PnP-Flow, and D-Flow** — across standard Flow Matching and MeanFlow models. The
@@ -94,8 +99,26 @@ nano .env          # HF_TOKEN=hf_...
 
 ```bash
 module --force purge
-module load StdEnv/2023 python/3.11 gcc arrow/25.0.0 cuda cudnn
+module load StdEnv/2023 python/3.11 gcc arrow/25.0.0
+
+# CUDA/cuDNN differ by cluster. Let the repository's helper choose:
+source scripts/cluster_modules.sh
+eval "$(mpcflow_cuda_load_line "${CC_CLUSTER:-unknown}")"
 ```
+
+That resolves to:
+
+| Cluster | CUDA / cuDNN |
+|---|---|
+| **Narval** | `cuda cudnn` — the Alliance default, unchanged |
+| **Rorqual** | `cuda/12.9` + `cudnn/9.13.1.26` |
+| anything else | the Alliance default |
+
+Rorqual is pinned because its unversioned default resolves to CUDA 12.6.2, and JAX warns at
+runtime that compilers up to 12.6.2 can miscompile some clamping edge cases. `setup_cluster.sh`
+applies the same selection automatically, both when it builds the venv and in the
+`activate_cluster.sh` it generates — you only need the lines above if you are loading modules
+by hand.
 
 Two details that cost real time if you get them wrong:
 
@@ -162,7 +185,26 @@ python -c "import torch; print('torch cuda:', torch.cuda.is_available())"
 python -c "import jax; print('jax:', jax.default_backend(), jax.devices())"
 ```
 
-Both must report a GPU. **`jax: cpu` is the dangerous one** — JAX-based models still give
+Both must report a GPU **when run inside `salloc`**.
+
+> On a **login node** these same commands report `torch cuda: False` and `jax: cpu`
+> (sometimes after a `CUDA_ERROR_NO_DEVICE` message), and `pynvml.nvmlInit()` raises
+> `NVMLError_DriverNotLoaded`. Login nodes have no GPU and no GPU driver, so **none of
+> those is a setup failure.** They only mean "not verifiable here". Package installation is
+> checkable on a login node; GPU visibility is not.
+
+Also confirm NVML and, on Rorqual, the compiler version:
+
+```bash
+python -c "import pynvml; pynvml.nvmlInit(); print('nvml devices:', pynvml.nvmlDeviceGetCount())"
+ptxas --version | tail -2        # expect V12.9.x on Rorqual
+```
+
+Without a working `pynvml` inside the job, every result reports
+`gpu_process_memory_source = unavailable` and the cross-framework JiT-vs-pMF memory
+comparison is lost. `setup_cluster.sh` installs `nvidia-ml-py` for you.
+
+**`jax: cpu` inside a GPU job is the dangerous one** — JAX-based models still give
 correct numbers, just 50–100× slower, so a job hits its wall clock instead of failing.
 Modern JAX keeps CUDA support in separate plugin packages. Fix from a **login node**:
 
@@ -314,7 +356,23 @@ python run.py \
   --aggregate
 ```
 
-`<ARRAY_JOB_ID>` is the `%A` number shared by all tasks. You can find the matching files with:
+`<ARRAY_JOB_ID>` is the `%A` number shared by all tasks.
+
+Aggregation is **required** after an array run, not optional: array tasks write
+shard-private `results_shardNN.csv`, `results_per_image_shardNN.csv`, `checks_shardNN.json`
+and `run_metadata_shardNN.json`, and the merge is what produces the canonical
+
+```text
+results.csv              results_per_image.csv
+checks.json              run_metadata.json      aggregate_metadata.json
+```
+
+plus per-job `results.npz` / `metadata.json` (written directly by the tasks) and the figures.
+The merged `checks.json` contains **both** model families' checks, and `run_metadata.json`
+preserves every shard's provenance. See
+[`clusters_narval_rorqual.md` §8](clusters_narval_rorqual.md).
+
+You can find the matching files with:
 
 ```bash
 ls logs/*<ARRAY_JOB_ID>*
@@ -427,6 +485,7 @@ and confirm that authentication mentions `publickey`.
 | Stage assets | `python run.py --config … --prefetch` (login node) |
 | Submit | `bash submit.sh` / `bash submit.sh --array N` |
 | Merge shards | `python run.py --config … --run-id … --aggregate` |
+| Refresh after `git pull` | `bash setup_cluster.sh --refresh --venv <venv>` |
 | Queue | `squeue -u $USER` |
 | Cancel | `scancel <JOBID>` |
 

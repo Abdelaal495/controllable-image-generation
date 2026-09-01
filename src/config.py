@@ -2132,7 +2132,10 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                          "sequentially and released between families, but JAX does not return "
                          "device memory eagerly; prefer runtime.release_model_after_use: true.")
     # Paired-comparison completeness: warn when SDEdit has no partner at some t0.
-    for (exp, model) in {(s.experiment, s.model) for s in specs}:
+    # Sorted, because set iteration order varies with PYTHONHASHSEED and the warning list
+    # is written verbatim into run_metadata.json: an unordered loop makes two identical
+    # runs produce two different metadata files.
+    for (exp, model) in sorted({(s.experiment, s.model) for s in specs}):
         sel = [s for s in specs if s.experiment == exp and s.model == model]
         methods = {s.method for s in sel}
         compared = methods & set(COMPARED_METHODS)
@@ -2225,14 +2228,36 @@ def check_accelerator_compatibility(plan: RunPlan, accel: Dict[str, Any]) -> Lis
                          "job in this plan chains %d model evaluations per objective, and "
                          "activation memory scales with that depth. There is no gradient "
                          "checkpointing in this implementation." % deepest)
+    # The suffix warning describes the LEGACY standard-flow planner only.  It is resolved
+    # from `rhso_terminal_mode`, not from the dynamics family: a JiT job with
+    # `rhso_terminal_mode: direct` performs ONE endpoint prediction per inner objective and
+    # never integrates -- let alone differentiates -- the remaining suffix, so claiming it
+    # does would be simply false.  `auto` has already been resolved to `direct`/`suffix` by
+    # the planner (see resolve_run_plan); the fallback keeps a stand-in spec honest.
     rhso = [s for s in plan.specs if s.method == "rhso"]
-    if rhso and any(s.dynamics_family == STANDARD_FLOW for s in rhso):
-        deepest = max((s.num_rhso_steps or 1) for s in rhso
-                      if s.dynamics_family == STANDARD_FLOW)
-        notes.append("Standard-flow RHSO differentiates the whole REMAINING suffix at every "
-                     "outer stage: its first stage chains up to %d intervals in the autograd "
-                     "graph (cost then falls stage by stage). MeanFlow RHSO plans with ONE "
-                     "learned transition regardless of the horizon." % deepest)
+
+    def _mode(s) -> str:
+        mode = getattr(s, "rhso_terminal_mode", None)
+        if mode in (None, "auto"):
+            return _legacy_terminal_mode(s.dynamics_family)
+        return str(mode)
+
+    suffix_jobs = [s for s in rhso
+                   if s.dynamics_family == STANDARD_FLOW and _mode(s) == "suffix"]
+    if suffix_jobs:
+        deepest = max((s.num_rhso_steps or 1) for s in suffix_jobs)
+        notes.append("Standard-flow RHSO in `suffix` terminal mode differentiates the whole "
+                     "REMAINING suffix at every outer stage: its first stage chains up to %d "
+                     "intervals in the autograd graph (cost then falls stage by stage). "
+                     "MeanFlow RHSO plans with ONE learned transition regardless of the "
+                     "horizon." % deepest)
+    direct_flow_jobs = [s for s in rhso
+                        if s.dynamics_family == STANDARD_FLOW and _mode(s) == "direct"]
+    if direct_flow_jobs:
+        notes.append("Standard-flow RHSO in `direct` terminal mode plans with ONE direct "
+                     "clean-endpoint prediction x_hat_1(q, s_k) per inner objective: the "
+                     "remaining suffix is neither integrated nor differentiated, so the "
+                     "autograd graph does not deepen with the horizon.")
     if any(s.method == "pnp" and (s.noise_samples or 1) > 1 for s in plan.specs):
         notes.append("PnP with noise_samples > 1 evaluates the denoiser M times per "
                      "correction; the M realisations run sequentially here, so runtime scales "

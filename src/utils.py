@@ -401,17 +401,43 @@ def jsonable(obj):
     return obj
 
 
+def _atomic_write(path, render) -> None:
+    """Write via a unique temporary file in the same directory, then rename.
+
+    ``os.replace`` is atomic within a filesystem, so a reader (or a concurrent SLURM array
+    task on the shared parallel filesystem) either sees the previous complete file or the
+    new complete file, never a truncated one.  The temporary name carries the PID so two
+    processes writing the same target cannot destroy each other's scratch file.
+    """
+    import os
+    import tempfile
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent),
+                               prefix=".%s." % target.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            render(fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_json(path, payload) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(jsonable(payload), fh, indent=2, default=_json_default)
+    _atomic_write(path, lambda fh: json.dump(jsonable(payload), fh, indent=2,
+                                             default=_json_default))
 
 
 def save_yaml(path, payload) -> None:
     import yaml
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as fh:
-        yaml.safe_dump(jsonable(payload), fh, sort_keys=False, default_flow_style=False)
+    _atomic_write(path, lambda fh: yaml.safe_dump(jsonable(payload), fh, sort_keys=False,
+                                                  default_flow_style=False))
 
 
 RULE, THIN = "=" * 94, "-" * 94
