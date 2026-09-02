@@ -1,0 +1,174 @@
+# EXPERIMENT 5 -- beta / STAGE-SCHEDULE ABLATION
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# At a fixed number of stages and a fixed budget, does it matter WHERE on the trajectory
+# those stages sit? RHSO replans at the outer times, so beta decides whether the replanning
+# resolution is concentrated where the state is still mostly noise or where it is nearly
+# data.
+#
+# WHAT beta DOES -- verified against src/schedule.py, not assumed
+# ---------------------------------------------------------------
+# The repository's universal power-law grid is
+#
+#     s_k = s_0 + (1 - s_0) * (k / N)^beta,     k = 0 .. N
+#
+# in the CANONICAL orientation s = 0 noise, s = 1 data (paper convention t = 0 noise,
+# t = 1 data; the implementation-side t0 is reversed, t0_code = 1 - t_paper, so t0: 1.0
+# below is the canonical start s = 0). Therefore, and this is the direction to quote:
+#
+#     beta < 1   (k/N)^beta > k/N  -> stages pushed TOWARDS s = 1: finer resolution near
+#                the DATA end, coarse first interval.
+#     beta = 1   the uniform grid, taken bitwise by a separate legacy code path so these
+#                jobs reproduce the validated N=4 runs exactly.
+#     beta > 1   (k/N)^beta < k/N  -> stages pulled back TOWARDS s = 0: finer resolution
+#                near the NOISE end, coarse last interval.
+#
+# Worked example from src/schedule.py at s_0 = 0, N = 4:
+#     beta = 0.5   0, 0.5,    0.7071, 0.8660, 1     <- crowded near the data end
+#     beta = 1     0, 0.25,   0.5,    0.75,   1
+#     beta = 2     0, 0.0625, 0.25,   0.5625, 1     <- crowded near the noise end
+#
+# This confirms the usual reading and contradicts nothing in the implementation. No new
+# grid machinery is needed: beta is already a shared, sweepable field on every method, so
+# this experiment is configuration only. An explicit-grid mechanism is deliberately NOT
+# added.
+#
+# RECORDING THE ACTUAL TIMES. Every job records `delta_nominal_uniform`, `delta_min` and
+# `delta_max` in results.csv, and `delta` is null whenever beta != 1 because a non-uniform
+# trajectory has no single step size. Each job's metadata.json additionally stores the full
+# `outer_times` array under `rhso_diagnostics`, so plots can be drawn against the TRUE
+# stage locations rather than against beta alone.
+#
+# HELD FIXED  : N = 4, M = 40, matched B = 160, t0 = 1.0 (canonical start s = 0), mu = 0.0,
+#               direct terminal planning, 100 frozen images, seed 42, the validated
+#               task-specific learning rates.
+# SWEPT       : beta in {0.5, 0.75, 1.0, 1.5, 2.0} x 5 tasks x 2 models.
+# DIAGNOSTICS : stage + consistency only.
+#
+# Expected scale: 5 tasks x 2 models x 5 beta values = 50 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_beta_schedule.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 128
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_beta_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: [0.5, 0.75, 1.0, 1.5, 2.0]}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_beta_N4:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: [0.5, 0.75, 1.0, 1.5, 2.0]}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_beta_N4:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: [0.5, 0.75, 1.0, 1.5, 2.0]}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_beta_N4:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: [0.5, 0.75, 1.0, 1.5, 2.0]}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_beta_N4:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: [0.5, 0.75, 1.0, 1.5, 2.0]}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+

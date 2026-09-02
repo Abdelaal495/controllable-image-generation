@@ -1,0 +1,129 @@
+# EXPERIMENT 4 -- STATE-ANCHOR (mu) ABLATION ON DENOISING
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# RHSO's failure mode at large N is over-optimisation: the measurement fidelity keeps
+# improving while PSNR / SSIM / LPIPS degrade, because q drifts off the generative manifold
+# between replans. mu weights the trust-region-like state anchor
+#
+#     R(q, x_k) = sum_b (1 / 2 d_b) || q_b - x_k,b ||^2
+#
+# against the terminal fidelity. Does a non-zero mu recover the quality that excessive
+# replanning costs, and where is the useful range?
+#
+# WHY DENOISING ONLY, AND WHY N in {4, 8}
+# ---------------------------------------
+# This is a targeted mechanistic test, not a benchmark sweep. Denoising is the task with
+# the identity operator, so nothing about the measurement geometry confounds the anchor's
+# effect. N = 4 is the main validated setting and N = 8 is where over-optimisation is
+# already visible in the matched-budget suite -- the two stage counts where an anchor could
+# plausibly matter. The two (N, M) pairs are separate blocks so the total budget stays
+# matched at B = 160 for both (see 2A on why they cannot be two lists in one block).
+#
+# CHOOSING THE mu SCALE -- and being honest that it is a choice
+# -------------------------------------------------------------
+# There is NO prior mu experiment in this repository and no theoretical value, so the
+# following is a documented order-of-magnitude argument, not a privileged set.
+#
+#   * The fidelity is `half_mean_squared_per_measurement`:
+#         F_b = (1 / 2 m_b) sum_j (A(x_b)_j - y_b,j)^2
+#     At the denoising operating point sigma_0 = 0.2 in [-1, 1] pixel units, a reasonable
+#     reconstruction leaves a residual RMS of order sigma_0, so F_b ~ 0.5 * 0.2^2 = 0.02.
+#   * The anchor is normalised the same way -- mean over the state dimensions, times 1/2,
+#     summed over the batch -- so R = 0.5 * delta^2 for a per-coordinate displacement RMS
+#     of delta. Adam with lr = 0.01 over M = 40 iterations moves a coordinate by at most
+#     ~0.4, giving R up to ~0.08.
+#   * F and R therefore live on the SAME order of magnitude, which puts the interesting mu
+#     near 1 and makes mu ~ 0.01 a weak perturbation.
+#
+# The log-spaced set {0, 0.01, 0.03, 0.1, 0.3, 1.0} spans "barely active" to "clearly
+# constraining" without reaching penalties that would freeze q at the anchor. mu = 0.0 is
+# included as the exact control: at mu = 0 the differentiated scalar is the fidelity object
+# itself, so those jobs reproduce the vanilla objective bitwise.
+#
+# HELD FIXED  : denoising sigma = 0.2, t0 = 1.0, beta = 1.0, direct terminal planning,
+#               100 frozen images, seed 42, B = 160, validated learning rates.
+# SWEPT       : mu (6 values, log-spaced, including 0) x (N, M) in {(4, 40), (8, 20)} x model.
+# LOGGING     : `record_loss_history: true` is set here specifically so results.npz keeps
+#               loss_history, fidelity_history and state_penalty_history separately --
+#               total = fidelity + mu * R on one per-image scale. That is the whole point of
+#               a mu ablation and is worth the small file size on 24 jobs.
+#
+# Expected scale: 2 (N, M) pairs x 2 models x 6 mu values = 24 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_mu_denoising.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 64
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_mu_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0], optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false, record_loss_history: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0], optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false, record_loss_history: true}
+
+  denoising_mu_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0], optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false, record_loss_history: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0], optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false, record_loss_history: true}
+

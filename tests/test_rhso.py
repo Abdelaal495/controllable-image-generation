@@ -761,7 +761,8 @@ def main():
                                      "rhso_terminal_mode", "rhso_stage_diagnostics",
                                      "rhso_consistency_diagnostics",
                                      "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
-                                     "rhso_jacobian_power_iters", "rhso_jacobian_seed"}
+                                     "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+                                     "rhso_gradient_authority_diagnostics"}
             and all("rhso" in c.supported_methods for c in MODEL_CAPABILITIES.values())
             and "rhso" in COMPARED_METHODS,
             "shared t0/beta plus N, M, lr, mu, optimizer, phi, solver, the terminal-planner "

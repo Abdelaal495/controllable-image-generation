@@ -616,3 +616,117 @@ diagnostic cost and both memory sources.
 `stage_theta_first/last`, the mean endpoint shift and recovery, the first/last
 `jacobian_sigma_max` and log-anisotropy) plus the diagnostic counters. Large arrays stay in
 the per-job artefact. Resume and `--aggregate` are unaffected.
+
+---
+
+## E. The two opt-in extensions added for the six theory experiments
+
+Both are **off unless a configuration asks for them**, and both were added because the
+experiments below could not otherwise be launched without editing Python. Everything else
+in this document — the schedule, the planner, the objective, the solver policy, the cost
+model, the existing diagnostics — is unchanged.
+
+### E.1 `measurement_noise_group` — common random numbers across σ
+
+**Where it goes.** On an experiment block, next to `problem` and `degradation`:
+
+```yaml
+experiments:
+  denoising_s020_B160_N4:
+    problem: denoising
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+```
+
+**What it does.** The measurement noise is normally seeded from
+
+```
+seed(global_seed, 'measurement', problem, params_key, image_id)
+```
+
+where `params_key` is the canonical parameter dictionary — **σ included**. A sweep over σ
+therefore draws a different ε at every level, and the difference between two noise levels
+mixes the effect of σ with the luck of the draw. With a group set, the seed becomes
+
+```
+seed(global_seed, 'measurement_paired', group, problem, structural_params_key, image_id)
+```
+
+where `structural_params_key` is the same canonical key **with σ removed**. Every σ in the
+group then shares one standard-normal realisation per image and merely rescales it:
+
+```
+y_σ = A x* + σ ε,     the same ε ~ N(0, I) at every σ
+```
+
+**What still separates jobs.** σ remains in `params_key`, so it remains in the problem key
+and in the job id: four noise levels are still four problem instances, four measurements
+and four sets of jobs. Only the underlying ε is shared. The group itself joins the problem
+key and the job id **only when it is set**, so a configuration that never mentions it keeps
+every identity, output path and resume artefact it had before.
+
+**What it deliberately does not touch.** Masks, stroke geometry and every operator are
+seeded exactly as before, from the full `params_key`. One consequence must be stated
+plainly: `random_inpaint`'s mask is drawn per image from a key that includes σ, so a σ
+sweep on that task re-draws the mask and `(y − Ax)/σ` is **not** identical across the
+sweep. The validator emits a warning saying so whenever a group meets `random_inpaint`.
+Pairing is exact for denoising, deblurring, super-resolution and box inpainting, whose
+operators do not depend on σ. Fixing this would mean changing existing mask seeding, which
+is out of scope and would alter validated results.
+
+**Auditing.** The group appears in `results.csv` as `measurement_noise_group`, and each
+job's `metadata.json` records both the group and the seed recipe actually used under
+`problem_metadata`.
+
+### E.2 `rhso_gradient_authority_diagnostics` — task-aligned endpoint authority
+
+**Where it goes.** On an RHSO method entry, like the other diagnostics:
+
+```yaml
+rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01,
+       rhso_gradient_authority_diagnostics: true}
+```
+
+**What it measures.** §D.4's probes ask how the terminal map stretches *random* directions.
+This asks how much authority the state at stage `k` has over the direction the *task*
+actually cares about:
+
+```
+g_end_k = ∇_{x_1} Φ(x_1; y)   at  x_1 = P_k(x_{t_k})
+J_k     = D_{x_{t_k}} P_k(x_{t_k})
+A_k     = ‖J_kᵀ g_end_k‖ / ‖g_end_k‖
+```
+
+Because `J_kᵀ g_end_k` is exactly `∇_{x_{t_k}} Φ(P_k(x_{t_k}); y)`, **no Jacobian is ever
+formed**: one forward pass through the terminal planner, one gradient of the fidelity at
+its output, one VJP back through the planner. `P_k` comes from the same
+`make_terminal_planner` factory the inner objective uses, so a pMF job measures its learned
+finite-interval map and a JiT-direct job measures `x̂₁`.
+
+Recorded per real image and per stage, into the existing `[image, stage]` arrays:
+
+| field | meaning |
+| --- | --- |
+| `endpoint_fidelity_grad_norm` | `‖g_end_k‖` |
+| `state_fidelity_grad_norm` | `‖J_kᵀ g_end_k‖` |
+| `gradient_aligned_authority` | the ratio |
+| `log_gradient_aligned_authority` | its log |
+
+**Semantics that matter.**
+
+* **Fidelity only.** The state-anchor `mu` penalty is excluded. It describes the
+  optimisation problem, not the model's authority over the measurement — and at the state
+  entering a stage its gradient is exactly zero anyway.
+* **Measured at the pre-optimisation state** entering the stage, the same linearisation
+  point as the Jacobian probe, so the two are directly comparable on the same run.
+* **Zero-gradient handling.** When `‖g_end_k‖` falls below
+  `GRADIENT_AUTHORITY_MIN_ENDPOINT_NORM` (1e-12) the ratio is undefined and is recorded as
+  `NaN`, never as a division by an invented epsilon. Both norms stay on the row, and the
+  summaries drop `NaN` rather than propagating it.
+* **It is a measurement, not the algorithm.** Its model evaluation and VJP land in
+  `diagnostic_model_evals` / `diagnostic_vjps`, its time is subtracted from the reported
+  runtime, and it changes no sample, no optimiser state and no algorithmic counter —
+  exactly the convention §D.5 sets out for the existing probes.
+* **It implies the stage bookkeeping**, the same way a consistency measurement does, since
+  its numbers live on the per-`(image, stage)` rows the stage bookkeeping creates. Asking
+  for it alone therefore measures something rather than silently nothing.

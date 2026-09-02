@@ -56,6 +56,17 @@ Three families of diagnostic
    A matrix-free, per-image probe of the terminal planner's Jacobian at the state entering
    the stage.  See `probe_jacobian` for exactly what is and is not claimed.
 
+4. GRADIENT-ALIGNED ENDPOINT AUTHORITY  (`rhso_gradient_authority_diagnostics`)
+   The same Jacobian, but contracted against the direction the TASK actually asks for
+   rather than against random directions:
+
+       A_k = ||J_k^T grad_{x_1} Phi|| / ||grad_{x_1} Phi||
+
+   (3) asks how anisotropic the terminal map is; (4) asks how much authority the state at
+   s_k has over the measurement objective specifically.  They answer different questions
+   and are switched on independently, so a run can carry both and compare them on exactly
+   the same images and stages.  See `probe_gradient_authority`.
+
 Batch handling
 --------------
 Every diagnostic is PER IMAGE.  A chunk of four images produces four rows per stage, not
@@ -107,6 +118,12 @@ DEFAULT_JACOBIAN_SEED = 20240917
 DEFAULT_JACOBIAN_PROBES = 8
 DEFAULT_JACOBIAN_POWER_ITERATIONS = 8
 
+# Below this endpoint-gradient norm the authority RATIO is undefined and is reported as
+# NaN.  Dividing by an arbitrary epsilon instead would manufacture a finite-looking
+# authority out of a measurement that carries no direction at all, so it is deliberately
+# not done; both norms are still recorded, so the reader can see WHY the ratio is missing.
+GRADIENT_AUTHORITY_MIN_ENDPOINT_NORM = 1e-12
+
 
 # =====================================================================================
 # Settings
@@ -120,10 +137,14 @@ class DiagnosticSettings:
     probes: int = DEFAULT_JACOBIAN_PROBES
     power_iterations: int = DEFAULT_JACOBIAN_POWER_ITERATIONS
     seed: int = DEFAULT_JACOBIAN_SEED
+    # Appended AFTER `seed` on purpose: any existing positional construction of the six
+    # fields above keeps its meaning.
+    gradient_authority: bool = False
 
     @property
     def any_enabled(self) -> bool:
-        return bool(self.stage or self.consistency or self.jacobian)
+        return bool(self.stage or self.consistency or self.jacobian
+                    or self.gradient_authority)
 
     def to_metadata(self) -> Dict[str, Any]:
         return {"stage_diagnostics": bool(self.stage),
@@ -131,7 +152,10 @@ class DiagnosticSettings:
                 "jacobian_diagnostics": bool(self.jacobian),
                 "jacobian_probes": int(self.probes),
                 "jacobian_power_iterations": int(self.power_iterations),
-                "jacobian_seed": int(self.seed)}
+                "jacobian_seed": int(self.seed),
+                "gradient_authority_diagnostics": bool(self.gradient_authority),
+                "gradient_authority_min_endpoint_norm":
+                    float(GRADIENT_AUTHORITY_MIN_ENDPOINT_NORM)}
 
 
 def settings_from_spec(spec) -> DiagnosticSettings:
@@ -148,11 +172,15 @@ def settings_from_spec(spec) -> DiagnosticSettings:
         return int(fallback if value is None else value)
 
     consistency = flag("rhso_consistency_diagnostics")
+    authority = flag("rhso_gradient_authority_diagnostics")
     return DiagnosticSettings(
         # A consistency measurement is a comparison of two stage-terminal predictions, so
-        # it implies the stage bookkeeping; asking for it alone is not an error.
-        stage=flag("rhso_stage_diagnostics") or consistency,
+        # it implies the stage bookkeeping; asking for it alone is not an error.  The
+        # gradient-authority probe implies it for the same reason: its numbers live on the
+        # per-(image, stage) rows the stage bookkeeping creates.
+        stage=flag("rhso_stage_diagnostics") or consistency or authority,
         consistency=consistency,
+        gradient_authority=authority,
         jacobian=flag("rhso_jacobian_diagnostics"),
         probes=number("rhso_jacobian_probes", DEFAULT_JACOBIAN_PROBES),
         power_iterations=number("rhso_jacobian_power_iters",
@@ -409,6 +437,115 @@ def _probe_torch(predict, x, real_rows, probes, iterations, seed, seed_parts, co
 
 
 # =====================================================================================
+# Gradient-aligned endpoint authority
+# =====================================================================================
+def probe_gradient_authority(adapter, predict, x, real_rows: int, fidelity_of_state,
+                             counters: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """TASK-ALIGNED authority of the terminal predictor at the state entering a stage.
+
+    Where `probe_jacobian` asks how the terminal map stretches RANDOM directions, this asks
+    how much of the direction the measurement actually cares about survives the pull-back:
+
+        g_end_k = grad_{x_1} Phi(x_1; y)   at  x_1 = P_k(x_{t_k})
+        J_k     = D_{x_{t_k}} P_k(x_{t_k})
+        A_k     = ||J_k^T g_end_k|| / ||g_end_k||
+
+    By the chain rule J_k^T g_end_k is exactly grad_{x_{t_k}} Phi(P_k(x_{t_k}); y), so the
+    Jacobian is NEVER materialised: one forward pass through the terminal planner, one
+    gradient of the fidelity at its output, and one VJP back through the planner with that
+    gradient as the cotangent.
+
+    Three things this deliberately does NOT do:
+
+      * it does not include the state-anchor `mu` penalty.  That penalty is a property of
+        the optimisation problem, not of the model's authority over the measurement, and
+        its gradient (q - anchor)/d is exactly zero at the state entering a stage anyway,
+        so including it would be both wrong and invisible;
+      * it does not touch the optimisation.  `x` is detached first and nothing computed
+        here is returned to the caller's graph;
+      * it does not divide by an epsilon.  See GRADIENT_AUTHORITY_MIN_ENDPOINT_NORM.
+
+    `P_k` is whatever the current planner is -- the caller passes the SAME
+    `make_terminal_planner` closure the inner objective differentiates -- so a pMF job
+    measures its learned finite-interval map and a JiT-direct job measures x_hat_1.
+
+    Batch isolation is structural rather than probed: the models act independently across
+    batch elements and the fidelity is a sum over them, so row b of either gradient is the
+    gradient of image b's own fidelity and nothing else.  Padded rows are never read.
+
+    Returns one dict per REAL image, in batch order.
+    """
+    try:
+        if adapter.spec.framework == "jax":
+            g_end, g_state = _authority_jax(predict, fidelity_of_state, x, counters)
+        else:
+            g_end, g_state = _authority_torch(predict, fidelity_of_state, x, counters)
+    except Exception as exc:                                             # pragma: no cover
+        # A diagnostic must never take a reconstruction down with it.
+        return [{"endpoint_fidelity_grad_norm": float("nan"),
+                 "state_fidelity_grad_norm": float("nan"),
+                 "gradient_aligned_authority": float("nan"),
+                 "log_gradient_aligned_authority": float("nan"),
+                 "gradient_authority_error": "%s: %s" % (type(exc).__name__, exc)}
+                for _ in range(max(0, int(real_rows)))]
+
+    endpoint_norms = _rows_l2(g_end)
+    state_norms = _rows_l2(g_state)
+    results: List[Dict[str, Any]] = []
+    for b in range(max(0, int(real_rows))):
+        endpoint = float(endpoint_norms[b])
+        state = float(state_norms[b])
+        if (np.isfinite(endpoint) and np.isfinite(state)
+                and endpoint >= GRADIENT_AUTHORITY_MIN_ENDPOINT_NORM):
+            authority = state / endpoint
+            log_authority = (float(math.log(authority)) if authority > 0.0
+                             else float("nan"))
+        else:
+            # Documented, not silent: the ratio is undefined, so it is NaN and the two
+            # norms that produced it stay on the row.
+            authority = float("nan")
+            log_authority = float("nan")
+        results.append({"endpoint_fidelity_grad_norm": endpoint,
+                        "state_fidelity_grad_norm": state,
+                        "gradient_aligned_authority": float(authority),
+                        "log_gradient_aligned_authority": float(log_authority)})
+    return results
+
+
+def _authority_torch(predict, fidelity_of_state, x, counters):
+    import torch
+
+    base = x.detach().clone().requires_grad_(True)
+    with torch.enable_grad():
+        terminal = predict(base)                       # ONE terminal-planner evaluation
+        _bump(counters, "diagnostic_model_evals", 1)
+        # The endpoint gradient is taken with respect to a LEAF copy of the prediction, so
+        # it is grad_{x_1} Phi and carries nothing of the planner in it.
+        endpoint = terminal.detach().clone().requires_grad_(True)
+        (g_end,) = torch.autograd.grad(fidelity_of_state(endpoint), endpoint)
+        (g_state,) = torch.autograd.grad(terminal, base, grad_outputs=g_end,
+                                         retain_graph=False, allow_unused=True)
+        _bump(counters, "diagnostic_vjps", 1)
+        if g_state is None:                                              # pragma: no cover
+            g_state = torch.zeros_like(base)
+    return (np.asarray(g_end.detach().float().cpu().numpy(), np.float64),
+            np.asarray(g_state.detach().float().cpu().numpy(), np.float64))
+
+
+def _authority_jax(predict, fidelity_of_state, x, counters):
+    import jax
+
+    x = jax.lax.stop_gradient(x)
+    terminal, vjp_fn = jax.vjp(predict, x)             # ONE terminal-planner evaluation
+    _bump(counters, "diagnostic_model_evals", 1)
+    g_end = jax.grad(fidelity_of_state)(jax.lax.stop_gradient(terminal))
+    (g_state,) = vjp_fn(g_end)
+    _bump(counters, "diagnostic_vjps", 1)
+    return (np.asarray(jax.device_get(g_end), np.float64),
+            np.asarray(jax.device_get(g_state), np.float64))
+
+
+# =====================================================================================
 # The per-stage recorder
 # =====================================================================================
 # Every scalar field of one [image, stage] diagnostic row, and the dtype it is stored with.
@@ -421,6 +558,11 @@ STAGE_FLOAT_FIELDS = (
     "jacobian_sigma_max", "jacobian_gain_min", "jacobian_gain_max", "jacobian_gain_mean",
     "jacobian_gain_std", "jacobian_gain_p05", "jacobian_gain_p50", "jacobian_gain_p95",
     "jacobian_empirical_gain_ratio", "jacobian_empirical_log_anisotropy",
+    # Task-aligned endpoint authority.  APPENDED, never inserted: an .npz written before
+    # these existed simply lacks the three arrays, and every reader that asks for a field
+    # by name is unaffected.
+    "endpoint_fidelity_grad_norm", "state_fidelity_grad_norm",
+    "gradient_aligned_authority", "log_gradient_aligned_authority",
 )
 STAGE_INT_FIELDS = ("stage", "image_row")
 
@@ -463,6 +605,7 @@ class RhsoStageRecorder:
         from .problems import make_phi_per_sample                  # local: import cycle
         self._phi_per_sample = make_phi_per_sample(problem, adapter.backend(),
                                                    spec.phi_normalization)
+        self._backend = adapter.backend()
         self._rows: Dict[int, List[Dict[str, Any]]] = {}
         self._predicted_endpoint: Optional[np.ndarray] = None       # p_k, native, NumPy
         self._predicted_pixels: Optional[np.ndarray] = None
@@ -508,6 +651,18 @@ class RhsoStageRecorder:
         else:
             values = np.asarray(values.detach().float().cpu().numpy(), np.float64)
         return values
+
+    def _fidelity_of_state(self, terminal_state):
+        """Phi as a differentiable function of the NATIVE terminal state.
+
+        The batch SUM of the per-sample fidelity, which is the same scalar the optimiser
+        differentiates (`sum_b make_phi_per_sample == make_phi`, asserted by a test) and
+        whose gradient therefore has, in row b, exactly image b's own endpoint gradient.
+        The adapter's differentiable `to_pixels` is inside Phi, not inside the terminal
+        map, so the Jacobian in the authority ratio is the terminal PREDICTOR's alone.
+        """
+        pixels = self.adapter.to_pixels(terminal_state, differentiable=True)
+        return self._backend.sum(self._phi_per_sample(pixels))
 
     def _predict_and_score(self, state, s: float):
         with self._clock():
@@ -569,6 +724,23 @@ class RhsoStageRecorder:
                     row["jacobian_" + key] = float(info.get(key, float("nan")))
                 if info.get("jacobian_error"):
                     row["jacobian_error"] = info["jacobian_error"]
+
+        if self.settings.gradient_authority:
+            # Measured at the state ENTERING the stage -- the same place and the same
+            # linearisation point as the Jacobian probe above -- because what it reports is
+            # the authority AVAILABLE when the stage begins.
+            with self._clock():
+                authority = probe_gradient_authority(
+                    self.adapter, lambda z, _s=float(s_from): self.predict(z, _s),
+                    x_in, self.real_rows, self._fidelity_of_state, self.counters)
+            for b, info in enumerate(authority[:self.real_rows]):
+                row = self._row(stage, b)
+                for key in ("endpoint_fidelity_grad_norm", "state_fidelity_grad_norm",
+                            "gradient_aligned_authority",
+                            "log_gradient_aligned_authority"):
+                    row[key] = float(info.get(key, float("nan")))
+                if info.get("gradient_authority_error"):
+                    row["gradient_authority_error"] = info["gradient_authority_error"]
 
     def end_stage(self, stage: int, q_star, anchor_penalty: Optional[float] = None) -> None:
         """V_post at the FINAL post-update q, and the endpoint p_k it predicts."""
@@ -719,4 +891,12 @@ def stage_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "jacobian_sigma_max_last": mean(last, "jacobian_sigma_max"),
         "jacobian_log_anisotropy_first": mean(first, "jacobian_empirical_log_anisotropy"),
         "jacobian_log_anisotropy_last": mean(last, "jacobian_empirical_log_anisotropy"),
+        # `mean` / `overall` already drop non-finite entries, so a stage whose ratio is the
+        # documented NaN is EXCLUDED from these averages rather than poisoning them; a
+        # summary over no finite value at all stays None.
+        "gradient_aligned_authority_first": mean(first, "gradient_aligned_authority"),
+        "gradient_aligned_authority_last": mean(last, "gradient_aligned_authority"),
+        "gradient_aligned_authority_mean": overall("gradient_aligned_authority"),
+        "endpoint_fidelity_grad_norm_mean": overall("endpoint_fidelity_grad_norm"),
+        "state_fidelity_grad_norm_mean": overall("state_fidelity_grad_norm"),
     }

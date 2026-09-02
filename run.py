@@ -528,7 +528,7 @@ def warmup_key(spec, problem) -> Tuple:
             # integrated suffix), and the diagnostics add traced computations of their own.
             spec.num_rhso_steps, spec.mu, spec.rhso_terminal_mode,
             spec.rhso_stage_diagnostics, spec.rhso_consistency_diagnostics,
-            spec.rhso_jacobian_diagnostics)
+            spec.rhso_jacobian_diagnostics, spec.rhso_gradient_authority_diagnostics)
 
 
 # =====================================================================================
@@ -562,6 +562,9 @@ RESULT_COLUMNS = [
     "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
     "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
     "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    "rhso_gradient_authority_diagnostics",
+    # Which common-random-number pairing group produced this row's measurement, if any.
+    "measurement_noise_group",
     # DIAGNOSTIC cost, kept strictly apart from the algorithmic counters above
     "diagnostic_model_evaluations", "diagnostic_network_forwards", "diagnostic_jvps",
     "diagnostic_vjps", "diagnostic_seconds",
@@ -573,6 +576,9 @@ RESULT_COLUMNS = [
     "fidelity_shift_execution_mean", "next_stage_recovery_mean",
     "jacobian_sigma_max_first", "jacobian_sigma_max_last",
     "jacobian_log_anisotropy_first", "jacobian_log_anisotropy_last",
+    "gradient_aligned_authority_first", "gradient_aligned_authority_last",
+    "gradient_aligned_authority_mean", "endpoint_fidelity_grad_norm_mean",
+    "state_fidelity_grad_norm_mean",
     # GPU memory (job peak at the configured batch size -- never per image)
     "gpu_baseline_gib", "gpu_peak_gib", "gpu_incremental_peak_gib", "gpu_memory_source",
     # The ONE memory metric that is comparable between PyTorch and JAX (see src/memory.py)
@@ -665,6 +671,8 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
                                       if spec.rhso_jacobian_diagnostics else None),
         "rhso_jacobian_seed": (spec.rhso_jacobian_seed
                                if spec.rhso_jacobian_diagnostics else None),
+        "rhso_gradient_authority_diagnostics": spec.rhso_gradient_authority_diagnostics,
+        "measurement_noise_group": spec.measurement_noise_group,
         # Diagnostic compute, never added to model_evaluations / network_forwards /
         # runtime: those keep their existing meaning as the ALGORITHM's cost.
         "diagnostic_model_evaluations": stats.diagnostic_model_evals,
@@ -833,7 +841,11 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
                 "convention rather than fabricated. jacobian_sigma_max is a power-iteration "
                 "estimate of the DOMINANT singular scale only; the gain statistics are "
                 "empirical sample-based anisotropy, and neither is an exact condition "
-                "number."),
+                "number. gradient_aligned_authority is "
+                "||J^T grad Phi|| / ||grad Phi|| of the FIDELITY ONLY -- the state-anchor "
+                "mu penalty is excluded -- measured at the state entering the stage, and "
+                "is NaN by convention whenever the endpoint gradient norm falls below "
+                "the documented threshold rather than being divided by an epsilon."),
         }
     save_json(out / "metadata.json", payload)
     arrays: Dict[str, Any] = {"reconstruction": to_uint8(run["pixels"])}
@@ -865,7 +877,8 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
 NEW_SPEC_FIELDS: Tuple[str, ...] = (
     "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
     "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
-    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed")
+    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    "rhso_gradient_authority_diagnostics", "measurement_noise_group")
 
 
 def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
@@ -888,8 +901,12 @@ def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
     if name in ("rhso_terminal_planner", "rhso_consistency_kind"):
         return True
     if name in ("rhso_stage_diagnostics", "rhso_consistency_diagnostics",
-                "rhso_jacobian_diagnostics"):
+                "rhso_jacobian_diagnostics", "rhso_gradient_authority_diagnostics"):
         return not value
+    if name == "measurement_noise_group":
+        # A stored artefact was produced with the original, unpaired seeding. A job that
+        # now asks for a pairing group wants a DIFFERENT y and must re-run.
+        return value is None
     return True
 
 

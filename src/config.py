@@ -325,7 +325,10 @@ RHSO_FIELDS: Tuple[str, ...] = (
     "num_rhso_steps", "num_opt_steps", "lr", "mu", "optimizer", "phi_normalization",
     "solver", "rhso_terminal_mode", "rhso_stage_diagnostics",
     "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
-    "rhso_jacobian_power_iters", "rhso_jacobian_seed")
+    "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    # TASK-ALIGNED endpoint authority; a separate, independently switchable measurement
+    # from the random-direction Jacobian probes above.  Off by default.
+    "rhso_gradient_authority_diagnostics")
 
 METHOD_DECLARATIONS: Dict[str, MethodDeclaration] = {
     "sdedit": MethodDeclaration(
@@ -388,7 +391,7 @@ SWEEPABLE_FIELDS: Tuple[str, ...] = (
     # RHSO terminal planner and theory-validation diagnostics
     "rhso_terminal_mode", "rhso_stage_diagnostics", "rhso_consistency_diagnostics",
     "rhso_jacobian_diagnostics", "rhso_jacobian_probes", "rhso_jacobian_power_iters",
-    "rhso_jacobian_seed",
+    "rhso_jacobian_seed", "rhso_gradient_authority_diagnostics",
 )
 MODEL_LEVEL_FIELDS: Tuple[str, ...] = ("guidance", "batch_size", "record_loss_history")
 
@@ -479,6 +482,7 @@ RHSO_DEFAULTS: Dict[str, Any] = {
     "rhso_stage_diagnostics": False,
     "rhso_consistency_diagnostics": False,
     "rhso_jacobian_diagnostics": False,
+    "rhso_gradient_authority_diagnostics": False,
     # NOT an untuned guess but a deliberate OFF switch: 0.0 is the vanilla objective, so
     # every RHSO configuration written before this field existed keeps its exact meaning.
     "mu": 0.0,
@@ -570,7 +574,11 @@ RUNTIME_KEYS = ("seed", "accelerator", "output_root", "cache_root",
 DATA_KEYS = ("source", "local_folder", "image_size")
 DEFAULTS_KEYS = SWEEPABLE_FIELDS + ("record_loss_history",)
 EXPERIMENT_KEYS = ("enabled", "problem", "num_images", "degradation", "defaults",
-                   "models", "notes")
+                   "models", "notes",
+                   # OPT-IN common-random-number measurement noise; see
+                   # utils.paired_measurement_noise_parts.  Absent (the default) reproduces
+                   # the repository's existing seeding exactly.
+                   "measurement_noise_group")
 MODEL_ENTRY_KEYS = ("methods",) + MODEL_LEVEL_FIELDS + SWEEPABLE_FIELDS
 METHOD_ENTRY_KEYS = SWEEPABLE_FIELDS + ("record_loss_history",)
 
@@ -788,7 +796,8 @@ def _validate_sweep_values(field_name: str, values: Sequence[Any], where: str, m
                 except ValueError as exc:
                     raise ConfigError("%s: %s" % (tag, exc))
         elif field_name in ("rhso_stage_diagnostics", "rhso_consistency_diagnostics",
-                            "rhso_jacobian_diagnostics"):
+                            "rhso_jacobian_diagnostics",
+                            "rhso_gradient_authority_diagnostics"):
             if not isinstance(v, bool):
                 raise ConfigError("%s: %s must be a boolean, got %r."
                                   % (tag, field_name, v))
@@ -943,6 +952,26 @@ def _validate_enabled_experiment(config, exp_name, block, where, warnings_) -> N
         raise ConfigError("%s.num_images must be a positive integer, got %r." % (where, n))
     if n == 1:
         warnings_.append("%s runs on a single image; comparisons will be anecdotal." % where)
+
+    group = block.get("measurement_noise_group")
+    if group is not None:
+        if not isinstance(group, str) or not group.strip():
+            raise ConfigError(
+                "%s.measurement_noise_group must be a non-empty string naming the pairing "
+                "group, or be omitted entirely.\n    It makes the standard-normal "
+                "measurement draw depend on (group, problem, structural degradation "
+                "parameters, image) but NOT on sigma, so a sweep over sigma reuses one "
+                "epsilon per image. Omitting it reproduces this repository's original "
+                "seeding exactly." % where)
+        if problem == "random_inpaint":
+            warnings_.append(
+                "%s pairs the measurement NOISE across sigma, but the random inpainting "
+                "MASK is still seeded from the full parameter key (sigma included), which "
+                "is this repository's existing behaviour and is deliberately left "
+                "unchanged. A sigma sweep on this task therefore re-draws the mask, so "
+                "(y - Ax)/sigma is NOT identical across the sweep. Pairing is exact for "
+                "denoising, deblurring, super-resolution and box inpainting, whose "
+                "operators do not depend on sigma." % where)
 
     params = _require_mapping(block.get("degradation"), "%s.degradation" % where)
     allowed = decl.required_params + decl.optional_params
@@ -1302,6 +1331,10 @@ class JobSpec:
     rhso_jacobian_probes: Optional[int] = None
     rhso_jacobian_power_iters: Optional[int] = None
     rhso_jacobian_seed: Optional[int] = None
+    # TASK-ALIGNED endpoint authority (see src/rhso_diagnostics.probe_gradient_authority).
+    # A separate measurement from the random-direction probes above, and like them an
+    # EXTRA one: it never enters the objective, the gradients or the executed trajectory.
+    rhso_gradient_authority_diagnostics: Optional[bool] = None
 
     # -- resolved schedule metadata (derived; see src/schedule.py) ----------------------
     # delta_nominal_uniform is (1 - s0)/N for this method's own trajectory and is reported
@@ -1314,6 +1347,11 @@ class JobSpec:
     expected_objective_evals: int = 0
     expected_data_gradients: int = 0
     expected_denoiser_samples: int = 0
+
+    # -- measurement realisation -------------------------------------------------------
+    # OPT-IN common-random-number pairing group, or None (the default) for the seeding this
+    # repository has always used.  Recorded on every row so a paired sweep is auditable.
+    measurement_noise_group: Optional[str] = None
 
     @property
     def is_mpc(self) -> bool:
@@ -1396,7 +1434,8 @@ class JobSpec:
             flags = "".join(letter for letter, on in
                             (("s", self.rhso_stage_diagnostics),
                              ("c", self.rhso_consistency_diagnostics),
-                             ("j", self.rhso_jacobian_diagnostics)) if on)
+                             ("j", self.rhso_jacobian_diagnostics),
+                             ("a", self.rhso_gradient_authority_diagnostics)) if on)
             if flags:
                 parts.append("diag=%s" % flags)
             if self.phi_normalization != PER_MEASUREMENT_NORMALIZATION:
@@ -1462,9 +1501,11 @@ class JobSpec:
         Printed separately from the method's own settings because none of it changes the
         reconstruction -- it only adds measurements about it.
         """
-        on = [name for name, flag in (("stage", self.rhso_stage_diagnostics),
-                                      ("consistency", self.rhso_consistency_diagnostics),
-                                      ("jacobian", self.rhso_jacobian_diagnostics)) if flag]
+        on = [name for name, flag in
+              (("stage", self.rhso_stage_diagnostics),
+               ("consistency", self.rhso_consistency_diagnostics),
+               ("jacobian", self.rhso_jacobian_diagnostics),
+               ("gradient_authority", self.rhso_gradient_authority_diagnostics)) if flag]
         return (" +diag(%s)" % ",".join(on)) if on else ""
 
     @property
@@ -1522,6 +1563,9 @@ class ProblemRequest:
     seed: int
     guide_mode: str
     experiments: Tuple[str, ...]
+    # Optional common-random-number pairing group.  Defaulted so a caller that predates the
+    # field -- including a test building a request by hand -- keeps the original seeding.
+    measurement_noise_group: Optional[str] = None
 
 
 @dataclass
@@ -1615,6 +1659,8 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
     "rhso_stage_diagnostics": RHSO_DEFAULTS["rhso_stage_diagnostics"],
     "rhso_consistency_diagnostics": RHSO_DEFAULTS["rhso_consistency_diagnostics"],
     "rhso_jacobian_diagnostics": RHSO_DEFAULTS["rhso_jacobian_diagnostics"],
+    "rhso_gradient_authority_diagnostics":
+        RHSO_DEFAULTS["rhso_gradient_authority_diagnostics"],
     "rhso_jacobian_probes": DEFAULT_JACOBIAN_PROBES,
     "rhso_jacobian_power_iters": DEFAULT_JACOBIAN_POWER_ITERATIONS,
     "rhso_jacobian_seed": DEFAULT_JACOBIAN_SEED,
@@ -1632,6 +1678,9 @@ SWEEP_ORDER: Tuple[str, ...] = (
     "rhso_terminal_mode", "rhso_stage_diagnostics", "rhso_consistency_diagnostics",
     "rhso_jacobian_diagnostics", "rhso_jacobian_probes", "rhso_jacobian_power_iters",
     "rhso_jacobian_seed",
+    # Appended, never inserted: a new axis with a single value leaves the Cartesian
+    # product's ORDER -- and therefore the resolved job list -- exactly as it was.
+    "rhso_gradient_authority_diagnostics",
 )
 
 
@@ -1752,13 +1801,21 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
         problem_params = dict(decl.default_params)
         problem_params.update(block.get("degradation") or {})
         params_key = canonical_params_key(problem_params)
+        noise_group = block.get("measurement_noise_group") or None
         # The problem identity depends on (problem, parameters, seed) ONLY -- never on the
         # experiment name, the model or the method, so two experiments asking for the same
         # specification provably share one measurement.
-        pkey = "prob_" + stable_hash(problem, params_key, seed)
+        # The pairing group takes part ONLY when it is set, so a configuration that never
+        # mentions it keeps the problem keys -- and with them the shared measurements and
+        # the output paths -- it had before the field existed.  Two experiments that differ
+        # only in their group are two different measurement realisations and must not share
+        # one InverseProblem.
+        pkey = "prob_" + (stable_hash(problem, params_key, seed, "group", noise_group)
+                          if noise_group else stable_hash(problem, params_key, seed))
         entry = problem_entries.setdefault(pkey, {
             "key": pkey, "problem": problem, "params": problem_params, "num_images": num_images,
-            "seed": seed, "guide_mode": decl.guide_mode, "experiments": []})
+            "seed": seed, "guide_mode": decl.guide_mode, "experiments": [],
+            "measurement_noise_group": noise_group})
         entry["experiments"].append(exp_name)
         # A larger request supersedes a smaller one: same seed, same per-image draws, so the
         # smaller set is a prefix of the larger.
@@ -1817,7 +1874,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                     for name in ("rhso_terminal_mode", "rhso_stage_diagnostics",
                                  "rhso_consistency_diagnostics",
                                  "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
-                                 "rhso_jacobian_power_iters", "rhso_jacobian_seed"):
+                                 "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+                                 "rhso_gradient_authority_diagnostics"):
                         axis(name, BUILTIN_DEFAULTS[name])
                     # MeanFlow adapters have default_solver None, so a MeanFlow RHSO job
                     # resolves to no solver and the validator rejects any explicit one.
@@ -1940,6 +1998,12 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         # rhso_diagnostics.settings_from_spec).
                         if values["rhso_consistency_diagnostics"]:
                             values["rhso_stage_diagnostics"] = True
+                        # Same rule, same reason: the authority numbers are recorded on the
+                        # per-(image, stage) rows that the stage bookkeeping creates, so
+                        # asking for them alone is not an error and must not silently
+                        # measure nothing.
+                        if values["rhso_gradient_authority_diagnostics"]:
+                            values["rhso_stage_diagnostics"] = True
                     else:
                         terminal_planner = consistency = None
 
@@ -1973,7 +2037,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                                     values["rhso_terminal_mode"]))
                         for name in ("rhso_stage_diagnostics",
                                      "rhso_consistency_diagnostics",
-                                     "rhso_jacobian_diagnostics"):
+                                     "rhso_jacobian_diagnostics",
+                                     "rhso_gradient_authority_diagnostics"):
                             if values[name]:
                                 identity_extras.append((name, True))
                         if values["rhso_jacobian_diagnostics"]:
@@ -1983,6 +2048,12 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                                  values["rhso_jacobian_seed"]))
                     if identity_extras:
                         hash_parts.append(tuple(identity_extras))
+                    # Appended ONLY when the experiment opts in, so an unpaired
+                    # configuration keeps every job id it had before this field existed.
+                    # sigma is already inside params_key above, so two noise levels remain
+                    # separate jobs whether or not they share an epsilon.
+                    if noise_group:
+                        hash_parts.append(("measurement_noise_group", noise_group))
                     job_id = stable_hash(*hash_parts, size=6)
 
                     specs.append(JobSpec(
@@ -2055,6 +2126,10 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
                         rhso_jacobian_seed=(
                             None if values["rhso_jacobian_seed"] is None
                             else int(values["rhso_jacobian_seed"])),
+                        rhso_gradient_authority_diagnostics=(
+                            None if values["rhso_gradient_authority_diagnostics"] is None
+                            else bool(values["rhso_gradient_authority_diagnostics"])),
+                        measurement_noise_group=noise_group,
                         delta_nominal_uniform=delta_nominal,
                         delta_min=delta_min, delta_max=delta_max,
                         expected_objective_evals=cost["objective_evals"],
@@ -2161,7 +2236,8 @@ def resolve_run_plan(config: Dict[str, Any], warnings_: Sequence[str] = (),
     problem_requests = tuple(
         ProblemRequest(key=e["key"], problem=e["problem"], params=e["params"],
                        num_images=e["num_images"], seed=e["seed"], guide_mode=e["guide_mode"],
-                       experiments=tuple(dict.fromkeys(e["experiments"])))
+                       experiments=tuple(dict.fromkeys(e["experiments"])),
+                       measurement_noise_group=e.get("measurement_noise_group"))
         for e in problem_entries.values())
 
     return RunPlan(run_id=run_id, created=datetime.datetime.now().isoformat(), seed=seed,
@@ -2352,6 +2428,10 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
                         print("      theory diagnostics %s   (EXTRA measurements; excluded "
                               "from the runtime and the algorithmic counters)"
                               % ", ".join(diag))
+                        if any(s.measurement_noise_group for s in sel):
+                            print("      measurement noise group %s   (one epsilon per "
+                                  "image across sigma)"
+                                  % _axis(sel, "measurement_noise_group"))
                         if any(s.rhso_jacobian_diagnostics for s in sel):
                             print("      jacobian probes %s | power iters %s | seed %s"
                                   % (_axis(sel, "rhso_jacobian_probes", "%s"),
@@ -2429,6 +2509,11 @@ def print_run_plan(plan: RunPlan, accel: Optional[Dict[str, Any]] = None,
     print("    x_hat_1(q, s_k). Both cost one terminal-planner evaluation per inner")
     print("    objective, but they are not the same learned object and are never reported")
     print("    as one. `suffix` is the legacy JiT planner that integrates the remainder.")
+    print("  * The gradient-aligned authority diagnostic reports")
+    print("    ||J^T g_end|| / ||g_end|| with g_end the FIDELITY-ONLY endpoint gradient;")
+    print("    the state-anchor mu penalty is deliberately excluded, and the ratio is NaN")
+    print("    (never a division by an invented epsilon) when the endpoint gradient")
+    print("    vanishes. It is a measurement, not part of the objective.")
     print("  * Theory diagnostics are EXTRA measurements: their model evaluations, JVPs and")
     print("    VJPs are counted in the diagnostic_* columns and their time is subtracted")
     print("    from the reported runtime, so `runtime` stays algorithm runtime.")

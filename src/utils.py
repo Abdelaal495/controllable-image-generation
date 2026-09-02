@@ -113,6 +113,36 @@ def measurement_noise_parts(problem: str, params_key: str, image_id: Any) -> Tup
     return ("measurement", problem, params_key, str(image_id))
 
 
+# The seed identity of ONE standard-normal measurement draw when an experiment opts in to a
+# `measurement_noise_group` (see src/problems.build_problem).  It differs from
+# `measurement_noise_parts` in exactly one respect: `structural_params_key` is the canonical
+# problem-parameter key with the noise amplitude `sigma` REMOVED, so a sweep over sigma
+# reuses one epsilon per (group, problem, structural operator parameters, image) and only
+# rescales it.  Every other degradation parameter still takes part, so a different blur
+# width, box size or missing fraction remains an independent realisation, and a different
+# group is an independent realisation of everything.
+#
+# This recipe is deliberately NOT added to SEED_RECIPES below: that dictionary is copied
+# verbatim into every resolved JobSpec, and a job already written to disk by an earlier
+# version of this repository would stop matching on resume if its contents changed.  It is
+# recorded in the problem metadata of the runs that actually use it instead.
+PAIRED_MEASUREMENT_SEED_RECIPE = (
+    "seed(global_seed, 'measurement_paired', measurement_noise_group, problem, "
+    "structural_problem_params_key, image_id)  -- sigma deliberately excluded so that "
+    "different noise levels share one standard-normal realisation")
+
+
+def paired_measurement_noise_parts(group: str, problem: str, structural_params_key: str,
+                                   image_id: Any) -> Tuple[Any, ...]:
+    """Identity of one COMMON-RANDOM-NUMBER measurement-noise draw.
+
+    Opt-in only.  With no pairing group the repository uses `measurement_noise_parts`
+    exactly as before, and this function is never called.
+    """
+    return ("measurement_paired", str(group), problem, str(structural_params_key),
+            str(image_id))
+
+
 def mask_parts(problem: str, params_key: str, image_id: Any) -> Tuple[Any, ...]:
     return ("mask", problem, params_key, str(image_id))
 

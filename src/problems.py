@@ -44,9 +44,10 @@ from PIL import Image
 from .config import PROBLEM_DECLARATIONS, STROKE_PRESETS, ProblemRequest
 from .utils import (Backend, NUMPY_BACKEND, assert_pixel_batch, canonical_params_key,
                     derive_rng, gaussian_kernel_1d, gaussian_noise, mask_parts,
-                    measurement_noise_parts, pixel_fingerprint, separable_gaussian_blur,
+                    measurement_noise_parts, paired_measurement_noise_parts,
+                    pixel_fingerprint, separable_gaussian_blur,
                     stroke_geometry_parts, timed, to_float, to_uint8, CANONICAL_RESOLUTION,
-                    SEED_RECIPES)
+                    PAIRED_MEASUREMENT_SEED_RECIPE, SEED_RECIPES)
 
 
 # =====================================================================================
@@ -375,6 +376,14 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
     sigma = float(cfg.get("sigma", 0.0))
     params = {k: v for k, v in cfg.items() if k != "sigma"}
     params_key = canonical_params_key(cfg)
+    # OPT-IN common-random-number pairing (see utils.paired_measurement_noise_parts).  With
+    # no group -- the default and every configuration written before this field existed --
+    # `noise_group` is None and every seed below is byte for byte the one it always was.
+    # The structural key is the canonical parameter key WITHOUT sigma, so a sigma sweep
+    # keeps one epsilon per image while a different operator still gets its own.
+    noise_group = getattr(request, "measurement_noise_group", None) or None
+    structural_params_key = canonical_params_key(
+        {k: v for k, v in cfg.items() if k != "sigma"})
     mask = None
     geometry = None
 
@@ -429,9 +438,13 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
 
     # Noise is drawn in MEASUREMENT space, once per (problem, params, image).
     if sigma > 0.0:
-        noise = np.stack([gaussian_noise(clean.shape[1:],
-                                         *measurement_noise_parts(name, params_key,
-                                                                  image_ids[i]))
+        def noise_parts(i: int):
+            if noise_group:
+                return paired_measurement_noise_parts(noise_group, name,
+                                                      structural_params_key, image_ids[i])
+            return measurement_noise_parts(name, params_key, image_ids[i])
+
+        noise = np.stack([gaussian_noise(clean.shape[1:], *noise_parts(i))
                           for i in range(n)], axis=0)
         if mask is not None:
             # Unobserved entries must not become observations: the residual A(x) - y is then
@@ -446,7 +459,11 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
     probe.display_measurement = _display_measurement(name, y, params)
     probe.initialization_guide = build_initialization_guide(probe, request.guide_mode)
     probe.metadata = {
-        "measurement_seed_recipe": SEED_RECIPES["measurement"],
+        "measurement_seed_recipe": (PAIRED_MEASUREMENT_SEED_RECIPE if noise_group
+                                    else SEED_RECIPES["measurement"]),
+        # Auditable on every row: null means the default, unpaired seeding.
+        "measurement_noise_group": noise_group,
+        "structural_problem_params_key": structural_params_key if noise_group else None,
         "mask_seed_recipe": SEED_RECIPES["mask"] if mask is not None else None,
         "stroke_geometry_seed_recipe": (SEED_RECIPES["stroke_geometry"]
                                         if geometry is not None else None),

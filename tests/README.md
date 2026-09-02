@@ -11,6 +11,7 @@ python tests/test_beta_schedule.py          # pure Python (+ pyyaml for the conf
 python tests/test_rhso.py                   # needs jax + optax
 python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
 python tests/test_cluster_and_aggregation.py  # needs pyyaml + bash (no jax/torch)
+python tests/test_theory_extensions.py      # needs jax + pyyaml
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -118,6 +119,55 @@ by substring search, since the docstring forbidding it names it) and never fills
 `gpu_process_peak_gib` from a framework counter; and that the four theory configs still
 resolve to 4 / 70 / 10 / 10 atomic jobs with the matched-budget pairs and the two distinct
 terminal-planner identities intact.
+
+`test_theory_extensions.py` covers the two opt-in capabilities added for the six theory
+experiments, and the six configurations themselves.
+
+For the **paired measurement noise** (`measurement_noise_group`) it checks: that with no
+group the built `y` is **bitwise** what an independent transcription of the original seeding
+expression produces; that `(y − Ax)/σ` is identical across `σ ∈ {0.1, 0.2, 0.4}` inside one
+group and that the shared draw really is standard normal; that a different group, and a
+different image id, each re-draw independently while the other images keep their own `ε`;
+that a different *structural* parameter (`blur_sigma` 1.0 vs 2.0) stays independent while
+two `σ` at one blur width stay paired — i.e. only the noise **amplitude** is excluded from
+the seed; that rebuilding a request reproduces `y` bitwise; that the mask is bitwise
+unchanged with and without a group, so the feature touches the noise seed and never the
+operator; and that the group and the recipe actually used are recorded in the problem
+metadata.
+
+For the **gradient-aligned authority** diagnostic it checks against a closed form — a linear
+terminal map `P(x) = Dx` with a quadratic fidelity, where `A = ‖Dᵀg‖/‖g‖` is known exactly —
+that the two norms and the ratio match analytically (max relative error ~3e-8), that the log
+field is the log of the ratio, that an image scores the same alone as inside a batch of
+three (per-image isolation), that `real_rows` truncation keeps padded rows out, that the
+probe is deterministic, that its cost lands only in `diagnostic_model_evals` /
+`diagnostic_vjps`, and that a vanishing endpoint gradient yields the documented **NaN**
+while both norms stay on the row. It then runs `rhso.meanflow_rhso` end to end with the flag
+on and off and asserts the executed states are **bitwise identical**, that every algorithmic
+counter matches, that the diagnostic counters and clock fill only when the flag is on, that
+there is exactly one populated row per (image, stage), and that the default run records
+nothing at all. Serialisation is checked by round-tripping the new `[image, stage]` arrays
+through a real `.npz` **without** `allow_pickle`, and by showing the summary averages skip a
+`NaN` row instead of propagating it.
+
+For **backward compatibility** it asserts both fields default to off, that a spec predating
+either field resolves to the old behaviour, that
+`configs/experiments_theory_validation_final100.yaml` still resolves to 70 jobs with the
+four matched pairs and unchanged job ids and leaf directories, and that turning the new flag
+on in one experiment block moves **exactly** that block's 2 job ids while the other 68 are
+untouched — so a partially-completed sweep keeps its results.
+
+For the **six new configurations** it pins each one's job count, uniqueness, models, methods
+and image count, and then the scientific content of each: that Experiment 1 is D-Flow with
+`steps=4`, 160 iterations, Heun and the validated JiT learning rate; that 2A's six pairs all
+satisfy `N·M = 160` and are not a 36-job Cartesian product; that 2B holds `M = 40` while `B`
+runs 40 → 640; that the noise sweep carries one pairing group across four `σ` that remain
+four distinct problem instances; that the `mu` sweep is log-spaced including 0 at both
+`(4,40)` and `(8,20)` with the loss-history split enabled; that `beta` moves the stage times
+in the documented direction (`s₁ = 0.5000` at `β=0.5`, `0.2500` uniform, `0.0625` at `β=2`)
+and that `delta` is null off the uniform grid; and that Experiment 6 enables both
+diagnostics on exactly the jacobian config's settings, images and probe seed while keeping
+the old jobs' identities disjoint.
 
 ## What these tests do NOT cover
 

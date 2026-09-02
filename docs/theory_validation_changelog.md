@@ -193,3 +193,67 @@ block and reads them back without `allow_pickle`.
    and a new output directory — correctly, since it is a different experiment.
 8. `results.csv` gained ~30 columns. Anything parsing it positionally rather than by header
    will need updating.
+
+---
+
+# Addendum — the six follow-up theory experiments
+
+Scope: **two small opt-in capabilities, six configurations, one test script.** No
+reconstruction algorithm was touched. RHSO, JiT, pMF, D-Flow, the solvers, the optimisers,
+the inverse problems, the logging, the Slurm infrastructure and the aggregation behave
+exactly as before for every configuration that does not ask for the new features.
+
+## What needed code, and what did not
+
+| Experiment | Needed code? | Why |
+| --- | --- | --- |
+| 1 — JiT one-shot multi-step suffix | No | The existing D-Flow path already optimises one state, differentiates through the full multi-step trajectory, uses `canonical_time_grid`, and honours `solver: heun` with JiT's final-Euler policy. `steps: 4, num_opt_steps: 160` is the experiment. |
+| 2A / 2B — larger `N` | No | `num_rhso_steps` and `num_opt_steps` are already sweepable; matched pairs get one named block each. |
+| 3 — noise sweep | **Yes** | The measurement seed included `sigma`, so changing `σ` re-drew `ε`. Added `measurement_noise_group`. |
+| 4 — `mu` ablation | No | The state anchor is already implemented, detached, per-stage, reset to the executed state, sweepable, and `mu = 0` is the vanilla objective bitwise. |
+| 5 — `beta` schedule | No | `beta` is already a shared, sweepable field and the real stage times are already recorded. |
+| 6 — endpoint authority | **Yes** | The existing probes are random-direction only. Added `rhso_gradient_authority_diagnostics`. |
+
+Both new fields are documented in `docs/schedule_and_rhso.md` §E.
+
+## Discrepancies found while verifying the prompt's assumptions
+
+1. **`random_inpaint` masks are seeded with `sigma` in the key.** A σ sweep on that task
+   re-draws the mask, so the pairing guarantee `(y − Ax)/σ` constant does **not** hold
+   there. Existing mask seeding was deliberately left untouched (changing it would alter
+   validated results); the validator now warns whenever a pairing group meets
+   `random_inpaint`, and §E.1 states the limitation. Experiment 3 is denoising-only, where
+   the operator is the identity, so the required experiment is unaffected.
+2. **A Jacobian-only configuration was already a silent no-op**, because the probe sits
+   behind `begin_stage`'s `settings.stage` guard. Rather than restructure that guard — which
+   would change behaviour for such a configuration — the new authority flag follows the
+   precedent the consistency diagnostic already sets and **implies** the stage bookkeeping.
+   Nothing about existing configurations changes; all of them already set
+   `rhso_stage_diagnostics: true`.
+3. **`SEED_RECIPES` was deliberately not extended.** It is copied verbatim into every
+   `JobSpec` and compared field-by-field by `run._resolved_spec_matches`, so adding a key
+   would have broken `--resume` against artefacts already on disk. The paired recipe lives
+   in `utils.PAIRED_MEASUREMENT_SEED_RECIPE` and is written into the problem metadata of the
+   runs that use it.
+
+## Additional caveats for this addendum
+
+9. `run.NEW_SPEC_FIELDS` and `_describes_legacy_behaviour` were extended so a stored job
+   predating the two new spec fields is still resumable **only** when the new job would run
+   the same computation — `measurement_noise_group is None` and the authority flag off. A
+   job that now asks for either correctly re-runs.
+10. `results.csv` gained 7 columns (the two flags plus five authority summaries). Anything
+    parsing it positionally rather than by header needs updating; parsing by header is
+    unaffected.
+11. `configs/experiments_theory_N_fixedM_final100.yaml` is the most expensive file in the
+    suite (`B = 40N` up to 640 iterations per image at `N = 16`, ~7.75× one matched-budget
+    task-model column). It is at the full 100 images deliberately. Submit it as a job array
+    rather than reducing `num_images`, which would break comparability.
+12. **PyTorch is still not installable in this environment**, so `rhso.flow_rhso` and
+    `_authority_torch` were not executed. The authority probe's JAX twin is executed against
+    an analytic linear map; the Torch path is the same three-step recipe (forward → gradient
+    of the fidelity at the endpoint → VJP with that gradient as cotangent). Verify it on a
+    GPU with `python run.py --config configs/experiments_theory_gradient_authority.yaml
+    --check` before launching the large jobs.
+13. The `mu` values in Experiment 4 are a documented order-of-magnitude argument, not
+    privileged values. The reasoning is written out in that config's header.

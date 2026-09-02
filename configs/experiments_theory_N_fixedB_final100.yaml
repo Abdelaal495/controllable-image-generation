@@ -1,0 +1,558 @@
+# EXPERIMENT 2A -- LARGER N AT A FIXED TOTAL OPTIMISER BUDGET  B = N*M = 160
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# Does distributing a FIXED optimisation budget over more stages keep helping, or is there
+# an N beyond which per-stage starvation (M = B/N shrinks) undoes the benefit of
+# replanning? The validated suite already covers N in {1, 2, 4, 8}; this extends the curve
+# to N = 16 and N = 32, where M falls to 10 and 5 optimizer iterations per stage.
+#
+# HELD FIXED  : B = 160, t0 = 1.0 (canonical start s = 0), beta = 1.0, mu = 0.0, direct
+#               terminal planning, 100 frozen images, seed 42, and the task-specific
+#               learning rates of the validated runs. NOTHING is retuned per N.
+# SWEPT       : (N, M) over the six MATCHED pairs below, and the model.
+# DIAGNOSTICS : stage + consistency (the standard bookkeeping of the theory suite);
+#               Jacobian and gradient-authority probes are OFF -- they belong in
+#               configs/experiments_theory_gradient_authority.yaml.
+#
+# WHY ONE NAMED BLOCK PER PAIR
+# ----------------------------
+# num_rhso_steps and num_opt_steps are INDEPENDENT sweep axes: writing
+#     num_rhso_steps: [1, 2, 4, 8, 16, 32]
+#     num_opt_steps: [160, 80, 40, 20, 10, 5]
+# in one block would expand to the 36-job Cartesian product, 30 of which have N*M != 160.
+# Each matched pair therefore gets its own experiment block, exactly as
+# configs/experiments_theory_validation_final100.yaml does.
+#
+# N = 1, 2, 4 and 8 are REPEATED here so the complete curve is reproducible from one
+# config. They resolve to the same settings as the validated suite, but to different job
+# ids (the experiment name takes part in the identity), so this file cannot overwrite or
+# silently reuse the existing results -- and configs/experiments_theory_validation_final100
+# .yaml is left untouched.
+#
+# Expected scale: 5 tasks x 6 (N, M) pairs x 2 models = 60 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_N_fixedB_final100.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 256
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_B160_N1:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_B160_N2:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_B160_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_B160_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_B160_N16:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_B160_N32:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N1:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N2:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N4:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N8:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N16:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  deblurring_B160_N32:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N1:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N2:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N4:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N8:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N16:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  super_resolution_B160_N32:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N1:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N2:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N4:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N8:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N16:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  box_inpainting_B160_N32:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N1:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N2:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N4:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N8:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N16:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  random_inpainting_B160_N32:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
