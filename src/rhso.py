@@ -95,7 +95,9 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from .dflow import flow_step, integrate_flow, solver_evaluations
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
@@ -103,6 +105,42 @@ from .problems import make_phi, phi_log_scale
 from .schedule import canonical_time_grid, spec_beta
 from .sdedit import ReconstructionStats, _is_finite
 from .utils import MEANFLOW, STANDARD_FLOW
+
+
+# =====================================================================================
+# Optional stage-by-stage trace -- off by default, and never read back by the algorithm
+# =====================================================================================
+# The paper's trajectory figure needs the states RHSO passes through, and no result file
+# records them: a run writes only the reconstruction.  Install a list here and every outer
+# stage appends one record to it.
+#
+# Nothing in a record feeds back into q, the gradient, the grid or the counters, so a
+# traced run executes the identical sequence of operations as an untraced one; the two
+# differ only in the extra terminal predictions, which are evaluated AFTER the stage's
+# counters have been folded into `stats` and are followed by `reset_counters()`, so they
+# cannot reach any reported number.  Leave it None for benchmarking.
+TRACE: Optional[List[Dict[str, Any]]] = None
+
+
+def _trace_stage(adapter: ModelAdapter, cond: Conditioning, stage: int, s_k: float,
+                 s_next: float, anchor, optimised, executed) -> None:
+    """One record per outer stage, in canonical pixel space (s = 0 noise, s = 1 clean)."""
+    def terminal(state):
+        return np.asarray(adapter.to_pixels(adapter.transition(state, s_k, 1.0, cond)),
+                          np.float32)
+
+    TRACE.append({
+        "stage": stage, "s": s_k, "s_next": s_next,
+        # the state this stage started from, and the state one interval of execution
+        # actually reached -- the two ends of the visible trajectory
+        "state_in": np.asarray(adapter.to_pixels(anchor), np.float32),
+        "state_out": np.asarray(adapter.to_pixels(executed), np.float32),
+        # what the model would call the clean image, before and after this stage's inner
+        # optimisation: the pair that shows what the optimisation actually bought
+        "predicted_before": terminal(anchor),
+        "predicted_after": terminal(optimised),
+    })
+    adapter.reset_counters()
 
 
 def rhso_time_grid(spec) -> List[float]:
@@ -433,6 +471,8 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
         x = jax.lax.stop_gradient(adapter.transition(q, s_k, s_next, cond))
         stats.model_evals_total += 1
         stats.network_forwards += adapter.forward_counter
+        if TRACE is not None:
+            _trace_stage(adapter, cond, k, s_k, s_next, x_anchor, q, x)
         if not _is_finite(adapter, x):
             raise FloatingPointError(
                 "%s produced a non-finite state executing RHSO transition %d/%d "

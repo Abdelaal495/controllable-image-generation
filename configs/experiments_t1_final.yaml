@@ -1,0 +1,497 @@
+# =====================================================================================
+# FINAL BENCHMARK at t0 = 1.0 -- 100 classes, one image each, three models
+# =====================================================================================
+#
+#   python build_local_imagenet_pool.py --num-classes 100 --seed 0   # once
+#   python run.py --config configs/experiments_t1_final.yaml --dry-run
+#   python run.py --config configs/experiments_t1_final.yaml --run-id t1_final --no-figures
+#
+# 6 problems x 3 models x 6 strategies = 108 atomic jobs, 100 images each.  Nothing is
+# swept: each entry is the configuration that won its cell in configs/experiments_t1_hpo.yaml
+# (342 jobs, 8 images, zero failures), and the trailing comment on each line is what that
+# setting scored there.
+#
+# t0 = 1.0 is the repository's pure-noise start, which is the draft's t0 = 0 -- the two
+# conventions are inverses of one another (draft eq. 13 puts the guide weight on t0, this
+# repository puts the noise weight on it).  This is the draft's primary-benchmark setting.
+#
+# iMF IS ABSENT ON PURPOSE.  At the draft's hyperparameter budgets one iMF pass over five
+# tasks at 100 images costs roughly 533 GPU-hours against ~35 for pMF and JiT together, so
+# it is being run on separate hardware.  Merge it afterwards with --aggregate.
+#
+# BATCHING.  At batch 2 this run left the GPU at 26% utilisation and 8.6 of 24.5 GiB, so
+# each problem is split into three experiments by memory class -- `__core` (SDEdit, PnP,
+# D-Flow, MPC-dt), `__rhc` (MPC-RHC) and `__rhso` -- because `batch_size` resolves per
+# (experiment, model) and cannot vary per method, so one shared value would be held down by
+# whichever method is heaviest.  The sizes below come from `gpu_peak_gib` of the winning
+# configuration in outputs/t1_hpo/results.csv, extrapolated linearly off batch 2 and capped
+# at 18 GiB for pMF (NVML, true footprint) and 16 GiB for JiT/SiT (torch reports
+# max_memory_allocated, which excludes the CUDA context and fragmentation).
+#
+#              core   rhc  rhso        heaviest measured peak at batch 2
+#      jit       20    10     5        rhso  5.35 GiB
+#      sit        8     5     3        rhso 12.91 GiB
+#      pmf       10  3/10    10        rhc  12.99 GiB (K=3) / 2.83 (K=1)
+#
+# pMF's sizes were then RE-FITTED on measurement.  Peak is not proportional to batch: the
+# same job read 7.94 GiB at batch 2 and 12.24 at batch 5, i.e. peak = 5.07 + 1.433 B, so
+# the batch-2 number carries 5.07 GiB of graph that does not grow.  Extrapolating through
+# the origin therefore over-charges every image and had capped pMF at 5; the fitted line
+# puts batch 10 at 19.4 GiB.  MPC-RHC splits on K, which is per problem: its K=1 winners
+# peak at 2.83 GiB where its K=3 winners peak at 12.99, so the three K=3 problems keep a
+# small batch and the rest do not.  JiT and SiT still carry the un-refitted estimate and
+# are therefore conservative; refit them once their first jobs report a peak.
+#
+# Splitting is safe for the paired protocol: seeds derive from (problem params, image id),
+# never from the experiment name, so the measurement, the mask and epsilon are bit-identical
+# across the three splits.  Only `job_id` changes, which costs resume its history -- fine
+# here, nothing had finished.  Verify with the `shared_initial_state` check at startup.
+#
+# HOST memory, not device memory, is what binds the JAX models: iMF at batch 8 peaked at
+# only 1.3 GiB on the device but sawtoothed to 55 GiB of RSS on a 62 GiB machine and was
+# OOM-killed.  pMF at batch 5 is far below that; measure `ps -o rss` before raising it.
+#
+# On the two inpainting problems, full-image LPIPS and PSNR are dominated by the pixels the
+# measurement already supplies -- read missing_psnr alongside them.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 200
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # Built by: python build_local_imagenet_pool.py --num-classes 100 --seed 0
+  # hf_imagenet_val cannot serve 100 images: src.data.IMAGENET_EXAMPLES holds 32 classes.
+  source: local_folder
+  local_folder: "cache/data/imagenet_val_100"
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 2
+  pmf:
+    batch_size: 2
+  sit:
+    batch_size: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising__core:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.1916 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7204 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.3213 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5124 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.4942 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.2669 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.1836 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.2656 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.3439 at 8 images
+
+  denoising__rhc:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.3330 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.3912 at 8 images
+      pmf:
+        batch_size: 3
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.2523 at 8 images
+
+  denoising__rhso:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 1.0, solver: heun}   # LPIPS 0.1461 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, solver: heun}   # LPIPS 0.3028 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 1.0}   # LPIPS 0.1041 at 8 images
+
+  deblurring__core:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.3884 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7223 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.1918 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5359 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.5880 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 540.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.2845 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.3217 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.4072 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.2009 at 8 images
+
+  deblurring__rhc:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.1689 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.4099 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.1549 at 8 images
+
+  deblurring__rhso:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, solver: heun}   # LPIPS 0.1414 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, solver: heun}   # LPIPS 0.3220 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0}   # LPIPS 0.1326 at 8 images
+
+  super_resolution__core:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.2086 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7193 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.1162 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5088 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.5541 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 540.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.3380 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.1929 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.2515 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.1141 at 8 images
+
+  super_resolution__rhc:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.2036 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.4564 at 8 images
+      pmf:
+        batch_size: 3
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.2284 at 8 images
+
+  super_resolution__rhso:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.2, solver: heun}   # LPIPS 0.1079 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, solver: heun}   # LPIPS 0.3294 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.2}   # LPIPS 0.1055 at 8 images
+
+  box_inpainting__core:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.2227 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7201 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.0422 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5140 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.4915 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 540.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.2437 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.1894 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.3032 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.0499 at 8 images
+
+  box_inpainting__rhc:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.0674 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.3752 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.0851 at 8 images
+
+  box_inpainting__rhso:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, solver: heun}   # LPIPS 0.0479 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, solver: heun}   # LPIPS 0.2937 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0}   # LPIPS 0.0789 at 8 images
+
+  random_inpainting__core:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.2077 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7200 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.0995 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5124 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.5375 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 540.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.3077 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.1896 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.3017 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.1086 at 8 images
+
+  random_inpainting__rhc:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.2074 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.4254 at 8 images
+      pmf:
+        batch_size: 3
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 3, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.2417 at 8 images
+
+  random_inpainting__rhso:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, solver: heun}   # LPIPS 0.0921 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, solver: heun}   # LPIPS 0.3257 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.2}   # LPIPS 0.1000 at 8 images
+
+  stroke_painting__core:
+    enabled: true
+    problem: stroke_painting
+    num_images: 100
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      jit:
+        batch_size: 20
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}   # LPIPS 0.7161 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5918 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.7515 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.5033 at 8 images
+      sit:
+        batch_size: 8
+        methods:
+          sdedit:      {t0: 1.0, steps: 4, solver: heun}   # LPIPS 0.7232 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 100, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.7190 at 8 images
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.6486 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 4, lam: 540.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.5067 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}   # LPIPS 0.7135 at 8 images
+          pnp:         {t0: 1.0, num_pnp_steps: 20, gamma0: 100000.0, alpha: 0.5}   # LPIPS 0.5289 at 8 images
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}   # LPIPS 0.6415 at 8 images
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: 8, lam: 180.0, n_ctrl: 40, lr: 0.1}   # LPIPS 0.5708 at 8 images
+
+  stroke_painting__rhc:
+    enabled: true
+    problem: stroke_painting
+    num_images: 100
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      jit:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.4119 at 8 images
+      sit:
+        batch_size: 5
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 240.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.5620 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: 1, lam: 60.0, n_ctrl: 40, lr: 0.05}   # LPIPS 0.4644 at 8 images
+
+  stroke_painting__rhso:
+    enabled: true
+    problem: stroke_painting
+    num_images: 100
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      jit:
+        batch_size: 5
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 1.0, solver: heun}   # LPIPS 0.5042 at 8 images
+      sit:
+        batch_size: 3
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.2, solver: heun}   # LPIPS 0.5619 at 8 images
+      pmf:
+        batch_size: 10
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 1.0}   # LPIPS 0.5176 at 8 images

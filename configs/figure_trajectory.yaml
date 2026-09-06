@@ -1,0 +1,71 @@
+# =====================================================================================
+# RHSO TRAJECTORY FIGURE -- one run per inpainting problem, traced stage by stage
+# =====================================================================================
+#
+#   python make_paper_figures.py --figure trajectory
+#
+# Six jobs, eight images, pMF only.  Every entry is the setting that won its cell in
+# configs/experiments_t1_hpo.yaml, so the figure shows the method the benchmark reports and
+# not a configuration invented to look good.  `num_rhso_steps` is swept 4 / 6 / 8 purely to
+# choose a panel count for the figure: N is the number of intervals, so a traced run has
+# N + 1 states to draw, and N = 4 gives five.
+#
+# The trace itself is `src.rhso.TRACE`, which the figure script installs; a benchmark run
+# leaves it None and is unaffected.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: false
+  continue_on_experiment_error: false
+  progress_bars: false
+  save_individual_images: true
+  resume: false
+  replicate: 0
+  verbose: true
+  gpu_memory_profiling: false
+
+data:
+  source: local_folder
+  local_folder: "cache/data/imagenet_val_100"
+  image_size: 256
+
+models:
+  pmf:
+    batch_size: 8
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      pmf:
+        methods:
+          rhso: {t0: 1.0, num_rhso_steps: [4, 6, 8], num_opt_steps: 40, lr: 0.01, mu: 0.0}
+
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      pmf:
+        methods:
+          rhso: {t0: 1.0, num_rhso_steps: [4, 6, 8], num_opt_steps: 40, lr: 0.01, mu: 0.2}

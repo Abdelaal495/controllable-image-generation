@@ -1,0 +1,313 @@
+# =====================================================================================
+# HPO at t0 = 1.0 (pure prior noise) -- the draft's actual setting
+# =====================================================================================
+#
+#   python run.py --config configs/experiments_t1_hpo.yaml --dry-run
+#
+# WHY THIS FILE EXISTS
+#   Every earlier sweep in this repository ran at t0 = 0.8.  The draft
+#   (Mean_Flows_as_Controllable_Priors_for_Inverse_Problems.pdf) defines t0 the other way
+#   round -- its eq. (13) is x_t0 = t0*g(y) + (1-t0)*eps, so "t0 = 0 is pure noise" -- and
+#   its primary benchmark uses that pure-noise start, stating explicitly that
+#   "intermediate-state optimization with t0 > 0 is not used in the primary benchmark".
+#
+#   paper_t0 = 1 - repo_t0, so the draft's setting is repo t0 = 1.0, which this repository
+#   short-circuits to the prior-noise array itself (bitwise the notebooks' pure-noise path,
+#   src/models/base.py:132).  Everything tuned at t0 = 0.8 therefore does not transfer and
+#   is being redone here.
+#
+# GRIDS ARE CENTRED ON THE DRAFT'S OWN TABLES
+#   Tables 4-7 already give tuned values for pMF and JiT at exactly this setting, so those
+#   two models get a NARROW grid: the draft's value, plus the one axis most likely to move
+#   (K for MPC-RHC, N for MPC-dt, N for PnP), plus mu, which the draft does not use.
+#   SiT has no published values and gets a WIDE grid on the same axes.
+#
+#   Note the scale change from our earlier sweeps.  The draft runs PnP at
+#   gamma0 = 1e5..1.2e6 under the per-measurement normalisation -- the same compensation
+#   our half_sum_squared switch achieves at gamma0 = O(1).  This file uses the draft's
+#   convention so the numbers are directly comparable to its tables.
+#
+#   D-Flow is the one-step variant throughout: one learned terminal transition for MeanFlow,
+#   one Euler terminal prediction for the standard flows (draft, Table 8 caption).
+#
+# mu IS SWEPT ON EVERY MODEL.  The draft calls RHSO's anchored variant optional and carries
+# a TBD asking for a mu ablation.  At t0 = 0.8 we measured mu > 0 winning 12/12 pixel cells
+# and 0/12 latent cells; this re-tests that split at the draft's initialization.
+#
+# iMF IS NOT IN THIS FILE.  At the draft's budgets (C = 40, K up to 3, M = 320, N = 100)
+# one iMF pass over five tasks at 100 images costs ~533 GPU-hours, roughly 22 days on one
+# card, against ~35 hours for pMF + JiT together.  It needs either its own reduced budget
+# or more GPUs, and that is a scoping decision rather than a configuration one.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: true
+  verbose: true
+  max_atomic_jobs: 500
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+
+data:
+  # 8-image tuning pool; the 100-image benchmark uses cache/data/imagenet_val_100.
+  # Committed as hf_imagenet_val so the file works on a machine with a token.
+  source: hf_imagenet_val
+  local_folder: ""
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 2
+  pmf:
+    batch_size: 2
+  sit:
+    batch_size: 2
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: true
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.20}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}
+
+  deblurring:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}
+
+  super_resolution:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}
+
+  box_inpainting:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}
+
+  random_inpainting:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}
+
+  stroke_painting:
+    enabled: true
+    problem: stroke_painting
+    num_images: 8
+    degradation: {preset: medium, sigma: 0.0, blur_sigma: 0.8}
+    models:
+      jit:                    # narrow: draft Tables 6-7 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 25, solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      pmf:                    # narrow: draft Tables 4-5 + K, N and mu
+        methods:
+          sdedit:      {t0: 1.0, steps: 2}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100], gamma0: 100000.0, alpha: 0.5}
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: 320, lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40, lam: 60.0, lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40, lam: 180.0, lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: 0.01, mu: [0.0, 0.2, 1.0]}
+      sit:                    # wide: no published values for this model
+        methods:
+          sdedit:      {t0: 1.0, steps: [4, 25], solver: heun}
+          pnp:         {t0: 1.0, num_pnp_steps: [20, 100],
+                        gamma0: [100000.0, 1000000.0], alpha: [0.25, 0.5]}
+          dflow:       {t0: 1.0, steps: 1, solver: euler,
+                        num_opt_steps: [80, 320], lr: 0.03}
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [15.0, 60.0, 240.0], lr: 0.05}
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: 40,
+                        lam: [30.0, 180.0, 540.0], lr: 0.10}
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.01, 0.03], mu: [0.0, 0.2, 1.0]}

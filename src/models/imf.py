@@ -130,6 +130,21 @@ class IMFAdapter(MeanFlowAdapter):
             self._vae = self._latent_manager.vae
             self._vae_params = self._latent_manager.vae_params
 
+        # Pin both parameter trees to the accelerator ONCE.  As loaded they are not there:
+        # the model params come back from restore_checkpoint as host numpy (356 MB), and
+        # FlaxAutoencoderKL.from_pretrained hands the VAE params over as arrays COMMITTED
+        # TO THE CPU DEVICE (335 MB).  Upstream never notices because it only uses the VAE
+        # through jax_utils.replicate + pmap, which re-places it; the differentiable decode
+        # below calls the VAE directly, and a jitted function follows its committed inputs
+        # -- so every fidelity evaluation was running the whole SD-VAE decoder on the CPU
+        # (4.0 s per call, measured; 22 ms on the GPU) and re-uploading the model params on
+        # every step (108 ms per call; 5 ms once resident).  That was the flat ~4 s per
+        # iteration that made iMF 20-280x slower than pMF across every method.  Outputs
+        # agree to 3e-4 (decode) and 5e-4 relative (gradient), i.e. float32 backend noise.
+        device = jax.devices()[0]
+        self._params = jax.device_put(self._params, device)
+        self._vae_params = jax.device_put(self._vae_params, device)
+
         self._build_jitted()
         load_s = time.perf_counter() - t_start
         record_time("load/imf", load_s)
