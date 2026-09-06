@@ -44,9 +44,10 @@ from PIL import Image
 from .config import PROBLEM_DECLARATIONS, STROKE_PRESETS, ProblemRequest
 from .utils import (Backend, NUMPY_BACKEND, assert_pixel_batch, canonical_params_key,
                     derive_rng, gaussian_kernel_1d, gaussian_noise, mask_parts,
-                    measurement_noise_parts, pixel_fingerprint, separable_gaussian_blur,
+                    measurement_noise_parts, paired_measurement_noise_parts,
+                    pixel_fingerprint, separable_gaussian_blur,
                     stroke_geometry_parts, timed, to_float, to_uint8, CANONICAL_RESOLUTION,
-                    SEED_RECIPES)
+                    PAIRED_MEASUREMENT_SEED_RECIPE, SEED_RECIPES)
 
 
 # =====================================================================================
@@ -210,6 +211,11 @@ class InverseProblem:
     labels: Optional[np.ndarray] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     _cache: Dict[Any, Any] = field(default_factory=dict, repr=False)
+    # How many TRAILING rows of this instance are repeat padding added to fill a fixed
+    # compiled batch shape (see run.run_job).  They are duplicates of the last real image
+    # and must never appear as an independent diagnostic sample.  0 on every problem the
+    # ProblemStore builds; set only by `subset(...)`.
+    padded_rows: int = 0
 
     # -- backend-cached constants ---------------------------------------------------
     def _c(self, B: Backend, name: str, arr):
@@ -296,8 +302,15 @@ class InverseProblem:
         return self._c(B, "y", self.measurement)
 
     # -- bookkeeping ------------------------------------------------------------------
-    def subset(self, indices: Sequence[int]) -> "InverseProblem":
-        """A view over a subset / repetition of the images (batch chunks and padding)."""
+    def subset(self, indices: Sequence[int], padded_rows: int = 0) -> "InverseProblem":
+        """A view over a subset / repetition of the images (batch chunks and padding).
+
+        `padded_rows` records how many TRAILING entries of `indices` are repeat padding
+        rather than distinct images.  It changes nothing about the measurement, the
+        objective or any gradient -- the fidelity is summed over the batch, so a padded row
+        only ever contributes to its own duplicate -- but it lets per-image diagnostics
+        drop rows that are not independent samples.
+        """
         idx = np.asarray(list(indices), np.int64)
         return InverseProblem(
             name=self.name, key=self.key, sigma=self.sigma, params=dict(self.params),
@@ -308,7 +321,7 @@ class InverseProblem:
             geometry=None if self.geometry is None else [self.geometry[i] for i in idx],
             image_ids=tuple(self.image_ids[i] for i in idx),
             labels=None if self.labels is None else self.labels[idx],
-            metadata=dict(self.metadata))
+            metadata=dict(self.metadata), padded_rows=int(padded_rows))
 
     def describe(self) -> str:
         extra = {k: v for k, v in self.params.items() if k not in ("factor",)}
@@ -363,6 +376,14 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
     sigma = float(cfg.get("sigma", 0.0))
     params = {k: v for k, v in cfg.items() if k != "sigma"}
     params_key = canonical_params_key(cfg)
+    # OPT-IN common-random-number pairing (see utils.paired_measurement_noise_parts).  With
+    # no group -- the default and every configuration written before this field existed --
+    # `noise_group` is None and every seed below is byte for byte the one it always was.
+    # The structural key is the canonical parameter key WITHOUT sigma, so a sigma sweep
+    # keeps one epsilon per image while a different operator still gets its own.
+    noise_group = getattr(request, "measurement_noise_group", None) or None
+    structural_params_key = canonical_params_key(
+        {k: v for k, v in cfg.items() if k != "sigma"})
     mask = None
     geometry = None
 
@@ -417,9 +438,13 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
 
     # Noise is drawn in MEASUREMENT space, once per (problem, params, image).
     if sigma > 0.0:
-        noise = np.stack([gaussian_noise(clean.shape[1:],
-                                         *measurement_noise_parts(name, params_key,
-                                                                  image_ids[i]))
+        def noise_parts(i: int):
+            if noise_group:
+                return paired_measurement_noise_parts(noise_group, name,
+                                                      structural_params_key, image_ids[i])
+            return measurement_noise_parts(name, params_key, image_ids[i])
+
+        noise = np.stack([gaussian_noise(clean.shape[1:], *noise_parts(i))
                           for i in range(n)], axis=0)
         if mask is not None:
             # Unobserved entries must not become observations: the residual A(x) - y is then
@@ -434,7 +459,11 @@ def build_problem(request: ProblemRequest, ground_truth: np.ndarray,
     probe.display_measurement = _display_measurement(name, y, params)
     probe.initialization_guide = build_initialization_guide(probe, request.guide_mode)
     probe.metadata = {
-        "measurement_seed_recipe": SEED_RECIPES["measurement"],
+        "measurement_seed_recipe": (PAIRED_MEASUREMENT_SEED_RECIPE if noise_group
+                                    else SEED_RECIPES["measurement"]),
+        # Auditable on every row: null means the default, unpaired seeding.
+        "measurement_noise_group": noise_group,
+        "structural_problem_params_key": structural_params_key if noise_group else None,
         "mask_seed_recipe": SEED_RECIPES["mask"] if mask is not None else None,
         "stroke_geometry_seed_recipe": (SEED_RECIPES["stroke_geometry"]
                                         if geometry is not None else None),
@@ -628,6 +657,58 @@ def make_phi(problem: InverseProblem, B: Backend, normalization: str):
         return inv_two_sigma_sq * B.sum(sq)          # gaussian_likelihood
 
     return phi
+
+
+def make_phi_per_sample(problem: InverseProblem, B: Backend, normalization: str):
+    """The SAME fidelity as `make_phi`, returned per batch element instead of summed.
+
+        make_phi(problem, B, norm)(x)  ==  sum_b  make_phi_per_sample(problem, B, norm)(x)_b
+
+    to floating-point tolerance, for every normalisation that is a sum over the batch.
+    Only `mean_squared` is a batch MEAN rather than a sum; its per-sample contributions are
+    therefore each already divided by the batch, so the identity still holds.
+
+    This exists for DIAGNOSTICS.  The optimised scalar is still `make_phi`'s: nothing in
+    any reconstruction loop differentiates the per-sample vector, so batch reduction, and
+    with it every gradient, is exactly what it was.  The per-sample values are the natural
+    PER-IMAGE numbers (`half_mean_squared_per_measurement` divides each by that image's own
+    measurement count), so they need no `phi_log_scale` correction.
+
+    Written with `reshape(n, -1).sum(axis=1)`, which NumPy, PyTorch and JAX all implement
+    identically, so one expression serves all three backends.
+    """
+    if normalization not in VALID_PHI_NORMALIZATIONS:
+        raise ValueError("Unknown phi_normalization %r" % normalization)
+    if normalization == "gaussian_likelihood" and float(problem.sigma) <= 0.0:
+        raise ValueError(
+            "phi_normalization='gaussian_likelihood' is undefined for %s: sigma=%g."
+            % (problem.name, float(problem.sigma)))
+    y = problem.measurement_tensor(B)
+    inv_two_sigma_sq = (1.0 / (2.0 * float(problem.sigma) ** 2)
+                        if normalization == "gaussian_likelihood" else None)
+    half_inv_m = (problem._c(B, "half_inv_measurements",
+                             0.5 * _per_measurement_weights(problem))
+                  if normalization == PER_MEASUREMENT_NORMALIZATION else None)
+
+    def phi_per_sample(x_pixels):
+        residual = problem.apply(x_pixels, B) - y
+        sq = residual * residual
+        n = int(sq.shape[0])
+        if normalization == PER_MEASUREMENT_NORMALIZATION:
+            sq = sq * half_inv_m
+            return sq.reshape(n, -1).sum(axis=1)
+        per_sample = sq.reshape(n, -1).sum(axis=1)
+        if normalization == "half_sum_squared":
+            return 0.5 * per_sample
+        if normalization == "sum_squared":
+            return per_sample
+        if normalization == "mean_squared":
+            # make_phi's B.mean() is the mean over EVERY entry, so each sample contributes
+            # its own entries divided by the total count -- the batch included.
+            return per_sample / float(int(np.prod(tuple(int(d) for d in sq.shape))))
+        return inv_two_sigma_sq * per_sample                  # gaussian_likelihood
+
+    return phi_per_sample
 
 
 def make_control_cost(B: Backend, normalization: str):

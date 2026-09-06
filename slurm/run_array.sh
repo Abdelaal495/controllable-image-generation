@@ -6,10 +6,20 @@
 #     bash submit.sh --array 8        # 8 shards -- no file needs editing
 #
 # Each task runs `--shard K/N` over the SAME resolved plan. Shards are contiguous over a
-# model-major ordering, so a task normally loads ONE checkpoint. Tasks never write the same
-# file: each owns results_shardKK.csv plus its own per-job directories.
+# model-major ordering, so a task normally loads ONE checkpoint.
 #
-# Merge afterwards (login node, seconds, no GPU):
+# Tasks never write the same MUTABLE file. Every top-level artefact an array task produces
+# carries a _shardKK suffix:
+#     results_shardKK.csv          results_per_image_shardKK.csv
+#     results_shardKK.jsonl        experiment_log_shardKK.jsonl
+#     checks_shardKK.json          run_metadata_shardKK.json
+# plus its own per-job directories, which are disjoint because the shards are.
+# config.yaml/resolved_config.yaml are identical for every task and are written once.
+# Figures are skipped here (fixed filenames) and built once by --aggregate.
+#
+# Merge afterwards (login node, seconds, no GPU). This is REQUIRED, not optional: it is
+# what produces the canonical results.csv, results_per_image.csv, checks.json (containing
+# BOTH model families' checks) and run_metadata.json (with every shard's provenance).
 #     source activate_cluster.sh
 #     python run.py --config configs/experiments.yaml --run-id run_<ARRAYJOBID> --aggregate
 #

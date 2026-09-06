@@ -580,9 +580,15 @@ def main():
 
     # 7. one implementation, two frameworks: same normalisation by construction
     jax_value = float(state_anchor_penalty(JB, jnp.asarray(q_np), jnp.asarray(anchor_np)))
-    shared = all(name in _names_used(fn)
-                 for fn in (flow_rhso, meanflow_rhso)
-                 for name in ("rhso_mu", "rhso_total_objective"))
+    # `rhso_mu` is now resolved in the shared `rhso._prepare` both loops call, so the
+    # scan covers that function too: the property being asserted is "ONE resolution of mu
+    # and ONE penalty implementation serve both families", not "the call appears literally
+    # inside each loop body".
+    from src.rhso import _prepare
+    shared = (all("rhso_total_objective" in _names_used(fn)
+                  for fn in (flow_rhso, meanflow_rhso))
+              and all("_prepare" in _names_used(fn) for fn in (flow_rhso, meanflow_rhso))
+              and "rhso_mu" in _names_used(_prepare))
     scale_free = abs(
         float(state_anchor_penalty(NUMPY_BACKEND,
                                    np.zeros((BATCH, 2, 2, 1), np.float32) + 0.3,
@@ -750,12 +756,18 @@ def main():
             "declared with the intended fields",
             decl is not None and not decl.is_mpc and not decl.uses_K
             and set(decl.fields) == {"t0", "beta", "num_rhso_steps", "num_opt_steps", "lr",
-                                     "mu", "optimizer", "phi_normalization", "solver"}
+                                     "mu", "optimizer", "phi_normalization", "solver",
+                                     # the terminal planner and the theory diagnostics
+                                     "rhso_terminal_mode", "rhso_stage_diagnostics",
+                                     "rhso_consistency_diagnostics",
+                                     "rhso_jacobian_diagnostics", "rhso_jacobian_probes",
+                                     "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+                                     "rhso_gradient_authority_diagnostics"}
             and all("rhso" in c.supported_methods for c in MODEL_CAPABILITIES.values())
             and "rhso" in COMPARED_METHODS,
-            "shared t0/beta plus N, M, lr, mu, optimizer, phi and solver -- no lambda, no "
-            "K, no control-cost normalisation; supported by every model and compared "
-            "against SDEdit"))
+            "shared t0/beta plus N, M, lr, mu, optimizer, phi, solver, the terminal-planner "
+            "mode and the theory diagnostics -- no lambda, no K, no control-cost "
+            "normalisation; supported by every model and compared against SDEdit"))
 
         rejected = {}
         for field, value in (("lam", 1.0), ("K", 2), ("control_cost_normalization",

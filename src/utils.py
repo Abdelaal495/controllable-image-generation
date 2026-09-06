@@ -113,6 +113,36 @@ def measurement_noise_parts(problem: str, params_key: str, image_id: Any) -> Tup
     return ("measurement", problem, params_key, str(image_id))
 
 
+# The seed identity of ONE standard-normal measurement draw when an experiment opts in to a
+# `measurement_noise_group` (see src/problems.build_problem).  It differs from
+# `measurement_noise_parts` in exactly one respect: `structural_params_key` is the canonical
+# problem-parameter key with the noise amplitude `sigma` REMOVED, so a sweep over sigma
+# reuses one epsilon per (group, problem, structural operator parameters, image) and only
+# rescales it.  Every other degradation parameter still takes part, so a different blur
+# width, box size or missing fraction remains an independent realisation, and a different
+# group is an independent realisation of everything.
+#
+# This recipe is deliberately NOT added to SEED_RECIPES below: that dictionary is copied
+# verbatim into every resolved JobSpec, and a job already written to disk by an earlier
+# version of this repository would stop matching on resume if its contents changed.  It is
+# recorded in the problem metadata of the runs that actually use it instead.
+PAIRED_MEASUREMENT_SEED_RECIPE = (
+    "seed(global_seed, 'measurement_paired', measurement_noise_group, problem, "
+    "structural_problem_params_key, image_id)  -- sigma deliberately excluded so that "
+    "different noise levels share one standard-normal realisation")
+
+
+def paired_measurement_noise_parts(group: str, problem: str, structural_params_key: str,
+                                   image_id: Any) -> Tuple[Any, ...]:
+    """Identity of one COMMON-RANDOM-NUMBER measurement-noise draw.
+
+    Opt-in only.  With no pairing group the repository uses `measurement_noise_parts`
+    exactly as before, and this function is never called.
+    """
+    return ("measurement_paired", str(group), problem, str(structural_params_key),
+            str(image_id))
+
+
 def mask_parts(problem: str, params_key: str, image_id: Any) -> Tuple[Any, ...]:
     return ("mask", problem, params_key, str(image_id))
 
@@ -401,17 +431,43 @@ def jsonable(obj):
     return obj
 
 
+def _atomic_write(path, render) -> None:
+    """Write via a unique temporary file in the same directory, then rename.
+
+    ``os.replace`` is atomic within a filesystem, so a reader (or a concurrent SLURM array
+    task on the shared parallel filesystem) either sees the previous complete file or the
+    new complete file, never a truncated one.  The temporary name carries the PID so two
+    processes writing the same target cannot destroy each other's scratch file.
+    """
+    import os
+    import tempfile
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent),
+                               prefix=".%s." % target.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            render(fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_json(path, payload) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(jsonable(payload), fh, indent=2, default=_json_default)
+    _atomic_write(path, lambda fh: json.dump(jsonable(payload), fh, indent=2,
+                                             default=_json_default))
 
 
 def save_yaml(path, payload) -> None:
     import yaml
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as fh:
-        yaml.safe_dump(jsonable(payload), fh, sort_keys=False, default_flow_style=False)
+    _atomic_write(path, lambda fh: yaml.safe_dump(jsonable(payload), fh, sort_keys=False,
+                                                  default_flow_style=False))
 
 
 RULE, THIN = "=" * 94, "-" * 94

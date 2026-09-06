@@ -36,6 +36,7 @@ same problem + same model + same t0 + same epsilon
 |---|---|
 | **Google Colab** | open [`notebooks/colab_demo.ipynb`](notebooks/colab_demo.ipynb) — clone, `bash setup_colab.sh`, restart once, `%run run.py` |
 | **Alliance / Compute Canada clusters** (Narval, Nibi, Rorqual) | follow [`docs/quickstart_cluster.md`](docs/quickstart_cluster.md) |
+| **Narval vs Rorqual differences, local files, job-array aggregation** | [`docs/clusters_narval_rorqual.md`](docs/clusters_narval_rorqual.md) |
 | **Something went wrong** | [`docs/troubleshooting.md`](docs/troubleshooting.md) — every failure seen in practice, with its cause |
 | **Adding a method, model or task** | [`docs/extending.md`](docs/extending.md) |
 
@@ -557,7 +558,8 @@ Everything else was preserved; these are the changes, with reasons:
 ```
 configs/experiments.yaml   the only file you normally edit
 notebooks/colab_demo.ipynb end-to-end Colab walkthrough
-docs/                      quickstart_cluster.md, troubleshooting.md, extending.md,
+docs/                      quickstart_cluster.md, clusters_narval_rorqual.md,
+                           troubleshooting.md, extending.md,
                            methods_pnp_dflow.md (published vs adapted vs extension),
                            schedule_and_rhso.md (the beta schedule and RHSO)
 src/
@@ -582,6 +584,7 @@ src/
   utils.py                 canonical clock, seeding, backend shim, timing
 run.py                     the orchestrator
 submit.sh                  cluster job submission (reads the gitignored cluster.env)
+scripts/cluster_modules.sh cluster-conditional CUDA/cuDNN module selection
 slurm/                     SLURM job templates (never need editing)
 setup_colab.sh  setup_cluster.sh  requirements.txt
 .env.example  cluster.env.example  .gitignore
@@ -623,8 +626,26 @@ local, with offline mode enabled automatically under SLURM), `--prefetch` for st
 to merge the shards, and `submit.sh`, which supplies the account, GPU type and shard count
 from a gitignored `cluster.env` so no tracked file is ever edited.
 
+**Cluster-specific behaviour is selected conditionally, never committed.**
+`scripts/cluster_modules.sh` chooses the CUDA/cuDNN modules by cluster — Rorqual pins
+`cuda/12.9` + `cudnn/9.13.1.26`, while Narval and every other cluster keep the Alliance
+default — and the same helper feeds both the virtualenv build and the generated
+`activate_cluster.sh`, so the two cannot disagree. `cluster.env` and `activate_cluster.sh`
+are generated, machine-specific and **gitignored**; your allocation account lives in
+`cluster.env` and in no tracked file. That is what lets one checkout serve Narval (A100) and
+Rorqual (H100) without either cluster's settings leaking into the other.
+
+**Job arrays are shard-safe.** Every mutable top-level file an array task writes carries a
+`_shardNN` suffix — including `checks_shardNN.json` and `run_metadata_shardNN.json` — so no
+task overwrites another's metadata. `--aggregate` merges them into the canonical
+`results.csv`, `results_per_image.csv`, `checks.json` (containing every model family's
+checks) and `run_metadata.json` (preserving every shard's provenance), deterministically and
+tolerant of partial completion.
+
 Full walkthrough, first-time setup and daily use:
 **[`docs/quickstart_cluster.md`](docs/quickstart_cluster.md)**.
+Cluster differences, login-node expectations, memory-metric semantics and the shard model:
+**[`docs/clusters_narval_rorqual.md`](docs/clusters_narval_rorqual.md)**.
 
 ## JAX compilation and runtime hygiene
 

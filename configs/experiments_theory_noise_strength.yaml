@@ -1,0 +1,442 @@
+# EXPERIMENT 3 -- CONTROLLED MEASUREMENT-NOISE SWEEP (common random numbers)
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# How does the benefit of distributing the optimisation budget over N stages depend on the
+# measurement noise level? The prediction under test is that replanning matters MORE as the
+# measurement becomes less informative, because a single source-state optimisation then
+# overfits the noise it can see.
+#
+# THE VARIANCE-REDUCTION POINT, AND THE NEW FIELD
+# -----------------------------------------------
+# Comparing sigma levels with INDEPENDENT noise draws confounds the effect of sigma with
+# the luck of the draw, which at 100 images is not negligible. This file therefore uses the
+# repository's new opt-in pairing field
+#
+#     measurement_noise_group: theory_noise_sweep_v1
+#
+# which makes the standard-normal draw depend on (group, problem, STRUCTURAL degradation
+# parameters, image) but NOT on sigma. Every sigma below then reuses the identical epsilon
+# per image and merely rescales it:
+#
+#     y_sigma = A x* + sigma * eps,    the SAME eps ~ N(0, I) at every sigma
+#
+# so differences between noise levels are differences in sigma, not in the realisation.
+# This is a classic common-random-numbers design. Without the field the repository seeds
+# from the full parameter key, sigma included, and every level would get its own eps --
+# which remains the DEFAULT behaviour everywhere else, unchanged.
+#
+# sigma still takes part in the problem key and the job id, so the four noise levels remain
+# four separate jobs with four separate measurements; only the underlying eps is shared.
+# The group is recorded in every result row (`measurement_noise_group`) and in each job's
+# problem metadata, so a paired run can never be mistaken for an unpaired one.
+#
+# WHY DENOISING, AND WHY sigma = 0 IS INCLUDED
+# --------------------------------------------
+# Denoising is the task whose operator is the identity, so sigma is the ONLY thing changing
+# across the sweep -- no blur width, no mask, no subsampling to confound it. sigma = 0 is
+# included as the noiseless reference point; it is a valid configuration here (the planner
+# emits one warning saying it is not one of the MPC-Flow paper's settings, which is
+# expected and correct) and it is only rejected for `phi_normalization:
+# gaussian_likelihood`, which this suite does not use -- the per-measurement fidelity is
+# well defined at sigma = 0. At sigma = 0 no noise is drawn at all, so y = A x* exactly and
+# the pairing field has no effect on that level, which is the intended semantics.
+#
+# sigma_0 = 0.2 is the validated denoising operating point (see
+# configs/experiments_imagenet100_final.yaml), so the sweep is {0, 0.5 sigma_0, sigma_0,
+# 2 sigma_0} = {0, 0.1, 0.2, 0.4}.
+#
+# HELD FIXED  : matched budget B = N*M = 160, t0 = 1.0, beta = 1.0, mu = 0.0, direct
+#               terminal planning, 100 frozen images, seed 42, the validated denoising
+#               learning rates (JiT 0.01, pMF 0.03) at EVERY sigma -- deliberately not
+#               retuned per noise level.
+# SWEPT       : sigma in {0, 0.1, 0.2, 0.4} x (N, M) in the five matched pairs x model.
+# PRIMARY     : PSNR, SSIM, LPIPS and measurement RMSE.
+# DIAGNOSTICS : stage + consistency only.
+#
+# Expected scale: 4 sigmas x 5 (N, M) pairs x 2 models = 40 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_noise_strength.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 128
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_s000_B160_N1:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.0}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s000_B160_N2:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.0}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s000_B160_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.0}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s000_B160_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.0}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s000_B160_N16:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.0}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s010_B160_N1:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.1}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s010_B160_N2:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.1}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s010_B160_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.1}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s010_B160_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.1}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s010_B160_N16:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.1}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s020_B160_N1:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s020_B160_N2:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s020_B160_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s020_B160_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s020_B160_N16:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s040_B160_N1:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.4}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 160, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s040_B160_N2:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.4}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 80, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s040_B160_N4:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.4}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s040_B160_N8:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.4}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 20, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+
+  denoising_s040_B160_N16:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.4}
+    measurement_noise_group: theory_noise_sweep_v1
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 10, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+

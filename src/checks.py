@@ -857,16 +857,26 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     sub_problem = problem.subset(indices)
 
     def _probe_spec(method: str, **overrides):
+        """A small spec for `method`, with DEFAULTS a caller may freely override.
+
+        The defaults and the caller's overrides are merged into ONE mapping before
+        `dataclasses.replace` is called.  Passing them as separate keyword arguments --
+        `replace(base, record_loss_history=False, **overrides)` -- raises
+
+            TypeError: dataclasses.replace() got multiple values for keyword argument
+                       'record_loss_history'
+
+        the moment any caller asks for a default it also sets (which
+        `rhso_receding_horizon` and `rhso_state_regularization` both do, for
+        `record_loss_history=True`).  Merging first makes an explicit override win for
+        EVERY field rather than only for the two that happened to be noticed.
+        """
         import dataclasses
         base = by_method.get(method, spec)
-        # record_loss_history is a DEFAULT, not a fixed value: dflow_optimisation,
-        # rhso_receding_horizon and rhso_state_regularization all read stats.loss_history
-        # and so pass record_loss_history=True.  Passing it positionally here as well made
-        # every one of those three checks die with
-        #     TypeError: replace() got multiple values for keyword 'record_loss_history'
-        # before it could test anything.
-        overrides.setdefault("record_loss_history", False)
-        return dataclasses.replace(base, method=method, num_images=n, **overrides)
+        fields: Dict[str, Any] = {"method": method, "num_images": n,
+                                  "record_loss_history": False}
+        fields.update(overrides)                      # explicit overrides win, always
+        return dataclasses.replace(base, **fields)
 
     def pnp_initial_projection():
         """The initial prior projection happens exactly once and is counted."""
@@ -1016,6 +1026,99 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
                                       history[0] if history else float("nan"),
                                       history[-1] if history else float("nan")))
 
+    def rhso_direct_terminal_planning():
+        """The DIRECT terminal planner is one prediction, and the diagnostics stay separate.
+
+        Run against the REAL loaded model, because the container the executable tests run
+        in has no PyTorch: this is where JiT-direct's terminal planning is actually
+        exercised.  Three things are checked at once:
+
+          * one inner objective performs exactly ONE terminal-planner evaluation and never
+            integrates the remaining suffix (`integrate_flow` is replaced by a tripwire for
+            the duration of the probe);
+          * for a clean-prediction model, x + (1-s)v recovers the direct prediction, i.e.
+            the planner and the sampler are guided by the same arithmetic;
+          * with the theory diagnostics on, every ALGORITHMIC counter is identical to the
+            same job with them off, and the diagnostic work lands in its own counters.
+        """
+        import dataclasses as _dc
+        from . import rhso as rhso_module
+        from .rhso import make_terminal_planner, rhso_reconstruct, rhso_time_grid
+
+        # The BASELINE must have every theory diagnostic OFF explicitly.  It is derived
+        # from the job's own resolved spec, and a theory-validation configuration (the
+        # smoke config, for one) already switches the diagnostics ON -- so inheriting them
+        # here would make the `plain.diagnostic_model_evals == 0` requirement below fail
+        # for a run that is behaving perfectly.  The diagnostics-enabled probe is then
+        # built from this baseline deliberately, one field at a time.
+        tiny = _probe_spec("rhso", num_rhso_steps=2, num_opt_steps=2,
+                           rhso_terminal_mode="direct",
+                           rhso_stage_diagnostics=False,
+                           rhso_consistency_diagnostics=False,
+                           rhso_jacobian_diagnostics=False)
+        eps = adapter.prior_sample(ids)
+        guide = manager.encoded_guide(
+            adapter, np.ascontiguousarray(problem.initialization_guide[:n]))
+        x0 = adapter.initial_state(guide, tiny.t0, eps)
+        grid = rhso_time_grid(tiny)
+
+        original = rhso_module.integrate_flow
+
+        def tripwire(*a, **k):
+            raise AssertionError("direct terminal planning must not integrate the suffix")
+
+        rhso_module.integrate_flow = tripwire
+        try:
+            adapter.reset_counters()
+            planner = make_terminal_planner(adapter, cond, tiny, grid, 0, "direct")
+            prediction = planner(x0)
+            forwards = adapter.forward_counter
+        finally:
+            rhso_module.integrate_flow = original
+
+        recovers = True
+        if adapter.spec.dynamics_family == STANDARD_FLOW:
+            import torch
+            with torch.no_grad():
+                v = adapter.velocity(x0, grid[0], cond)
+                t_eps = float(getattr(adapter, "t_eps", 1e-8))
+                recovered = x0 + max(1.0 - grid[0], t_eps) * v
+                recovers = bool((recovered - prediction).abs().max() < 1e-2)
+
+        plain = rhso_reconstruct(adapter, cond, x0, sub_problem, tiny)[1]
+        with_diag = rhso_reconstruct(
+            adapter, cond, x0, sub_problem,
+            _dc.replace(tiny, rhso_stage_diagnostics=True,
+                        rhso_consistency_diagnostics=True))[1]
+        counters = ("model_evals_total", "model_evals_planning", "network_forwards",
+                    "backprops_through_model", "objective_evals", "optimizer_iterations")
+        differing = [(c, getattr(plain, c), getattr(with_diag, c)) for c in counters
+                     if getattr(plain, c) != getattr(with_diag, c)]
+        same = not differing
+        rows = len(with_diag.stage_records)
+        baseline_clean = plain.diagnostic_model_evals == 0
+        ok = (recovers and same and plain.model_evals_planning == 2 * 2
+              and with_diag.diagnostic_model_evals > 0
+              and baseline_clean
+              and rows == 2 * len(sub_problem.image_ids))
+        # Say what actually happened: an unconditional "every algorithmic counter is
+        # unchanged" is a false claim on the very run where the equality test failed.
+        if same:
+            counter_note = "every algorithmic counter is unchanged"
+        else:
+            counter_note = ("ALGORITHMIC COUNTERS CHANGED: %s"
+                            % ", ".join("%s %s->%s" % (c, a, b) for c, a, b in differing))
+        return ok, ("one direct terminal prediction per objective (%d network forward(s), "
+                    "%d planning evaluations for N=2 M=2, no suffix integration); "
+                    "x+(1-s)v agreement: %s; the baseline probe ran with all theory "
+                    "diagnostics OFF (%d diagnostic eval(s)); diagnostics add %d "
+                    "evaluations and %d [image, stage] rows while %s"
+                    % (forwards, plain.model_evals_planning,
+                       "n/a (MeanFlow)" if adapter.spec.dynamics_family != STANDARD_FLOW
+                       else ("yes" if recovers else "NO"),
+                       plain.diagnostic_model_evals,
+                       with_diag.diagnostic_model_evals, rows, counter_note))
+
     def rhso_state_regularization():
         """mu adds a state-anchor penalty and NOTHING else.
 
@@ -1080,6 +1183,8 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
         report.run(scope, "dflow_optimisation", dflow_optimisation, verbose)
     if "rhso" in wanted:
         report.run(scope, "rhso_receding_horizon", rhso_receding_horizon, verbose)
+        report.run(scope, "rhso_direct_terminal_planning", rhso_direct_terminal_planning,
+                   verbose)
         report.run(scope, "rhso_state_regularization", rhso_state_regularization, verbose)
     for name, fn in adapter.sanity_checks().items():
         report.run(scope, name, lambda f=fn: f(ctx), verbose)

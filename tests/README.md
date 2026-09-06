@@ -9,7 +9,13 @@ python tests/test_meanflow_pnp_dflow.py     # needs jax + optax
 python tests/test_flow_trajectory.py        # needs jax
 python tests/test_beta_schedule.py          # pure Python (+ pyyaml for the config checks)
 python tests/test_rhso.py                   # needs jax + optax
+python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
+python tests/test_cluster_and_aggregation.py  # needs pyyaml + bash (no jax/torch)
+python tests/test_theory_extensions.py      # needs jax + pyyaml
 ```
+
+> These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
+> each file directly; each prints `N/N checks passed` and exits non-zero on failure.
 
 `test_meanflow_pnp_dflow.py` executes `pnp.meanflow_pnp` and `dflow.meanflow_dflow`
 end to end against a toy MeanFlow adapter and checks: the `1 + N·M` denoiser accounting and
@@ -58,6 +64,28 @@ both loops are shown (by scanning their bytecode, nested closures included) to c
 backend-generic `rhso.state_anchor_penalty`, whose NumPy and JAX evaluations agree — because
 `flow_rhso` itself cannot run here.
 
+`test_rhso_theory.py` covers the direct terminal planner and the theory-validation
+diagnostics. It executes a JiT-shaped toy standard flow (native clean prediction, guidance
+applied to it, velocity **derived** from it) and the toy MeanFlow, and checks: that
+`x + (1-s)·v` recovers the direct prediction at equal guidance cost; that direct planning
+performs exactly one endpoint prediction with `integrate_flow` replaced by a tripwire, while
+the legacy suffix planner still integrates; that `auto` resolves to each family's previous
+planner and that a MeanFlow refuses `suffix`; that the one-interval execution rule and the
+executed trajectory are bitwise unchanged with diagnostics on; that direct JiT planning costs
+one evaluation per objective in the planner's cost model; that every algorithmic counter is
+identical with diagnostics on and off while the JVP/VJP/eval/second counters fill separately;
+that the matched-budget config yields exactly `(1,160) (2,80) (4,40) (8,20)` and 70 jobs with
+the frozen learning rates; that `sum(per-sample fidelity) == batch fidelity` for all four
+normalisations; that a batch of 4 with one padded row gives three distinct per-image rows per
+stage; that `V_pre`/`V_post` match an independent re-run and `V_post` differs from the last
+recorded inner loss; that the final stage's replanning fields are NaN rather than invented;
+that the pMF consistency metric equals an independently computed predict/execute/re-predict
+discrepancy and that the JiT metric is labelled `terminal_prediction_inconsistency` rather
+than a semigroup defect; that the Jacobian probes are matrix-free, per-image isolated,
+seed-deterministic and claim no condition number; that the stage and spectral arrays survive
+`results.npz` round-tripping; and that the per-job process memory sampler resets while JAX's
+lifetime high-water mark is never reported as a process peak.
+
 `tests/spec_support.py` builds every spec through the **real** validator and planner: it
 assembles a small in-memory configuration, runs `validate_config` and `resolve_run_plan`,
 and splits overrides automatically between the configuration (where they are validated) and
@@ -70,11 +98,89 @@ refused for every non-RHSO method, and the warm-up key separating beta- and mu-d
 jobs. A documented stand-in remains as a fallback if
 `src/config.py` cannot be imported at all; each script prints which path it used.
 
+`test_cluster_and_aggregation.py` is the regression suite for the bugs found by the first
+real Rorqual H100 smoke run. It needs neither JAX nor PyTorch and checks: that the
+`_probe_spec` helper lets an explicit override win instead of raising
+`dataclasses.replace() got multiple values ...` (and that the *old* form really did raise,
+so the test proves the bug rather than assuming it); that the direct-terminal-planning
+check's baseline probe disables all three theory diagnostics explicitly rather than
+inheriting them from a theory config; that every mutable top-level file an array task writes
+is shard-private, that `collect_finished_jobs` merges a 4-job x 4-image run into exactly 16
+per-image rows with no duplicates, deterministic ordering and correct partial-completion
+behaviour; that merged `checks.json` contains **both** model families and that a failure in
+any one shard survives the merge; that merged `run_metadata.json` unions per-model
+provenance and preserves each shard's complete payload; that the "REMAINING suffix" warning
+appears for `suffix` jobs (including `auto` on JiT) and never for JiT-`direct`; that Rorqual
+resolves to `cuda/12.9` + `cudnn/9.13.1.26` while **Narval's module line is byte-identical
+to the previous behaviour** and never contains `12.9`; that `setup_cluster.sh` contains no
+hard-coded `module load cuda` and installs `nvidia-ml-py` with a wheelhouse-first fallback;
+that `src/memory.py` never calls `nvmlDeviceGetMemoryInfo` (checked by parsing its AST, not
+by substring search, since the docstring forbidding it names it) and never fills
+`gpu_process_peak_gib` from a framework counter; and that the four theory configs still
+resolve to 4 / 70 / 10 / 10 atomic jobs with the matched-budget pairs and the two distinct
+terminal-planner identities intact.
+
+`test_theory_extensions.py` covers the two opt-in capabilities added for the six theory
+experiments, and the six configurations themselves.
+
+For the **paired measurement noise** (`measurement_noise_group`) it checks: that with no
+group the built `y` is **bitwise** what an independent transcription of the original seeding
+expression produces; that `(y − Ax)/σ` is identical across `σ ∈ {0.1, 0.2, 0.4}` inside one
+group and that the shared draw really is standard normal; that a different group, and a
+different image id, each re-draw independently while the other images keep their own `ε`;
+that a different *structural* parameter (`blur_sigma` 1.0 vs 2.0) stays independent while
+two `σ` at one blur width stay paired — i.e. only the noise **amplitude** is excluded from
+the seed; that rebuilding a request reproduces `y` bitwise; that the mask is bitwise
+unchanged with and without a group, so the feature touches the noise seed and never the
+operator; and that the group and the recipe actually used are recorded in the problem
+metadata.
+
+For the **gradient-aligned authority** diagnostic it checks against a closed form — a linear
+terminal map `P(x) = Dx` with a quadratic fidelity, where `A = ‖Dᵀg‖/‖g‖` is known exactly —
+that the two norms and the ratio match analytically (max relative error ~3e-8), that the log
+field is the log of the ratio, that an image scores the same alone as inside a batch of
+three (per-image isolation), that `real_rows` truncation keeps padded rows out, that the
+probe is deterministic, that its cost lands only in `diagnostic_model_evals` /
+`diagnostic_vjps`, and that a vanishing endpoint gradient yields the documented **NaN**
+while both norms stay on the row. It then runs `rhso.meanflow_rhso` end to end with the flag
+on and off and asserts the executed states are **bitwise identical**, that every algorithmic
+counter matches, that the diagnostic counters and clock fill only when the flag is on, that
+there is exactly one populated row per (image, stage), and that the default run records
+nothing at all. Serialisation is checked by round-tripping the new `[image, stage]` arrays
+through a real `.npz` **without** `allow_pickle`, and by showing the summary averages skip a
+`NaN` row instead of propagating it.
+
+For **backward compatibility** it asserts both fields default to off, that a spec predating
+either field resolves to the old behaviour, that
+`configs/experiments_theory_validation_final100.yaml` still resolves to 70 jobs with the
+four matched pairs and unchanged job ids and leaf directories, and that turning the new flag
+on in one experiment block moves **exactly** that block's 2 job ids while the other 68 are
+untouched — so a partially-completed sweep keeps its results.
+
+For the **six new configurations** it pins each one's job count, uniqueness, models, methods
+and image count, and then the scientific content of each: that Experiment 1 is D-Flow with
+`steps=4`, 160 iterations, Heun and the validated JiT learning rate; that 2A's six pairs all
+satisfy `N·M = 160` and are not a 36-job Cartesian product; that 2B holds `M = 40` while `B`
+runs 40 → 640; that the noise sweep carries one pairing group across four `σ` that remain
+four distinct problem instances; that the `mu` sweep is log-spaced including 0 at both
+`(4,40)` and `(8,20)` with the loss-history split enabled; that `beta` moves the stage times
+in the documented direction (`s₁ = 0.5000` at `β=0.5`, `0.2500` uniform, `0.0625` at `β=2`)
+and that `delta` is null off the uniform grid; and that Experiment 6 enables both
+diagnostics on exactly the jacobian config's settings, images and probe seed while keeping
+the old jobs' identities disjoint.
+
 ## What these tests do NOT cover
 
 The toy adapters are not the real models, so nothing here says anything about
 reconstruction *quality*. More specifically:
 
+* **JiT-direct is not executed end to end here.** `rhso.flow_rhso` and the real
+  `JiTAdapter` both need PyTorch. What is covered for that path is structural: the shared
+  `make_terminal_planner` factory is executed against a JiT-shaped toy adapter, and
+  `JiTAdapter.velocity` / `JiTAdapter.clean_prediction` are shown by bytecode scan to be
+  wrappers around one `_guided_clean` with no duplicated guidance. The torch glue itself is
+  checked on a GPU by `run.py --check`, which now runs `rhso_direct_terminal_planning`
+  against the loaded model.
 * `pnp.flow_pnp`, `dflow.flow_dflow` and `rhso.flow_rhso` are **not** executed — they call
   `torch.autograd.grad`, `torch.optim.Adam` and `torch.no_grad`, which need PyTorch. Their
   trajectory arithmetic and counters are covered indirectly (the integrator above and the

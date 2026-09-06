@@ -1,0 +1,149 @@
+# EXPERIMENT 1 -- JiT ONE-SHOT MULTI-STEP SUFFIX CONTROL (the missing isolating control)
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# The headline JiT comparison, "RHSO N=4 beats direct N=1", changes TWO things at once:
+#     (a) WHERE the optimisation happens  -- one state versus four states;
+#     (b) HOW DEEP the generative trajectory is -- one interval versus four.
+# This configuration is the control that isolates (a). ALL optimisation stays at the
+# source state s = 0, but the terminal objective is evaluated THROUGH the same four-interval
+# generative suffix the N=4 trajectory executes. If the N=4 advantage survives against this
+# control, it is about distributed replanning, not merely about trajectory depth.
+#
+# WHY D-FLOW, AND WHY NO NEW CODE
+# -------------------------------
+# The repository's existing D-Flow path already has exactly the required semantics, so this
+# experiment adds NO algorithm. src/dflow.py:
+#     * optimises ONE starting state q, initialised to the shared z_t0 (t0 = 1 -> pure prior
+#       noise -> canonical start s = 0);
+#     * differentiates the terminal measurement loss through the FULL multi-step trajectory
+#       (`integrate_flow`, no detach and no stop-gradient anywhere on that path);
+#     * discretises time with `schedule.canonical_time_grid`, the SAME machinery RHSO uses,
+#       so `steps: 4` gives bitwise the outer grid of the N=4 RHSO run at beta = 1;
+#     * honours `solver: heun` and JiT's official final-Euler policy, matching the
+#       execution policy of the RHSO comparison.
+#
+# WHAT IS NOT USED, AND WHY
+# -------------------------
+#   * NOT `RHSO N=1 + suffix`: with one outer interval the suffix is a single step, so the
+#     trajectory depth would be 1 and the control would not control for anything.
+#   * NOT `RHSO N=4 + suffix`: that still distributes optimisation over four states, which
+#     is precisely the variable under test.
+#   * NOT the D-Flow paper's midpoint solver. Reproducing that paper is not the goal here;
+#     matching OUR JiT/RHSO numerical trajectory is, so `solver: heun` is deliberate.
+#
+# HELD FIXED  : t0 = 1.0 (canonical start s = 0), beta = 1.0, 4 generative intervals,
+#               100 frozen validation images, seed 42, the same image ids, operator
+#               realisations and per-measurement fidelity normalisation, and the JiT RHSO
+#               learning rate of the validated runs (lr = 0.01 on every task).
+# SWEPT       : nothing. This is one point per task.
+# BUDGET      : 160 optimizer iterations, ALL at the source state -- matched to RHSO's
+#               B = N*M = 4 * 40 = 160.
+# DIAGNOSTICS : none (D-Flow has no per-stage RHSO bookkeeping to record).
+#
+# THE THREE-WAY COMPARISON this enables, all at B = 160 on the same images:
+#     JiT-direct N=1                 optimisation at one state, trajectory depth 1
+#     JiT one-shot suffix (HERE)     optimisation at one state, trajectory depth 4
+#     JiT RHSO N=4, M=40             optimisation at four states, trajectory depth 4
+#
+# Expected scale: 5 tasks x 1 model x 1 method = 5 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_jit_suffix_final100.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 64
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_jit_suffix160:
+    enabled: true
+    problem: denoising
+    num_images: 100
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          dflow: {steps: 4, solver: heun, num_opt_steps: 160, lr: 0.01, optimizer: adam}
+
+  deblurring_jit_suffix160:
+    enabled: true
+    problem: deblur
+    num_images: 100
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          dflow: {steps: 4, solver: heun, num_opt_steps: 160, lr: 0.01, optimizer: adam}
+
+  super_resolution_jit_suffix160:
+    enabled: true
+    problem: super_resolution
+    num_images: 100
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          dflow: {steps: 4, solver: heun, num_opt_steps: 160, lr: 0.01, optimizer: adam}
+
+  box_inpainting_jit_suffix160:
+    enabled: true
+    problem: box_inpaint
+    num_images: 100
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          dflow: {steps: 4, solver: heun, num_opt_steps: 160, lr: 0.01, optimizer: adam}
+
+  random_inpainting_jit_suffix160:
+    enabled: true
+    problem: random_inpaint
+    num_images: 100
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          dflow: {steps: 4, solver: heun, num_opt_steps: 160, lr: 0.01, optimizer: adam}
+

@@ -1,0 +1,208 @@
+# EXPERIMENT 6 -- GRADIENT-ALIGNED ENDPOINT AUTHORITY (8 images, batch 4)
+#
+# SCIENTIFIC QUESTION
+# -------------------
+# The existing Jacobian diagnostic asks how the terminal map stretches RANDOM directions.
+# That is a statement about generic anisotropy, and random directions in a 196608-dimensional
+# state space are almost never the direction the task cares about. This configuration adds
+# the TASK-ALIGNED question: how much authority does the state at stage k actually have over
+# the measurement objective?
+#
+#     g_end_k = grad_{x_1} Phi(x_1; y)   at  x_1 = P_k(x_{t_k})
+#     J_k     = D_{x_{t_k}} P_k(x_{t_k})
+#     A_k     = || J_k^T g_end_k || / || g_end_k ||
+#
+# recorded per image and per stage as
+#     endpoint_fidelity_grad_norm   = || g_end_k ||
+#     state_fidelity_grad_norm      = || J_k^T g_end_k ||
+#     gradient_aligned_authority    = the ratio, and its log.
+#
+# HOW IT IS COMPUTED, AND WHAT IT COSTS
+# -------------------------------------
+# By the chain rule J_k^T g_end_k is exactly grad_{x_{t_k}} Phi(P_k(x_{t_k}); y), so NO
+# Jacobian is ever materialised: one forward pass through the terminal planner, one gradient
+# of the fidelity at its output, and one VJP back through the planner. P_k is the SAME
+# terminal predictor the RHSO planner uses -- pMF's learned finite-interval map
+# T_theta(q; s_k -> 1), JiT's direct endpoint prediction x_hat_1(q, s_k) -- taken from the
+# same `make_terminal_planner` factory, so this measures the object that is actually
+# optimised against.
+#
+# SEMANTICS THAT MATTER FOR HOW THESE NUMBERS MAY BE READ
+# --------------------------------------------------------
+#   * FIDELITY ONLY. The state-anchor mu penalty is excluded from the gradient. It is a
+#     property of the optimisation problem, not of the model's authority over the
+#     measurement (and at the state entering a stage its gradient is exactly zero anyway).
+#   * MEASURED AT THE PRE-OPTIMISATION STATE entering the stage -- the same linearisation
+#     point as the Jacobian probe, so the two are directly comparable -- because what it
+#     reports is the authority AVAILABLE when the stage begins.
+#   * ZERO-GRADIENT HANDLING. When || g_end_k || falls below a documented threshold the
+#     ratio is undefined and is recorded as NaN, never as a division by an invented epsilon.
+#     Both norms stay on the row so the reader can see why. The aggregation drops NaN rather
+#     than propagating it.
+#   * IT IS A MEASUREMENT, NOT THE ALGORITHM. Its model evaluation and VJP land in the
+#     diagnostic_* counters, its time is subtracted from the reported runtime, and it changes
+#     no sample, no optimiser state and no counter of algorithmic work -- exactly the
+#     convention the existing Jacobian probes follow.
+#
+# WHY BOTH DIAGNOSTICS IN ONE RUN
+# -------------------------------
+# The Jacobian / random-direction probes are enabled here too, with the SAME probe budget
+# and seed as configs/experiments_theory_jacobian_8img.yaml, on the SAME frozen 8 images and
+# the same settings (N=4, M=40, t0=1, beta=1, mu=0). Task-aligned authority can therefore be
+# compared against generic anisotropy image by image and stage by stage, rather than across
+# two runs that differ in their states.
+#
+# 8 images = 2 full batches of 4, so no padding is needed and every per-image row is real.
+# Runtime and memory from THIS config are not paper numbers: the probes are expensive.
+#
+# HELD FIXED  : N = 4, M = 40, t0 = 1.0 (canonical start s = 0), beta = 1.0, mu = 0.0,
+#               direct terminal planning, 8 frozen images, seed 42, validated learning rates.
+# SWEPT       : nothing; 5 tasks x 2 models is the grid.
+# DIAGNOSTICS : stage + consistency + Jacobian + gradient authority.
+#
+# Expected scale: 5 tasks x 2 models x 1 setting = 10 atomic jobs.
+# Verify with: python run.py --config configs/experiments_theory_gradient_authority.yaml --dry-run
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 64
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_authority8:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+
+  deblurring_authority8:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+
+  super_resolution_authority8:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {factor: 2, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+
+  box_inpainting_authority8:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {box: 40, sigma: 0.05}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+
+  random_inpainting_authority8:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {missing_fraction: 0.7, sigma: 0.01}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true,
+                  rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 8, rhso_jacobian_power_iters: 8, rhso_jacobian_seed: 20240917,
+                  rhso_gradient_authority_diagnostics: true}
+

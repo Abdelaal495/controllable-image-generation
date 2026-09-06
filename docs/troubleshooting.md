@@ -307,3 +307,85 @@ Sweep lists expand as a Cartesian product. `--dry-run` shows the resolved count;
 Other models still run — `continue_on_experiment_error` defaults to true. The failure and
 its error are recorded in `results.csv`, never silently dropped. Fix the cause and re-run
 with `--run-id <existing>`; completed jobs are reused.
+
+---
+
+## Cluster issues found by the Rorqual H100 smoke run
+
+### `gpu_process_memory_source = unavailable` for every job
+
+`pynvml` is not installed in the virtualenv. The importable module is `pynvml`; the
+distribution that provides it is **`nvidia-ml-py`**. Without it the cross-framework
+JiT-vs-pMF memory comparison cannot be made at all — and it is not substituted from total
+device memory or from a framework counter, by design.
+
+```bash
+# LOGIN node
+source activate_cluster.sh
+pip install --no-index nvidia-ml-py || pip install nvidia-ml-py
+python -c "import pynvml; print('import ok')"
+```
+
+`bash setup_cluster.sh --refresh` does this for you.
+
+**`pynvml.nvmlInit()` failing with `NVMLError_DriverNotLoaded` on a login node is expected**
+— login nodes have no GPU driver. A successful *import* on a login node is a dependency
+check, nothing more. Verify the real functionality inside a GPU job:
+
+```bash
+python -c "import pynvml; pynvml.nvmlInit(); print(pynvml.nvmlDeviceGetCount())"
+```
+
+### JAX warns that the CUDA compiler may miscompile (`ptxas` 12.6.2)
+
+Seen on Rorqual, whose unversioned `module load cuda` resolves to CUDA 12.6.2. JAX warns
+that compilers up to 12.6.2 can miscompile some clamping edge cases. The repository now
+pins `cuda/12.9` + `cudnn/9.13.1.26` on Rorqual automatically.
+
+If you still see the warning, your `activate_cluster.sh` predates the fix. Regenerate it —
+no need to rebuild the venv:
+
+```bash
+bash setup_cluster.sh --refresh --venv "$HOME/controllable-image-generation-env"
+source activate_cluster.sh
+ptxas --version | tail -2        # expect V12.9.x
+```
+
+Narval is unaffected and deliberately keeps the Alliance default CUDA stack.
+
+### `checks.json` contains only one model family after a job array
+
+Fixed. Array tasks used to write the shared `checks.json` and `run_metadata.json`
+concurrently, so the last task to finish overwrote the other's. They now write
+`checks_shardNN.json` / `run_metadata_shardNN.json`, and `--aggregate` merges them.
+
+If you have an **old** run directory with this problem, the per-shard information was never
+written and cannot be recovered — re-run, or read the individual SLURM logs.
+
+### `results_per_image.csv` missing after `--aggregate`
+
+Fixed. Aggregation now rebuilds the per-image rows from each job's `metadata.json` and
+writes `results_per_image.csv` alongside `results.csv`. Re-run the aggregate command on the
+existing run directory; no GPU and no re-computation are needed:
+
+```bash
+python run.py --config <config> --run-id run_<ARRAY_JOB_ID> --aggregate
+```
+
+### `dataclasses.replace() got multiple values for keyword argument 'record_loss_history'`
+
+Fixed in `src/checks.py`. The probe helper merges its defaults with the caller's overrides
+before calling `dataclasses.replace`, so `rhso_receding_horizon` and
+`rhso_state_regularization` run instead of failing during test-spec construction.
+
+### `rhso_direct_terminal_planning` fails on a theory config
+
+Fixed. The check's baseline probe now switches off `rhso_stage_diagnostics`,
+`rhso_consistency_diagnostics` and `rhso_jacobian_diagnostics` explicitly instead of
+inheriting them from a configuration that has diagnostics enabled.
+
+### Dry-run warns about differentiating the "REMAINING suffix" for a JiT-direct job
+
+Fixed. The warning is now emitted only for jobs whose **resolved** `rhso_terminal_mode` is
+`suffix`. A JiT job in `direct` mode plans with one clean-endpoint prediction and neither
+integrates nor differentiates the suffix; it gets an accurate note instead.

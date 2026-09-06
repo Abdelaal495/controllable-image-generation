@@ -61,12 +61,21 @@ motivated by observed over-optimisation, not a theoretical requirement.
 
 Family differences (both are implemented; neither is a special case of the other)
 --------------------------------------------------------------------------------
-STANDARD FLOW (JiT, SiT)
-    The terminal planner has to integrate: G_{s_k -> 1} is a differentiable fixed-step
-    solve over the REMAINING SUFFIX of the same outer grid, [s_k, s_{k+1}, ..., 1], with
-    the repository's existing solver semantics (Euler / Heun / RK4 and the adapter's own
-    final-step policy).  No second planning-resolution hyperparameter is introduced, and
-    the planning cost therefore shrinks as k grows.
+STANDARD FLOW (JiT, SiT) -- two terminal planners, chosen by `rhso_terminal_mode`
+    "suffix" (the legacy default): G_{s_k -> 1} is integrated -- a differentiable
+    fixed-step solve over the REMAINING SUFFIX of the same outer grid,
+    [s_k, s_{k+1}, ..., 1], with the repository's existing solver semantics (Euler / Heun /
+    RK4 and the adapter's own final-step policy).  No second planning-resolution
+    hyperparameter is introduced, and the planning cost shrinks as k grows.
+
+    "direct": ONE call to the adapter's own direct clean-endpoint prediction
+    x_hat_1(q, s_k).  For JiT that is the network's NATIVE output, guided exactly as
+    `velocity` guides it (both go through the one `_guided_clean` implementation), and the
+    remaining trajectory is never integrated.  x_hat_1 is an ENDPOINT PREDICTOR, not a
+    learned family of finite-interval transport maps -- it is not pMF's T_theta with a
+    different name.
+
+    The EXECUTION rule is identical in both modes: one `flow_step` over [s_k, s_{k+1}].
 
 MEANFLOW (pMF, iMF)
     The terminal planner is ONE direct learned finite-interval transition
@@ -102,6 +111,7 @@ import numpy as np
 from .dflow import flow_step, integrate_flow, solver_evaluations
 from .models.base import Conditioning, MeanFlowAdapter, ModelAdapter, StandardFlowAdapter
 from .problems import make_phi, phi_log_scale
+from .rhso_diagnostics import RhsoStageRecorder, consistency_kind, settings_from_spec
 from .schedule import canonical_time_grid, spec_beta
 from .sdedit import ReconstructionStats, _is_finite
 from .utils import MEANFLOW, STANDARD_FLOW
@@ -161,6 +171,94 @@ def rhso_planning_grid(grid: List[float], stage: int) -> List[float]:
         raise ValueError("stage %d is outside the RHSO grid (%d intervals)"
                          % (stage, len(grid) - 1))
     return list(grid[stage:])
+
+
+# =====================================================================================
+# Terminal planning mode
+# =====================================================================================
+# What ONE inner objective's terminal prediction is:
+#
+#   "direct"  ONE terminal-planner evaluation from the current state to the clean endpoint.
+#             MeanFlow: the learned finite-interval map T_theta(q; s_k -> 1) -- which is
+#             what RHSO has always done there.  Standard flow: the adapter's DIRECT clean
+#             endpoint prediction x_hat_1(q, s_k) (JiT's own network output), NOT an
+#             integration of the remaining trajectory.
+#   "suffix"  the legacy standard-flow planner: differentiable integration of the remaining
+#             suffix [s_k, ..., 1] of the outer grid.  Meaningless for a MeanFlow model,
+#             which has no ODE to integrate, and rejected there.
+#   "auto"    resolve per family: MeanFlow -> direct, standard flow -> suffix.  This is the
+#            DEFAULT, so every configuration written before this field existed keeps its
+#            exact previous meaning.
+TERMINAL_DIRECT = "direct"
+TERMINAL_SUFFIX = "suffix"
+TERMINAL_AUTO = "auto"
+VALID_TERMINAL_MODES = (TERMINAL_AUTO, TERMINAL_DIRECT, TERMINAL_SUFFIX)
+
+
+def legacy_terminal_mode(dynamics_family: str) -> str:
+    """What `auto` resolves to -- i.e. what RHSO did before the field existed."""
+    return TERMINAL_DIRECT if dynamics_family != STANDARD_FLOW else TERMINAL_SUFFIX
+
+
+def resolve_terminal_mode(mode, dynamics_family: str) -> str:
+    """Validated (mode, family) -> "direct" | "suffix".  `None` / "auto" -> the legacy one."""
+    if mode is None:
+        mode = TERMINAL_AUTO
+    mode = str(mode)
+    if mode not in VALID_TERMINAL_MODES:
+        raise ValueError("Unknown rhso_terminal_mode %r; valid: %s"
+                         % (mode, list(VALID_TERMINAL_MODES)))
+    if mode == TERMINAL_AUTO:
+        return legacy_terminal_mode(dynamics_family)
+    if mode == TERMINAL_SUFFIX and dynamics_family != STANDARD_FLOW:
+        raise ValueError(
+            "rhso_terminal_mode='suffix' asks a MeanFlow model to integrate a remaining "
+            "suffix, but a MeanFlow model has no instantaneous velocity field and no ODE "
+            "to integrate. Its terminal planner is the learned finite-interval map "
+            "T_theta(q; s_k -> 1), which is what 'direct' (or the default 'auto') means "
+            "here.")
+    return mode
+
+
+def spec_terminal_mode(spec) -> str:
+    """The resolved terminal mode of one job.
+
+    Read through `getattr` so a spec predating the field -- or a test stand-in -- resolves
+    to the legacy behaviour of its family.
+    """
+    return resolve_terminal_mode(getattr(spec, "rhso_terminal_mode", None),
+                                getattr(spec, "dynamics_family", MEANFLOW))
+
+
+def terminal_planner_kind(adapter, terminal_mode: str) -> str:
+    """A short honest name for the object the inner objective differentiates through.
+
+    pMF's T_theta is a LEARNED FINITE-INTERVAL TRANSPORT MAP; JiT's x_hat_1 is a DIRECT
+    ENDPOINT PREDICTION.  Both give one differentiable prediction per inner objective, and
+    they are NOT the same mathematical object -- which is why this string, not a shared
+    label, is what lands in the metadata.
+    """
+    if terminal_mode == TERMINAL_SUFFIX:
+        return "suffix_integration"
+    return getattr(adapter, "terminal_prediction_kind", "direct_terminal_prediction")
+
+
+def make_terminal_planner(adapter: ModelAdapter, cond: Conditioning, spec, grid: List[float],
+                          stage: int, terminal_mode: str):
+    """The differentiable map q -> native terminal state used by stage `stage`'s objective.
+
+    The ONE place the planner is chosen.  Both RHSO loops build their inner objective from
+    this, so "direct planning performs exactly one terminal prediction and never integrates
+    the remaining suffix" is a property of a single function that a test can execute,
+    rather than of two transcriptions of an if-statement.
+    """
+    s_k = float(grid[int(stage)])
+    if terminal_mode == TERMINAL_DIRECT:
+        # ONE call. No solver, no remaining-suffix composition, no hidden integration.
+        return lambda q: adapter.terminal_prediction(q, s_k, cond)
+    suffix = rhso_planning_grid(grid, stage)
+    return lambda q: integrate_flow(adapter, cond, q, spec, suffix,
+                                    reaches_data_endpoint=True)
 
 
 def _field(spec, name: str):
@@ -243,13 +341,20 @@ def _require_adam(spec) -> None:
 
 def rhso_planning_evaluations(adapter: ModelAdapter, spec, stage: int,
                               grid: List[float]) -> int:
-    """Model evaluations in ONE inner objective at outer stage `stage`.
+    """Terminal-planner model evaluations in ONE inner objective at outer stage `stage`.
 
-    MeanFlow: exactly one direct transition s_k -> 1, at every stage.
-    Standard flow: the solver's stage count over the remaining suffix [s_k, ..., 1], which
-    shrinks by one interval per stage; the adapter's final-Euler policy applies because the
-    suffix does land on the data endpoint.
+    DIRECT (MeanFlow always; standard flow when asked for it): exactly ONE terminal-planner
+    evaluation at every stage -- one learned finite-interval transition T_theta(q; s_k -> 1)
+    for a MeanFlow, one direct clean-endpoint prediction x_hat_1(q, s_k) for a standard
+    flow.  A model EVALUATION is not a network FORWARD: classifier-free guidance still costs
+    two forwards, and `stats.network_forwards` is what records that.
+
+    SUFFIX (the legacy standard-flow planner): the solver's stage count over the remaining
+    suffix [s_k, ..., 1], which shrinks by one interval per stage; the adapter's final-Euler
+    policy applies because the suffix does land on the data endpoint.
     """
+    if spec_terminal_mode(spec) == TERMINAL_DIRECT:
+        return 1
     if adapter.spec.dynamics_family != STANDARD_FLOW:
         return 1
     return solver_evaluations(adapter, spec.solver or "euler",
@@ -288,6 +393,20 @@ def rhso_cost_estimate(values: Dict[str, Any], dynamics_family: str,
         return {"model_evals": 0, "planning_evals": 0, "backprops": 0,
                 "objective_evals": 0, "optimizer_iterations": 0}
 
+    mode = resolve_terminal_mode(values.get("rhso_terminal_mode"), dynamics_family)
+    if mode == TERMINAL_DIRECT and dynamics_family == STANDARD_FLOW:
+        # ONE direct endpoint prediction per inner objective, plus the one executed
+        # interval per stage, which still costs the solver's stage count.
+        solver = values.get("solver") or "euler"
+        stages = SOLVER_STAGE_EVALUATIONS[solver]
+        drops_a_stage = solver == "heun" and bool(euler_final_step_for_heun)
+        planning = n * m
+        execution = sum(stages - (1 if (drops_a_stage and k == n - 1) else 0)
+                        for k in range(n))
+        return {"model_evals": planning + execution, "planning_evals": planning,
+                "backprops": planning, "objective_evals": n * m,
+                "optimizer_iterations": n * m}
+
     if dynamics_family != STANDARD_FLOW:
         planning = n * m
         return {"model_evals": n * (m + 1), "planning_evals": planning,
@@ -308,30 +427,98 @@ def rhso_cost_estimate(values: Dict[str, Any], dynamics_family: str,
 
 
 # =====================================================================================
-# Standard flow (JiT, SiT): differentiable integration over the remaining suffix
+# Shared setup for both families
+# =====================================================================================
+def _prepare(adapter: ModelAdapter, problem, spec):
+    """Everything the two loops resolve identically, resolved once, in one place."""
+    _require_adam(spec)
+    terminal_mode = spec_terminal_mode(spec)
+    settings = settings_from_spec(spec)
+    return {
+        "B": adapter.backend(),
+        "phi": make_phi(problem, adapter.backend(), spec.phi_normalization),
+        "log_scale": phi_log_scale(problem, spec.phi_normalization),
+        "grid": rhso_time_grid(spec),
+        "N": int(_field(spec, "num_rhso_steps")),
+        "M": int(_field(spec, "num_opt_steps")),
+        "mu": rhso_mu(spec),
+        "terminal_mode": terminal_mode,
+        "settings": settings,
+    }
+
+
+def _make_recorder(adapter, cond, spec, problem, grid, settings, terminal_mode, stats):
+    """The diagnostic recorder for one chunk, or None when every diagnostic is off.
+
+    When it is None the loops below are, statement for statement, the loops that existed
+    before this module: no extra model call, no extra timer, no extra branch inside the
+    inner optimisation.
+    """
+    if not settings.any_enabled:
+        return None
+    stats.diagnostic_settings = settings.to_metadata()
+    stats.consistency_kind = consistency_kind(adapter.spec.dynamics_family, terminal_mode)
+    stats.terminal_planner_kind = terminal_planner_kind(adapter, terminal_mode)
+
+    def predict(state, s):
+        """The SAME terminal planner the inner objective uses, evaluated off-graph."""
+        return make_terminal_planner(adapter, cond, spec, grid, _stage_of(grid, s),
+                                     terminal_mode)(state)
+
+    return RhsoStageRecorder(adapter, cond, spec, problem, grid, settings, terminal_mode,
+                             predict, counters=stats,
+                             job_id=str(getattr(spec, "job_id", "")))
+
+
+def _stage_of(grid: List[float], s: float) -> int:
+    """Index of the outer time `s` on the grid; the last time maps to the last stage.
+
+    The diagnostics evaluate the terminal planner at s_k and at s_{k+1}; at the final
+    s_{k+1} = 1 there is no stage k+1, and the planner there is a degenerate prediction
+    that is only ever used to CLOSE the previous stage's consistency measurement.
+    """
+    for k, value in enumerate(grid[:-1]):
+        if abs(float(value) - float(s)) <= 1e-12:
+            return k
+    return len(grid) - 2
+
+
+# =====================================================================================
+# Standard flow (JiT, SiT)
+#   terminal planner: DIRECT endpoint prediction x_hat_1(q, s_k), or the legacy
+#   differentiable integration of the remaining suffix -- see `make_terminal_planner`
 # =====================================================================================
 def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
               spec) -> Tuple[Any, ReconstructionStats]:
-    """RHSO for an instantaneous-velocity model, with Adam on the current state."""
+    """RHSO for an instantaneous-velocity model, with Adam on the current state.
+
+    The EXECUTION rule is untouched by the terminal mode: exactly one `flow_step` over
+    [s_k, s_{k+1}] with the model's own solver and final-step policy, under `no_grad`.
+    Only the inner objective's terminal planner changes.
+    """
     import torch
 
-    _require_adam(spec)
-    B = adapter.backend()
-    phi = make_phi(problem, B, spec.phi_normalization)
-    log_scale = phi_log_scale(problem, spec.phi_normalization)
-    grid = rhso_time_grid(spec)
-    N = int(_field(spec, "num_rhso_steps"))
-    M = int(_field(spec, "num_opt_steps"))
-    mu = rhso_mu(spec)
+    setup = _prepare(adapter, problem, spec)
+    B, phi, log_scale = setup["B"], setup["phi"], setup["log_scale"]
+    grid, N, M, mu = setup["grid"], setup["N"], setup["M"], setup["mu"]
+    terminal_mode, settings = setup["terminal_mode"], setup["settings"]
 
     stats = ReconstructionStats()
+    recorder = _make_recorder(adapter, cond, spec, problem, grid, settings, terminal_mode,
+                              stats)
     started = time.perf_counter()
     x = x0.detach().clone()
 
     for k in range(N):
         s_k, s_next = grid[k], grid[k + 1]
-        suffix = rhso_planning_grid(grid, k)     # [s_k, s_{k+1}, ..., 1]
         per_objective = rhso_planning_evaluations(adapter, spec, k, grid)
+        # ONE place decides what the inner objective differentiates through.
+        terminal_of = make_terminal_planner(adapter, cond, spec, grid, k, terminal_mode)
+
+        stage_started = time.perf_counter()
+        stage_diagnostic_seconds = recorder.seconds if recorder is not None else 0.0
+        if recorder is not None:
+            recorder.begin_stage(k, s_k, s_next, x.detach())
 
         # A FRESH optimisation variable AND a fresh Adam state: the terminal transport map
         # has changed, so moments accumulated at s_{k-1} describe a different problem.
@@ -345,8 +532,7 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
         for iteration in range(M):
             opt.zero_grad(set_to_none=True)
             adapter.reset_counters()
-            terminal = integrate_flow(adapter, cond, q, spec, suffix,
-                                      reaches_data_endpoint=True)
+            terminal = terminal_of(q)
             fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
             loss, penalty = rhso_total_objective(B, fidelity, q, x_anchor, mu)
             loss.backward()
@@ -371,6 +557,14 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
                     "RHSO objective became non-finite at outer stage %d/%d (s=%.6f), "
                     "optimizer iteration %d/%d." % (k + 1, N, s_k, iteration + 1, M))
 
+        # ---- diagnostics at the FINAL post-update q -----------------------------------
+        # Deliberately NOT inferred from the last entry of the loss history: that value was
+        # computed BEFORE the last Adam update and belongs to a state that no longer exists.
+        if recorder is not None:
+            with torch.no_grad():
+                penalty_post = float(state_anchor_penalty(B, q.detach(), x_anchor))
+            recorder.end_stage(k, q.detach(), penalty_post)
+
         # ---- execute ONE interval, with the FINAL post-update q; inference only --------
         adapter.reset_counters()
         with torch.no_grad():
@@ -383,9 +577,13 @@ def flow_rhso(adapter: StandardFlowAdapter, cond: Conditioning, x0, problem,
             raise FloatingPointError(
                 "%s produced a non-finite state executing RHSO interval %d/%d "
                 "(s=%.6f -> %.6f)." % (adapter.spec.name, k + 1, N, s_k, s_next))
+        if recorder is not None:
+            recorder.record_stage_seconds(
+                k, (time.perf_counter() - stage_started)
+                - (recorder.seconds - stage_diagnostic_seconds))
 
     adapter.block(x)
-    stats.seconds = time.perf_counter() - started
+    _finalise(stats, recorder, started)
     stats.finite = _is_finite(adapter, x)
     return x, stats
 
@@ -406,28 +604,32 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
     import jax.numpy as jnp
     import optax
 
-    _require_adam(spec)
-    B = adapter.backend()
-    phi = make_phi(problem, B, spec.phi_normalization)
-    log_scale = phi_log_scale(problem, spec.phi_normalization)
-    grid = rhso_time_grid(spec)
-    N = int(_field(spec, "num_rhso_steps"))
-    M = int(_field(spec, "num_opt_steps"))
-    mu = rhso_mu(spec)
+    setup = _prepare(adapter, problem, spec)
+    B, phi, log_scale = setup["B"], setup["phi"], setup["log_scale"]
+    grid, N, M, mu = setup["grid"], setup["N"], setup["M"], setup["mu"]
+    terminal_mode, settings = setup["terminal_mode"], setup["settings"]
 
     stats = ReconstructionStats()
+    recorder = _make_recorder(adapter, cond, spec, problem, grid, settings, terminal_mode,
+                              stats)
     started = time.perf_counter()
     x = x0
 
     for k in range(N):
         s_k, s_next = grid[k], grid[k + 1]
+        terminal_of = make_terminal_planner(adapter, cond, spec, grid, k, terminal_mode)
+
+        stage_started = time.perf_counter()
+        stage_diagnostic_seconds = recorder.seconds if recorder is not None else 0.0
+        if recorder is not None:
+            recorder.begin_stage(k, s_k, s_next, jax.lax.stop_gradient(x))
 
         # The anchor is closed over as a CONSTANT: stop_gradient here means the penalty's
         # gradient flows to q only, and nothing rebinds it during the M inner iterations.
         x_anchor = jax.lax.stop_gradient(x)
 
-        def loss_fn(q, _s=s_k, _anchor=x_anchor):
-            terminal = adapter.transition(q, _s, 1.0, cond)      # ONE direct transition
+        def loss_fn(q, _anchor=x_anchor, _terminal=terminal_of):
+            terminal = _terminal(q)                              # ONE direct transition
             fidelity = phi(adapter.to_pixels(terminal, differentiable=True))
             total, penalty = rhso_total_objective(B, fidelity, q, _anchor, mu)
             return total, (fidelity, penalty)
@@ -464,6 +666,12 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
                     "RHSO objective became non-finite at outer stage %d/%d (s=%.6f), "
                     "optimizer iteration %d/%d." % (k + 1, N, s_k, iteration + 1, M))
 
+        # ---- diagnostics at the FINAL post-update q -----------------------------------
+        if recorder is not None:
+            recorder.end_stage(k, jax.lax.stop_gradient(q),
+                               float(state_anchor_penalty(B, jax.lax.stop_gradient(q),
+                                                          x_anchor)))
+
         # ---- execute ONE interval with the FINAL q -------------------------------------
         # The last inner objective was evaluated BEFORE the last Adam update, so its
         # terminal prediction belongs to a state that no longer exists; it is never reused.
@@ -477,11 +685,32 @@ def meanflow_rhso(adapter: MeanFlowAdapter, cond: Conditioning, x0, problem,
             raise FloatingPointError(
                 "%s produced a non-finite state executing RHSO transition %d/%d "
                 "(s=%.6f -> %.6f)." % (adapter.spec.name, k + 1, N, s_k, s_next))
+        if recorder is not None:
+            recorder.record_stage_seconds(
+                k, (time.perf_counter() - stage_started)
+                - (recorder.seconds - stage_diagnostic_seconds))
 
     x = adapter.block(x)
-    stats.seconds = time.perf_counter() - started
+    _finalise(stats, recorder, started)
     stats.finite = _is_finite(adapter, x)
     return x, stats
+
+
+def _finalise(stats, recorder, started: float) -> None:
+    """Close the diagnostics and report ALGORITHM runtime, not algorithm + diagnostics.
+
+    `stats.seconds` keeps its existing meaning exactly: the time the reconstruction itself
+    took.  Every stage-end evaluation, endpoint-consistency prediction, JVP, VJP and
+    randomised probe is measured separately and subtracted, and is reported in
+    `diagnostic_seconds` instead.  With diagnostics off the subtraction is of zero.
+    """
+    elapsed = time.perf_counter() - started
+    if recorder is None:
+        stats.seconds = elapsed
+        return
+    stats.diagnostic_seconds += float(recorder.seconds)
+    stats.stage_records.extend(recorder.finish())
+    stats.seconds = max(0.0, elapsed - float(recorder.seconds))
 
 
 def rhso_reconstruct(adapter: ModelAdapter, cond: Conditioning, x0, problem,

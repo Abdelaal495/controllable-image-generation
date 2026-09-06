@@ -6,6 +6,9 @@
 #     bash setup_cluster.sh                    # build the venv, then prefetch assets
 #     bash setup_cluster.sh --venv-only        # build the venv, skip downloads
 #     bash setup_cluster.sh --prefetch-only    # assume the venv exists, just download
+#     bash setup_cluster.sh --refresh          # after a git pull: install anything newly
+#                                              # required and REGENERATE activate_cluster.sh
+#                                              # WITHOUT rebuilding or deleting the venv
 #     bash setup_cluster.sh --python 3.12      # pick a different Python module
 #     bash setup_cluster.sh --venv $SCRATCH/env  # put the venv somewhere else
 #
@@ -25,6 +28,7 @@ PY_VERSION="3.11"
 VENV=""
 DO_VENV=1
 DO_PREFETCH=1
+REFRESH=0
 CONFIG="configs/experiments.yaml"
 
 while [ $# -gt 0 ]; do
@@ -34,13 +38,23 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="$2"; shift 2 ;;
     --venv-only) DO_PREFETCH=0; shift ;;
     --prefetch-only) DO_VENV=0; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --refresh) REFRESH=1; DO_PREFETCH=0; shift ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1 (try --help)"; exit 2 ;;
   esac
 done
 
 # ------------------------------------------------------------------ where are we?
 CLUSTER="${CC_CLUSTER:-unknown}"
+if [ "$CLUSTER" = "unknown" ]; then
+  # CC_CLUSTER is set by the Alliance environment; hostname is the fallback so a shell
+  # that lost it still selects the right cluster-specific module stack.
+  case "$(hostname -f 2>/dev/null || hostname)" in
+    *rorqual*) CLUSTER="rorqual" ;;
+    *narval*)  CLUSTER="narval" ;;
+    *nibi*)    CLUSTER="nibi" ;;
+  esac
+fi
 if [ -n "${SLURM_JOB_ID:-}" ]; then
   echo "ERROR: this script is running inside a SLURM job (job ${SLURM_JOB_ID})."
   echo "       Compute nodes have no internet. Run it on a LOGIN node instead."
@@ -53,6 +67,13 @@ if ! command -v module >/dev/null 2>&1; then
 fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Cluster-conditional module selection, shared by the venv build below and by the
+# generated activate_cluster.sh so the two can never disagree. Narval is not listed there
+# and therefore keeps the Alliance default CUDA/cuDNN exactly as before.
+# shellcheck disable=SC1091
+. "$REPO_DIR/scripts/cluster_modules.sh"
+CUDA_LOAD_LINE="$(mpcflow_cuda_load_line "$CLUSTER")"
+CUDA_DESCRIPTION="$(mpcflow_cuda_description "$CLUSTER")"
 : "${SCRATCH:=$HOME/scratch}"
 VENV="${VENV:-$HOME/mpcflow-env}"
 # /home is small and backed up; caches and outputs are large and regenerable -> $SCRATCH.
@@ -67,6 +88,7 @@ echo "   virtualenv   : ${VENV}"
 echo "   cache root   : ${CACHE_ROOT}     (checkpoints, repos, images)"
 echo "   output root  : ${OUTPUT_ROOT}"
 echo "   python module: python/${PY_VERSION}"
+echo "   cuda modules : ${CUDA_DESCRIPTION}"
 echo "=============================================================================="
 
 mkdir -p "$CACHE_ROOT" "$OUTPUT_ROOT"
@@ -79,9 +101,11 @@ if [ $DO_VENV -eq 1 ]; then
   module load StdEnv/2023 >/dev/null 2>&1 || true
   module load "python/${PY_VERSION}" || { echo "ERROR: no python/${PY_VERSION} module."; \
       echo "Available:"; module spider python 2>&1 | head -20; exit 1; }
-  # cuda/cudnn are what the Alliance JAX and PyTorch wheels link against.
-  module load cuda cudnn >/dev/null 2>&1 || module load cuda >/dev/null 2>&1 || \
-      echo "  (no cuda module loaded; CPU-only wheels will still work)"
+  # cuda/cudnn are what the Alliance JAX and PyTorch wheels link against. The exact
+  # modules are cluster-conditional (scripts/cluster_modules.sh) and this is the SAME line
+  # that goes into activate_cluster.sh below.
+  eval "$CUDA_LOAD_LINE"
+  echo "  cuda stack   : ${CUDA_DESCRIPTION}"
   # The 'arrow' module provides pyarrow, which `datasets` requires. The Alliance wheelhouse ships a
   # DUMMY pyarrow wheel that fails on purpose and tells you to load this module instead --
   # and it MUST be loaded BEFORE the virtualenv is activated, or `pip install datasets`
@@ -102,6 +126,11 @@ if [ $DO_VENV -eq 1 ]; then
   fi
   # shellcheck disable=SC1091
   source "$VENV/bin/activate"
+
+if [ $REFRESH -eq 1 ]; then
+  echo
+  echo "  --refresh: keeping the existing environment; installing only what is missing."
+else
   pip install --no-index --upgrade pip
 
   echo
@@ -142,6 +171,24 @@ if [ $DO_VENV -eq 1 ]; then
 
   # datasets needs pyarrow from the arrow module loaded above; retry now that it is.
   python -c "import datasets" >/dev/null 2>&1 || pip install --no-index datasets || true
+fi
+
+  # ---------------------------------------------------------------- NVML bindings
+  # `pynvml` is what src/memory.py uses to sample PID-RESIDENT GPU memory, which is the
+  # ONLY memory number comparable between the PyTorch (JiT) and JAX (pMF) models. Without
+  # it every job reports gpu_process_memory_source=unavailable -- which is exactly what
+  # the first Rorqual smoke run did. The module is called `pynvml`; the DISTRIBUTION that
+  # provides it is `nvidia-ml-py`. Alliance wheelhouse first, PyPI as the fallback.
+  if python -c "import pynvml" >/dev/null 2>&1; then
+    echo "  nvidia-ml-py already present (pynvml imports)"
+  else
+    pip install --no-index nvidia-ml-py >/dev/null 2>&1 \
+      || pip install nvidia-ml-py >/dev/null 2>&1 \
+      || echo "  ! nvidia-ml-py could not be installed: the cross-framework"
+    python -c "import pynvml" >/dev/null 2>&1 \
+      && echo "  nvidia-ml-py installed (pynvml imports)" \
+      || echo "  ! pynvml still does not import: gpu_process_* will stay 'unavailable'"
+  fi
 
   echo
   echo "  Verifying:"
@@ -154,7 +201,7 @@ for name, label in [("numpy", "numpy"), ("yaml", "PyYAML"), ("PIL", "Pillow"),
                     ("lpips", "lpips"), ("datasets", "datasets"),
                     ("huggingface_hub", "huggingface_hub"),
                     ("ml_collections", "ml_collections"), ("pyarrow", "pyarrow (arrow module)"),
-                    ("accelerate", "accelerate")]:
+                    ("accelerate", "accelerate"), ("pynvml", "pynvml (nvidia-ml-py)")]:
     try:
         module = importlib.import_module(name)
         print("    %-18s %s" % (label, getattr(module, "__version__", "ok")))
@@ -177,6 +224,14 @@ PYEOF2
   echo
   echo "  NOTE: torch/jax report no GPU on a login node -- login nodes have none."
   echo "        Device visibility is checked inside the job, not here."
+  echo "        The same applies to NVML: the line above only proves that `pynvml`"
+  echo "        IMPORTS. On a login node pynvml.nvmlInit() raises"
+  echo "        NVMLError_DriverNotLoaded because there is no GPU driver, which is"
+  echo "        EXPECTED and is not a setup failure. Whether NVML process-memory"
+  echo "        sampling actually works can only be verified inside a GPU job:"
+  echo "            salloc ... --gpus-per-node=1 --time=0:10:00"
+  echo "            source activate_cluster.sh"
+  echo "            python -c \"import pynvml; pynvml.nvmlInit(); print(pynvml.nvmlDeviceGetCount())\""
   if ! python -c "import datasets" >/dev/null 2>&1; then
     echo
     echo "  !! 'datasets' is MISSING. It needs pyarrow, which comes from the arrow module."
@@ -214,14 +269,15 @@ fi
 ACTIVATE="$REPO_DIR/activate_cluster.sh"
 cat > "$ACTIVATE" <<EOF
 # Generated by setup_cluster.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for cluster ${CLUSTER}.
+# GITIGNORED and machine-specific: regenerate it with \`bash setup_cluster.sh --refresh\`
+# rather than editing or committing it.
 # Source this from a job script or an interactive session:
 #     source $(basename "$ACTIVATE")
-module --force purge >/dev/null 2>&1
-module load StdEnv/2023 >/dev/null 2>&1 || true
-module load python/${PY_VERSION} >/dev/null 2>&1
-module load cuda cudnn >/dev/null 2>&1 || module load cuda >/dev/null 2>&1 || true
-# arrow supplies pyarrow for datasets; it must be loaded BEFORE activating the venv.
-module load gcc arrow >/dev/null 2>&1 || module load arrow >/dev/null 2>&1 || true
+#
+# CUDA stack: ${CUDA_DESCRIPTION}
+# The module lines below come from scripts/cluster_modules.sh, the SAME helper that chose
+# the modules the virtualenv was built and verified against.
+$(mpcflow_module_preamble "$CLUSTER" "$PY_VERSION")
 source ${VENV}/bin/activate
 export MPCFLOW_CACHE_ROOT="${CACHE_ROOT}"
 export MPCFLOW_OUTPUT_ROOT="${OUTPUT_ROOT}"

@@ -57,6 +57,8 @@ from src.models.base import PREFETCH_HOOKS
 from src.models.base import Conditioning
 from src.reconstruction import select_reconstructor
 from src.problems import ProblemStore
+from src.rhso import rhso_time_grid
+from src.rhso_diagnostics import CONSISTENCY_MEANING, stage_arrays, stage_summary
 from src.sdedit import ReconstructionStats
 from src.utils import (RULE, THIN, apply_offline_mode, detect_accelerator,
                        detect_environment, env_default, free_memory, in_ipython, jsonable,
@@ -140,6 +142,35 @@ def parse_shard(text: Optional[str]) -> Optional[Tuple[int, int]]:
     if total < 1 or not 0 <= shard < total:
         raise ConfigError("--shard K/N needs N >= 1 and 0 <= K < N. Got %r" % text)
     return shard, total
+
+
+def shard_suffix(shard: Optional[Tuple[int, int]]) -> str:
+    """The filename suffix that makes a top-level artefact PRIVATE to one array task.
+
+    Every mutable file an array task writes into the SHARED run directory must carry this
+    suffix.  Two tasks writing `checks.json` (or `run_metadata.json`) is a last-writer-wins
+    race: the file that survives contains one shard's information and the other shard's is
+    silently lost -- which is exactly what happened in the two-shard H100 smoke test, where
+    the downloaded `checks.json` held only one model family even though both families'
+    checks had clearly run.  `--aggregate` merges the shard-private files into the
+    canonical unsuffixed ones afterwards.
+    """
+    return "" if shard is None else "_shard%02d" % shard[0]
+
+
+SHARD_FILE_PATTERNS: Tuple[Tuple[str, str], ...] = (
+    # (canonical name, glob for the shard-private copies) -- everything an array task may
+    # write at the TOP level of the run directory.  Audited against the whole of run.py:
+    # per-JOB artefacts live in unique per-spec directories and shards are disjoint, so
+    # they need no suffix; config.yaml / resolved_config.yaml are identical for every task
+    # and are written once (see `_write_shared_plan_files`).
+    ("results.csv", "results_shard*.csv"),
+    ("results_per_image.csv", "results_per_image_shard*.csv"),
+    ("results.jsonl", "results_shard*.jsonl"),
+    ("experiment_log.jsonl", "experiment_log_shard*.jsonl"),
+    ("checks.json", "checks_shard*.json"),
+    ("run_metadata.json", "run_metadata_shard*.json"),
+)
 
 
 def select_shard(specs: Sequence, shard: int, total: int) -> List:
@@ -414,7 +445,10 @@ def run_job(adapter, spec, problem, manager, profiler=None) -> Dict[str, Any]:
             chunk = chunk + [chunk[-1]] * pad
             padded_items += pad
 
-        sub_problem = problem.subset(chunk)
+        # `pad` is recorded on the subset so per-image diagnostics can drop the repeated
+        # rows. It changes no measurement, no objective and no gradient: the fidelity is
+        # summed over the batch, so a padded row only ever feeds its own duplicate.
+        sub_problem = problem.subset(chunk, padded_rows=pad)
         labels = (problem.labels[np.asarray(chunk, np.int64)] if problem.labels is not None
                   else np.zeros((len(chunk),), np.int32))
         # Every strategy receives the SAME conditioning object for an image.
@@ -472,6 +506,12 @@ def warm_up(adapter, spec, problem, manager, verbose: bool = True) -> float:
         reductions["n_ctrl"] = 1
     if spec.method in ("dflow", "rhso"):
         reductions["num_opt_steps"] = 1
+    if spec.method == "rhso" and spec.rhso_jacobian_diagnostics:
+        # The probes and power iterations re-run the SAME traced computation, so one of
+        # each compiles everything the timed job needs. Their number is a cost, not a
+        # shape -- and the diagnostics are excluded from the timed number anyway.
+        reductions["rhso_jacobian_probes"] = 1
+        reductions["rhso_jacobian_power_iters"] = 1
     tiny = dataclasses.replace(spec, **reductions)
     started = time.perf_counter()
     run_job(adapter, tiny, problem, manager, profiler=None)
@@ -499,8 +539,12 @@ def warmup_key(spec, problem) -> Tuple:
             # D-Flow: the trajectory graph, not the number of Adam updates.
             spec.optimizer,
             # RHSO: N fixes the outer grid AND, for a standard flow, every planning suffix;
-            # mu changes the objective that is traced and differentiated.
-            spec.num_rhso_steps, spec.mu)
+            # mu changes the objective that is traced and differentiated; the terminal mode
+            # decides WHICH computation the objective is (one endpoint prediction versus an
+            # integrated suffix), and the diagnostics add traced computations of their own.
+            spec.num_rhso_steps, spec.mu, spec.rhso_terminal_mode,
+            spec.rhso_stage_diagnostics, spec.rhso_consistency_diagnostics,
+            spec.rhso_jacobian_diagnostics, spec.rhso_gradient_authority_diagnostics)
 
 
 # =====================================================================================
@@ -530,8 +574,32 @@ RESULT_COLUMNS = [
     # compute accounting added with PnP-Flow / D-Flow
     "objective_evaluations", "data_gradient_evaluations", "optimizer_iterations",
     "denoiser_samples", "expected_objective_evaluations", "expected_data_gradients",
+    # RHSO terminal planner and theory diagnostics
+    "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
+    "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
+    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    "rhso_gradient_authority_diagnostics",
+    # Which common-random-number pairing group produced this row's measurement, if any.
+    "measurement_noise_group",
+    # DIAGNOSTIC cost, kept strictly apart from the algorithmic counters above
+    "diagnostic_model_evaluations", "diagnostic_network_forwards", "diagnostic_jvps",
+    "diagnostic_vjps", "diagnostic_seconds",
+    # job-level summaries of the per-(image, stage) arrays in results.npz
+    "stage_count", "stage_delta_first", "stage_delta_last", "stage_delta_per_step_first",
+    "stage_delta_per_step_last", "stage_theta_first", "stage_theta_last",
+    "stage_v_pre_first", "stage_v_post_last",
+    "endpoint_shift_native_relative_mean", "endpoint_shift_pixel_rmse_mean",
+    "fidelity_shift_execution_mean", "next_stage_recovery_mean",
+    "jacobian_sigma_max_first", "jacobian_sigma_max_last",
+    "jacobian_log_anisotropy_first", "jacobian_log_anisotropy_last",
+    "gradient_aligned_authority_first", "gradient_aligned_authority_last",
+    "gradient_aligned_authority_mean", "endpoint_fidelity_grad_norm_mean",
+    "state_fidelity_grad_norm_mean",
     # GPU memory (job peak at the configured batch size -- never per image)
     "gpu_baseline_gib", "gpu_peak_gib", "gpu_incremental_peak_gib", "gpu_memory_source",
+    # The ONE memory metric that is comparable between PyTorch and JAX (see src/memory.py)
+    "gpu_process_baseline_gib", "gpu_process_peak_gib", "gpu_process_incremental_peak_gib",
+    "gpu_process_memory_source",
     "batch_size", "num_images", "padded_items", "warmup_seconds", "model_load_seconds",
     "seed", "replicate", "generative_noise_id", "measurement_id", "guide_id",
     "initial_state_fingerprint", "conditioning_label", "cfg_scale",
@@ -604,10 +672,38 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "denoiser_samples": stats.denoiser_samples,
         "expected_objective_evaluations": spec.expected_objective_evals * spec.num_chunks,
         "expected_data_gradients": spec.expected_data_gradients * spec.num_chunks,
+        "rhso_terminal_mode": spec.rhso_terminal_mode,
+        "rhso_terminal_planner": spec.rhso_terminal_planner,
+        # What ||p_k - r_k|| means for this job. A pMF semigroup defect and a JiT endpoint
+        # predictor's shift are different claims; the column keeps them apart.
+        "rhso_consistency_kind": (spec.rhso_consistency_kind
+                                  if spec.rhso_consistency_diagnostics else None),
+        "rhso_stage_diagnostics": spec.rhso_stage_diagnostics,
+        "rhso_consistency_diagnostics": spec.rhso_consistency_diagnostics,
+        "rhso_jacobian_diagnostics": spec.rhso_jacobian_diagnostics,
+        "rhso_jacobian_probes": (spec.rhso_jacobian_probes
+                                 if spec.rhso_jacobian_diagnostics else None),
+        "rhso_jacobian_power_iters": (spec.rhso_jacobian_power_iters
+                                      if spec.rhso_jacobian_diagnostics else None),
+        "rhso_jacobian_seed": (spec.rhso_jacobian_seed
+                               if spec.rhso_jacobian_diagnostics else None),
+        "rhso_gradient_authority_diagnostics": spec.rhso_gradient_authority_diagnostics,
+        "measurement_noise_group": spec.measurement_noise_group,
+        # Diagnostic compute, never added to model_evaluations / network_forwards /
+        # runtime: those keep their existing meaning as the ALGORITHM's cost.
+        "diagnostic_model_evaluations": stats.diagnostic_model_evals,
+        "diagnostic_network_forwards": stats.diagnostic_network_forwards,
+        "diagnostic_jvps": stats.diagnostic_jvps,
+        "diagnostic_vjps": stats.diagnostic_vjps,
+        "diagnostic_seconds": round(float(stats.diagnostic_seconds), 4),
         "gpu_baseline_gib": memory.get("gpu_baseline_gib"),
         "gpu_peak_gib": memory.get("gpu_peak_gib"),
         "gpu_incremental_peak_gib": memory.get("gpu_incremental_peak_gib"),
         "gpu_memory_source": memory.get("gpu_memory_source"),
+        "gpu_process_baseline_gib": memory.get("gpu_process_baseline_gib"),
+        "gpu_process_peak_gib": memory.get("gpu_process_peak_gib"),
+        "gpu_process_incremental_peak_gib": memory.get("gpu_process_incremental_peak_gib"),
+        "gpu_process_memory_source": memory.get("gpu_process_memory_source"),
         "batch_size": spec.batch_size, "num_images": spec.num_images,
         "padded_items": (run or {}).get("padded_items", 0),
         "warmup_seconds": round(float(warmup_seconds), 4),
@@ -623,6 +719,9 @@ def build_record(spec, plan, problem, run: Optional[Dict[str, Any]],
         "cfg_scale": guidance.get("scale"),
         "status": status, "failure": failure, "output_dir": None, "timestamp": now_iso(),
     }
+    # Job-level summaries of the per-(image, stage) diagnostics. The RAW [image, stage]
+    # arrays stay in the per-job results.npz -- results.csv gets scalars only.
+    record.update(stage_summary(stats.stage_records))
     return record
 
 
@@ -646,6 +745,25 @@ def per_image_rows(record: Dict[str, Any], metrics: Dict[str, Any],
     return rows
 
 
+def write_rows_csv(path: Path, rows: Sequence[Dict[str, Any]]) -> Path:
+    """One CSV writer for the shard files AND for the merged files.
+
+    Shared deliberately: `results_per_image.csv` produced by `--aggregate` must have the
+    same columns, in the same order, as `results_per_image_shardNN.csv` written by the
+    array tasks, or a downstream analysis cannot read both.  The header is always written,
+    even for an empty row list.
+    """
+    import csv
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k) for k in RESULT_COLUMNS})
+    return path
+
+
 class ResultWriter:
     """Append-only, crash-safe persistence.
 
@@ -659,7 +777,7 @@ class ResultWriter:
         self.image_rows: List[Dict[str, Any]] = []
         # Parallel array tasks must never write the same file: each shard owns its own,
         # and `--aggregate` merges them from the per-job metadata afterwards.
-        self.suffix = "" if shard is None else "_shard%02d" % shard[0]
+        self.suffix = shard_suffix(shard)
         self.jsonl = self.run_dir / ("results%s.jsonl" % self.suffix)
         self.log = self.run_dir / ("experiment_log%s.jsonl" % self.suffix)
 
@@ -677,20 +795,13 @@ class ResultWriter:
             fh.write(json.dumps(jsonable(entry), default=str) + "\n")
 
     def write_csv(self) -> Path:
-        import csv
         path = self.run_dir / ("results%s.csv" % self.suffix)
-        with open(path, "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
-            writer.writeheader()
-            for row in self.records:
-                writer.writerow({k: row.get(k) for k in RESULT_COLUMNS})
-        if self.image_rows:
-            per_image = self.run_dir / ("results_per_image%s.csv" % self.suffix)
-            with open(per_image, "w", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=RESULT_COLUMNS, extrasaction="ignore")
-                writer.writeheader()
-                for row in self.image_rows:
-                    writer.writerow({k: row.get(k) for k in RESULT_COLUMNS})
+        write_rows_csv(path, self.records)
+        # Written unconditionally, header included: downstream theory analysis reads
+        # `results_per_image.csv` by name, and a file that only appears when some job
+        # happened to produce per-image metrics is a schema that cannot be relied on.
+        write_rows_csv(self.run_dir / ("results_per_image%s.csv" % self.suffix),
+                       self.image_rows)
         return path
 
 
@@ -708,6 +819,50 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
     payload["problem_metadata"] = problem.to_metadata()
     payload["per_image"] = {k: metrics.get(k) for k in
                             ("psnr_per_image", "ssim_per_image", "lpips_per_image")}
+    stats = run["stats"]
+    if stats.stage_records:
+        # Everything a later analysis needs to interpret the arrays in results.npz without
+        # rerunning a single model.
+        payload["rhso_diagnostics"] = {
+            "model": spec.model,
+            "dynamics_family": spec.dynamics_family,
+            "terminal_mode": spec.rhso_terminal_mode,
+            "terminal_planner": stats.terminal_planner_kind or spec.rhso_terminal_planner,
+            "consistency_kind": stats.consistency_kind,
+            "consistency_meaning": CONSISTENCY_MEANING.get(stats.consistency_kind or ""),
+            "settings": stats.diagnostic_settings,
+            "batch_size": spec.batch_size,
+            "num_images": spec.num_images,
+            "padded_items": run.get("padded_items", 0),
+            "num_rhso_steps": spec.num_rhso_steps,
+            "num_opt_steps": spec.num_opt_steps,
+            "t0": spec.t0, "canonical_start_time": spec.canonical_start_time,
+            "beta": spec.beta, "mu": spec.mu, "lr": spec.lr,
+            "phi_normalization": spec.phi_normalization,
+            "outer_times": rhso_time_grid(spec),
+            "diagnostic_cost": {
+                "model_evals": stats.diagnostic_model_evals,
+                "network_forwards": stats.diagnostic_network_forwards,
+                "jvps": stats.diagnostic_jvps, "vjps": stats.diagnostic_vjps,
+                "seconds": round(float(stats.diagnostic_seconds), 4)},
+            "gpu_memory_source": record.get("gpu_memory_source"),
+            "gpu_process_memory_source": record.get("gpu_process_memory_source"),
+            "conventions": (
+                "Arrays are [image, stage] (gains are [image, stage, probe]); rows follow "
+                "problem.image_ids and padded batch rows are excluded. V_pre / V_post are "
+                "PER-IMAGE terminal fidelities from problems.make_phi_per_sample, and "
+                "V_post is evaluated AFTER the final Adam update, never read off the loss "
+                "history. The final stage has no successor, so its consistency, "
+                "fidelity_shift_execution and next_stage_recovery entries are NaN by "
+                "convention rather than fabricated. jacobian_sigma_max is a power-iteration "
+                "estimate of the DOMINANT singular scale only; the gain statistics are "
+                "empirical sample-based anisotropy, and neither is an exact condition "
+                "number. gradient_aligned_authority is "
+                "||J^T grad Phi|| / ||grad Phi|| of the FIDELITY ONLY -- the state-anchor "
+                "mu penalty is excluded -- measured at the state entering the stage, and "
+                "is NaN by convention whenever the endpoint gradient norm falls below "
+                "the documented threshold rather than being divided by an epsilon."),
+        }
     save_json(out / "metadata.json", payload)
     arrays: Dict[str, Any] = {"reconstruction": to_uint8(run["pixels"])}
     if spec.record_loss_history and run["stats"].loss_history:
@@ -720,6 +875,9 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
                                                     np.float32)
             arrays["state_penalty_history"] = np.asarray(
                 run["stats"].state_penalty_history, np.float32)
+    # [image, stage] structure is preserved deliberately: the whole point of these
+    # diagnostics is to compare stage k with stage k+1 for the SAME image.
+    arrays.update(stage_arrays(run["stats"].stage_records, problem.image_ids))
     np.savez_compressed(out / "results.npz", **arrays)
     if save_images:
         img_dir = out / "images"
@@ -728,6 +886,68 @@ def persist_job(run_dir: Path, spec, run: Dict[str, Any], record: Dict[str, Any]
         for i, pix in enumerate(run["pixels"]):
             Image.fromarray(to_uint8(pix)).save(img_dir / ("%s.png" % problem.image_ids[i]))
     return out
+
+
+# Fields added to JobSpec AFTER runs may already have been written to disk.  A stored job
+# that predates them can only be reused when the new job would run the SAME computation.
+NEW_SPEC_FIELDS: Tuple[str, ...] = (
+    "rhso_terminal_mode", "rhso_terminal_planner", "rhso_consistency_kind",
+    "rhso_stage_diagnostics", "rhso_consistency_diagnostics", "rhso_jacobian_diagnostics",
+    "rhso_jacobian_probes", "rhso_jacobian_power_iters", "rhso_jacobian_seed",
+    "rhso_gradient_authority_diagnostics", "measurement_noise_group")
+
+
+def _describes_legacy_behaviour(name: str, current: Dict[str, Any]) -> bool:
+    """Would this NEW field's value reproduce what a run predating it did?
+
+    * `rhso_terminal_mode` must resolve to the planner its family already used -- a job
+      that now asks a standard flow for DIRECT planning is a different experiment and must
+      re-run.
+    * `rhso_terminal_planner` and `rhso_consistency_kind` are derived LABELS, not settings:
+      they are functions of the mode and the model, so they cannot change what is computed.
+    * every diagnostic flag must be off; diagnostics add measurements a stored run does not
+      contain, so a job that wants them cannot be satisfied by an old artefact.
+    * the probe budget and seed only matter when the Jacobian diagnostic is on, which the
+      previous rule has already excluded.
+    """
+    from src.rhso import legacy_terminal_mode
+    value = current.get(name)
+    if name == "rhso_terminal_mode":
+        return value is None or value == legacy_terminal_mode(current.get("dynamics_family"))
+    if name in ("rhso_terminal_planner", "rhso_consistency_kind"):
+        return True
+    if name in ("rhso_stage_diagnostics", "rhso_consistency_diagnostics",
+                "rhso_jacobian_diagnostics", "rhso_gradient_authority_diagnostics"):
+        return not value
+    if name == "measurement_noise_group":
+        # A stored artefact was produced with the original, unpaired seeding. A job that
+        # now asks for a pairing group wants a DIFFERENT y and must re-run.
+        return value is None
+    return True
+
+
+def _resolved_spec_matches(stored: Any, current: Dict[str, Any]) -> bool:
+    """Is a stored resolved spec the same experiment as the one about to run?
+
+    Every field they share must agree exactly -- that is the existing rule, and it is what
+    stops a job differing only in gamma0 or lr from reusing another's reconstruction.  The
+    one concession is to fields that did not EXIST when the stored job ran: an artefact
+    written before the RHSO terminal-planner and diagnostic fields were added is still
+    resumable, but only when the new job's values for them describe the same computation
+    (see `_describes_legacy_behaviour`).
+    """
+    if not isinstance(stored, dict):
+        return False
+    if stored == current:
+        return True
+    if set(stored) - set(current):
+        return False                              # the stored run knew fields we do not
+    added = set(current) - set(stored)
+    if any(name not in NEW_SPEC_FIELDS for name in added):
+        return False
+    if not all(_describes_legacy_behaviour(name, current) for name in added):
+        return False
+    return all(current[name] == value for name, value in stored.items())
 
 
 def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
@@ -747,7 +967,7 @@ def load_finished_job(run_dir: Path, spec) -> Optional[Dict[str, Any]]:
         return None
     if payload.get("status") != "ok" or payload.get("job_id") != spec.job_id:
         return None
-    if payload.get("resolved_spec") != jsonable(spec.to_dict()):
+    if not _resolved_spec_matches(payload.get("resolved_spec"), jsonable(spec.to_dict())):
         return None
     with np.load(array_path) as z:
         pixels = z["reconstruction"]
@@ -1003,38 +1223,215 @@ def prefetch_assets(plan, config: Dict[str, Any], cache_root: Path) -> Dict[str,
     return report
 
 
+def image_rows_from_metadata(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Rebuild one job's per-image rows from its persisted metadata.json.
+
+    `persist_job` stores the per-image metric vectors under "per_image" and the image ids
+    inside "problem_metadata", so the rows can be reconstructed with the SAME function that
+    produced them during the run -- no separate schema, and nothing to drift.  Returns []
+    when a job predates those fields rather than inventing rows.
+    """
+    per_image = payload.get("per_image") or {}
+    image_ids = ((payload.get("problem_metadata") or {}).get("image_ids") or [])
+    if not image_ids:
+        # An older artefact without problem metadata: fall back to the length of whichever
+        # metric vector is present, so a partial run still contributes its rows.
+        longest = max((len(per_image.get(k) or [])
+                       for k in ("psnr_per_image", "ssim_per_image", "lpips_per_image")),
+                      default=0)
+        if not longest:
+            return []
+        image_ids = ["%s#%d" % (payload.get("job_id", "job"), i) for i in range(longest)]
+    record = {k: payload.get(k) for k in RESULT_COLUMNS}
+    return per_image_rows(record, per_image, image_ids)
+
+
 def collect_finished_jobs(run_dir: Path, plan) -> Tuple[List[Dict[str, Any]],
+                                                        List[Dict[str, Any]],
                                                         Dict[str, np.ndarray]]:
     """Read every per-job artefact under a run directory.
 
     Per-job metadata.json is the source of truth, so merging the output of parallel array
     tasks needs no coordination between them and no shared append-only file.
+
+    Three things this guarantees for `--aggregate`:
+
+      * NO DUPLICATES -- one job_id contributes once, even if a stale directory from an
+        earlier layout still holds a copy;
+      * NO DROPPED ROWS -- every finished job contributes both its summary record and its
+        per-image rows, so a complete 4-job x 4-image smoke run merges to exactly 16
+        per-image rows;
+      * DETERMINISTIC ORDER -- sorted by the job's position in the resolved plan (job_id
+        breaks ties and orders anything the plan does not contain), so two aggregations of
+        the same directory produce byte-identical CSVs regardless of filesystem order.
     """
-    records, reconstructions = [], {}
-    by_id = {s.job_id: s for s in plan.specs}
+    order = {spec.job_id: i for i, spec in enumerate(plan.specs)}
+    by_id = set(order)
+    found: Dict[str, Dict[str, Any]] = {}
+    reconstructions = {}
     for meta_path in sorted(run_dir.rglob("metadata.json")):
         try:
             payload = json.loads(meta_path.read_text())
         except Exception:
             continue
-        if "job_id" not in payload or payload.get("status") != "ok":
+        job_id = payload.get("job_id")
+        if not job_id or payload.get("status") != "ok" or job_id in found:
             continue
-        records.append({k: payload.get(k) for k in RESULT_COLUMNS})
+        found[job_id] = payload
         array_path = meta_path.parent / "results.npz"
-        if payload["job_id"] in by_id and array_path.exists():
+        if job_id in by_id and array_path.exists():
             try:
                 with np.load(array_path) as z:
-                    reconstructions[payload["job_id"]] = (
+                    reconstructions[job_id] = (
                         np.asarray(z["reconstruction"], np.float32) / 127.5) - 1.0
             except Exception:
                 pass
-    return records, reconstructions
+
+    ranked = sorted(found.items(), key=lambda kv: (order.get(kv[0], len(order)), kv[0]))
+    records = [{k: payload.get(k) for k in RESULT_COLUMNS} for _, payload in ranked]
+    rows: List[Dict[str, Any]] = []
+    for _, payload in ranked:
+        rows.extend(image_rows_from_metadata(payload))
+    return records, rows, reconstructions
+
+
+def _shard_index(path: Path) -> int:
+    """The NN of a `..._shardNN.ext` filename, for deterministic ordering."""
+    stem = Path(path).stem
+    marker = stem.rfind("_shard")
+    if marker < 0:
+        return -1
+    try:
+        return int(stem[marker + len("_shard"):])
+    except ValueError:
+        return -1
+
+
+def _shard_files(run_dir: Path, pattern: str) -> List[Tuple[int, Path]]:
+    return sorted(((_shard_index(p), p) for p in run_dir.glob(pattern)),
+                  key=lambda pair: (pair[0], pair[1].name))
+
+
+def merge_shard_checks(run_dir: Path) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """Merge `checks_shardNN.json` into ONE canonical check list.
+
+    Model checks live under a per-model scope, so a two-shard run that put pMF in shard 00
+    and JiT in shard 01 contributes both families here -- which the last-writer-wins
+    `checks.json` of the first smoke test did not.
+
+    Structural checks run in EVERY shard and therefore appear repeatedly.  They are
+    de-duplicated on (scope, name), and when two shards disagree the FAILING result is the
+    one kept: a merge must never be able to hide a failure that some shard observed.
+    """
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    seen: List[int] = []
+    for index, path in _shard_files(run_dir, "checks_shard*.json"):
+        try:
+            entries = json.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(entries, list):
+            continue
+        seen.append(index)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            key = (str(entry.get("scope")), str(entry.get("name")))
+            record = dict(entry)
+            record["shard"] = index
+            previous = merged.get(key)
+            if previous is None:
+                record["shards"] = [index]
+                merged[key] = record
+            else:
+                shards = list(previous.get("shards") or [])
+                if index not in shards:
+                    shards.append(index)
+                # A failure anywhere wins over a pass elsewhere.
+                keep = previous if previous.get("passed") is False else record
+                keep = dict(keep)
+                keep["shards"] = shards
+                merged[key] = keep
+    ordered = sorted(merged.values(),
+                     key=lambda e: (min(e.get("shards") or [0]), str(e.get("scope")),
+                                    str(e.get("name"))))
+    return ordered, seen
+
+
+def merge_shard_metadata(run_dir: Path, checks: List[Dict[str, Any]],
+                         figures: Sequence[Path]) -> Optional[Dict[str, Any]]:
+    """Merge `run_metadata_shardNN.json` into one canonical provenance document.
+
+    Nothing is dropped.  Per-model dictionaries (provenance, load seconds, repositories,
+    problems, degraded metrics) are unioned across shards; scalars that describe the whole
+    run are taken from the lowest-numbered shard; anything that is genuinely per-shard --
+    the accelerator each task landed on, its elapsed time, its timing summary -- is kept
+    under `shards`, and each shard's COMPLETE original payload is preserved verbatim under
+    `shard_metadata` so no field can be lost by an omission here.
+    """
+    payloads: List[Tuple[int, Dict[str, Any]]] = []
+    for index, path in _shard_files(run_dir, "run_metadata_shard*.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payloads.append((index, payload))
+    if not payloads:
+        return None
+
+    first = payloads[0][1]
+    merged: Dict[str, Any] = {k: v for k, v in first.items()
+                              if k not in ("checks", "timing", "accelerator", "figures",
+                                           "elapsed_seconds", "warnings",
+                                           "model_provenance", "model_load_seconds",
+                                           "repositories", "problems",
+                                           "degraded_metrics")}
+    for key in ("model_provenance", "model_load_seconds", "repositories", "problems",
+                "degraded_metrics"):
+        union: Dict[str, Any] = {}
+        for _, payload in payloads:
+            value = payload.get(key)
+            if isinstance(value, dict):
+                union.update(value)
+        merged[key] = union
+
+    warnings_: List[str] = []
+    for _, payload in payloads:
+        for note in (payload.get("warnings") or []):
+            if note not in warnings_:
+                warnings_.append(note)
+    merged["warnings"] = warnings_
+
+    merged["checks"] = checks
+    merged["figures"] = [str(p) for p in figures]
+    merged["accelerator"] = first.get("accelerator")
+    merged["finished"] = now_iso()
+    merged["elapsed_seconds"] = round(
+        sum(float(p.get("elapsed_seconds") or 0.0) for _, p in payloads), 2)
+    merged["shards"] = [
+        {"shard": index,
+         "run_id": payload.get("run_id"),
+         "finished": payload.get("finished"),
+         "elapsed_seconds": payload.get("elapsed_seconds"),
+         "accelerator": payload.get("accelerator"),
+         "models": sorted((payload.get("model_provenance") or {}).keys()),
+         "timing": payload.get("timing")}
+        for index, payload in payloads]
+    merged["shard_metadata"] = {"%02d" % index: payload for index, payload in payloads}
+    merged["aggregation_policy"] = (
+        "Written by `run.py --aggregate`. Array tasks write shard-private "
+        "checks_shardNN.json and run_metadata_shardNN.json; this file is their merge. "
+        "elapsed_seconds is the SUM over shards (total GPU wall time), not the makespan; "
+        "per-shard values, the node each shard ran on and each shard's complete original "
+        "metadata are preserved under `shards` and `shard_metadata`.")
+    return merged
 
 
 def aggregate_only(plan, config: Dict[str, Any], run_dir: Path, args) -> int:
     """Merge the per-job artefacts written by parallel array tasks into one result set."""
     print("\n%s\nAGGREGATE -- merging finished jobs under %s\n%s" % (RULE, run_dir, RULE))
-    records, reconstructions = collect_finished_jobs(run_dir, plan)
+    records, image_rows, reconstructions = collect_finished_jobs(run_dir, plan)
     if not records:
         print("No finished job found. Did the array tasks write to this --run-id?")
         return 1
@@ -1051,11 +1448,15 @@ def aggregate_only(plan, config: Dict[str, Any], run_dir: Path, args) -> int:
 
     writer = ResultWriter(run_dir)
     writer.records = records
+    writer.image_rows = image_rows
     csv_path = writer.write_csv()
-    print("  wrote %s" % csv_path)
+    print("  wrote %s  (%d job row(s))" % (csv_path, len(records)))
+    print("  wrote %s  (%d job-image row(s))"
+          % (run_dir / "results_per_image.csv", len(image_rows)))
 
     print_summary_tables(records)
 
+    figures: List[Path] = []
     if not args.no_figures:
         print("\nRebuilding problem instances for the figures ...")
         cache_root = Path(plan.cache_root).resolve()
@@ -1069,9 +1470,43 @@ def aggregate_only(plan, config: Dict[str, Any], run_dir: Path, args) -> int:
         except Exception as exc:
             print("  figure generation failed (%s); results.csv is unaffected." % exc)
 
+    # ---------------------------------------------------------------- shard-private files
+    checks, check_shards = merge_shard_checks(run_dir)
+    if checks:
+        save_json(run_dir / "checks.json", checks)
+        scopes = sorted({str(c.get("scope")) for c in checks})
+        failed = [c for c in checks if c.get("passed") is False]
+        print("  merged %d check(s) from shard(s) %s into checks.json"
+              % (len(checks), ", ".join("%02d" % s for s in check_shards) or "(none)"))
+        print("     scopes: %s" % ", ".join(scopes))
+        if failed:
+            print("     %d FAILING check(s) preserved by the merge:" % len(failed))
+            for entry in failed[:10]:
+                print("       %s / %s" % (entry.get("scope"), entry.get("name")))
+    else:
+        print("  no checks_shardNN.json found; checks.json left untouched "
+              "(run the array with --check to produce them)")
+
+    metadata = merge_shard_metadata(run_dir, checks, figures)
+    if metadata is not None:
+        save_json(run_dir / "run_metadata.json", metadata)
+        print("  merged run_metadata.json from shard(s) %s (models: %s)"
+              % (", ".join("%02d" % s["shard"] for s in metadata["shards"]),
+                 ", ".join(sorted(metadata.get("model_provenance", {}))) or "(none)"))
+    else:
+        print("  no run_metadata_shardNN.json found; run_metadata.json left untouched")
+
     save_json(run_dir / "aggregate_metadata.json",
               {"merged": now_iso(), "found": len(records), "planned": len(plan.specs),
-               "missing_job_ids": [s.job_id for s in missing]})
+               "per_image_rows": len(image_rows),
+               "missing_job_ids": [s.job_id for s in missing],
+               "merged_checks": len(checks),
+               "check_shards": check_shards,
+               "metadata_shards": ([s["shard"] for s in metadata["shards"]]
+                                   if metadata else []),
+               "outputs": ["results.csv", "results_per_image.csv"]
+                          + (["checks.json"] if checks else [])
+                          + (["run_metadata.json"] if metadata else [])})
     return 0
 
 
@@ -1136,8 +1571,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ConfigError("--aggregate needs --run-id naming the directory to merge.")
         return aggregate_only(plan, config, run_dir, args)
 
-    save_yaml(run_dir / "config.yaml", plan.raw_config)
-    save_yaml(run_dir / "resolved_config.yaml", plan.to_dict())
+    # config.yaml / resolved_config.yaml describe the WHOLE plan and are byte-identical for
+    # every array task (they are written before the shard slice is taken), so the shards do
+    # not need private copies -- but they must not be rewritten concurrently either: the
+    # `created` timestamp differs per task, which would make the surviving file depend on
+    # scheduling.  First writer wins; save_yaml itself is atomic.
+    suffix = shard_suffix(shard)
+    for name, payload in (("config.yaml", plan.raw_config),
+                          ("resolved_config.yaml", plan.to_dict())):
+        if shard is None or not (run_dir / name).exists():
+            save_yaml(run_dir / name, payload)
     print("\nSaved %s and %s" % (run_dir / "config.yaml", run_dir / "resolved_config.yaml"))
 
     if args.dry_run:
@@ -1157,9 +1600,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not selected:
             print("This shard is empty (more shards than jobs). Nothing to do.")
             return 0
+        print("Shard-private outputs (no array task overwrites another's):")
+        for canonical, _pattern in SHARD_FILE_PATTERNS:
+            stem, dot, ext = canonical.rpartition(".")
+            print("    %s%s%s%s" % (stem, suffix, dot, ext))
         print("Merge the shards afterwards with:")
         print("    python run.py --config %s --run-id %s --aggregate"
               % (args.config, plan.run_id))
+        if not args.no_figures:
+            # figures/ has fixed filenames, so concurrent tasks would overwrite each
+            # other's PNGs with partial views of the run. --aggregate builds them once,
+            # from the complete merged record set.
+            print("Figures are DISABLED for array tasks; --aggregate builds them once.")
+            args.no_figures = True
 
     # ---------------------------------------------------------------- data and problems
     cache_root = Path(plan.cache_root).resolve()
@@ -1195,10 +1648,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("\n%d structural check(s) FAILED. Inspect them before trusting any result."
                   % len(failures))
             if not rt.get("continue_on_experiment_error", True):
-                save_json(run_dir / "checks.json", report.to_dict())
+                save_json(run_dir / ("checks%s.json" % suffix), report.to_dict())
                 raise RuntimeError("Structural checks failed: %s"
                                    % [f.name for f in failures])
-        save_json(run_dir / "checks.json", report.to_dict())
+        save_json(run_dir / ("checks%s.json" % suffix), report.to_dict())
 
     if args.checks_only:
         print("\n--checks-only: stopping before any model is loaded.")
@@ -1283,7 +1736,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 report.run(model, "shared_initial_state",
                            lambda g=group, k=key: checks_module.check_shared_initial_state(
                                adapter, store.get(k[0]), g, manager))
-            save_json(run_dir / "checks.json", report.to_dict())
+            save_json(run_dir / ("checks%s.json" % suffix), report.to_dict())
 
         warmed: Dict[Tuple, float] = {}
         for index, spec in enumerate(specs, 1):
@@ -1302,7 +1755,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     record["status"] = "ok"
                     reconstructions[spec.job_id] = (
                         np.asarray(finished["pixels"], np.float32) / 127.5) - 1.0
-                    writer.add({k: record.get(k) for k in RESULT_COLUMNS})
+                    # The per-image rows are rebuilt from the stored metadata rather than
+                    # skipped: a resumed job used to contribute to results.csv but not to
+                    # results_per_image.csv, so resuming silently shrank the per-image file.
+                    writer.add({k: record.get(k) for k in RESULT_COLUMNS},
+                               image_rows_from_metadata(record))
                     print("        -> reused a finished job from %s" % finished["output_dir"])
                     continue
 
@@ -1401,7 +1858,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception as exc:
             print("Figure generation failed (%s); results are unaffected." % exc)
 
-    save_json(run_dir / "run_metadata.json", {
+    save_json(run_dir / ("run_metadata%s.json" % suffix), {
         "run_id": plan.run_id, "created": plan.created, "finished": now_iso(),
         "seed": plan.seed, "replicate": plan.replicate,
         "accelerator": accel, "elapsed_seconds": round(elapsed, 2),
@@ -1413,6 +1870,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "checks": report.to_dict(),
         "timing": timing_summary(),
         "figures": [str(p) for p in figures],
+        "gpu_memory_policy_process": (
+            "gpu_process_peak_gib is the peak GPU memory of THIS PROCESS during the "
+            "measured reconstruction, sampled through NVML with a FRESH sampler per atomic "
+            "job. It is the only memory number that is comparable between the PyTorch and "
+            "JAX models, and it is the one a batch-size-4 memory table should use: it is a "
+            "JOB peak at the configured batch size and is never divided by the batch, so it "
+            "is not single-image latency or per-image memory. When NVML process accounting "
+            "is unavailable the field reports 'unavailable'; JAX's peak_bytes_in_use is a "
+            "LIFETIME high-water mark with no reset API and is never substituted for it."),
+        "rhso_diagnostic_cost_policy": (
+            "diagnostic_model_evaluations, diagnostic_network_forwards, diagnostic_jvps, "
+            "diagnostic_vjps and diagnostic_seconds cover the theory-validation "
+            "measurements only. They are EXCLUDED from model_evaluations, network_forwards, "
+            "backprops_through_model and runtime, so those columns keep their meaning as "
+            "the algorithm's own cost."),
         "gpu_memory_policy": (
             "gpu_peak_gib is the peak GPU memory during the measured reconstruction of one "
             "atomic job at its configured batch size; gpu_baseline_gib is the steady state "

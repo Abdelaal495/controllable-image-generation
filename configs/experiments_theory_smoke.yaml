@@ -1,0 +1,91 @@
+# SMOKE TEST -- verify the plumbing on a GPU before launching anything large.
+#
+# Two tasks, both models, 4 images, a 2-stage / 2-iteration RHSO and a deliberately tiny
+# spectral probe budget. It exercises every new path end to end -- JiT-direct and
+# pMF-direct terminal planning, per-image stage diagnostics, endpoint-consistency
+# diagnostics, the matrix-free Jacobian probes, the diagnostic counters and the
+# results.npz arrays -- in minutes rather than hours.
+#
+# It says NOTHING about reconstruction quality: 2 x 2 = 4 optimisation steps is not a
+# reconstruction. Check that jobs finish, that results.npz contains stage_* arrays of shape
+# [4, 2], and that the diagnostic_* columns are non-zero while runtime excludes them.
+#
+# Expected scale: 2 tasks x 2 models = 4 atomic jobs.
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: auto
+  continue_on_experiment_error: true
+  progress_bars: true
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 32
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
+  # (class seed 42, image seed 43). Point `local_folder` at your copy.
+  source: local_folder
+  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+    # batch_size 4 for BOTH models. The optimisation objective is SUMMED over the batch, so
+    # a sample's own gradient is unchanged by its batch companions; the memory and runtime
+    # numbers below are therefore batch-4 JOB figures, not per-image ones.
+    batch_size: 4
+  pmf:
+    batch_size: 4
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising_smoke:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.2}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 2, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 2, rhso_jacobian_power_iters: 2, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 2, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 2, rhso_jacobian_power_iters: 2, rhso_jacobian_seed: 20240917}
+
+  deblurring_smoke:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    defaults: {t0: 1.0, beta: 1.0}
+    models:
+      jit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 2, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 2, rhso_jacobian_power_iters: 2, rhso_jacobian_seed: 20240917}
+      pmf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 2, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: true, rhso_jacobian_probes: 2, rhso_jacobian_power_iters: 2, rhso_jacobian_seed: 20240917}
