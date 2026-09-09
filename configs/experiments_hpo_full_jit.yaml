@@ -1,30 +1,43 @@
+# PER-MODEL SPLIT of configs/experiments_hpo_full.yaml (JIT only) for machines with several
+# GPUs: run each model as its own process on its own card, never two on one card.  Merge
+# the finished runs with --aggregate; hpo_stage2.py accepts several --run directories.
 # =====================================================================================
-# STAGE 1 -- iMF screening grid, for the OTHER machine
+# STAGE 1 -- per (model, task, method) screening grid at t0 = 1.0
 # =====================================================================================
 #
-#   python build_local_imagenet_pool.py --num-classes 100 --seed 0    # once, same pool
-#   python run.py --config configs/experiments_hpo_full_imf.yaml --run-id hpo_full_imf --no-figures
+#   python run.py --config configs/experiments_hpo_full.yaml --run-id hpo_full --no-figures
 #
-# The iMF quarter of configs/experiments_hpo_full.yaml: the same grids, the same five tasks,
-# the same four screening images, so its winners are selected by the same rule as the other
-# three models'.  Split out only because of cost -- iMF's six methods run ~764 s/image
-# against pMF's 85, so this file was ~300 GPU-hours before the device-placement fix in
-# src/models/imf.py (the VAE decoder ran on the CPU inside every gradient step); with it,
-# PnP measures 2.6 s/image (was 80) and RHSO 35 (was 167), so budget ~40-45 GPU-hours --
-# iMF is now, like pMF, bound by the un-jitted outer objective trace, not by the decode.  Merge its results with
-# `--aggregate` afterwards.
+# WHY THIS EXISTS.  The previous t0 = 1.0 sweep varied exactly ONE knob per method and
+# froze the rest at model-level constants -- PnP at gamma0 = 1e5, alpha = 0.5; MPC-RHC at
+# lam = 60; MPC-dt at lam = 180; RHSO at lr = 0.01.  Those constants were carried over from
+# the t0 = 0.8 rounds, and gamma0 in particular had only ever been swept over {0.25, 0.5,
+# 1.0} -- five orders of magnitude below the range that the per-measurement normalisation
+# (which divides by 196,608) makes meaningful.  So not one of the manuscript's ten PnP
+# configurations had ever been executed, and the lam values it reports span 15 to 540 where
+# we used a single number per method.
 #
-# RUNS ALONGSIDE the main sweep on one 24 GiB card (started 2026-09-06 while hpo_full was at
-# 1260/6010): launch with XLA_PYTHON_CLIENT_MEM_FRACTION=0.40 so JAX can never take more
-# than ~9.8 GiB (iMF peaks 7.6-9.2 GiB at batch 2), which leaves >=14.7 GiB for the main
-# run whose worst measured job is 13.0 GiB (pMF MPC-RHC K=3 at batch 2).  Both processes
-# are host-bound on a single thread, so sharing the GPU costs each little and roughly doubles
-# total throughput.  If either log shows an OOM, a `resume: true` pass re-runs only the jobs
-# that did not finish with status ok.
+# COVERAGE.  Every value in Tables 4-7 lies inside the grids below, and every axis extends
+# at least one step BEYOND the manuscript's range on both sides -- lambda by 3x each way,
+# lr by 2-2.5x, gamma0 by 4x, PnP's N by 2x -- so the manuscript's choices are a strict
+# interior subset of what is searched, and a manuscript value that wins here wins against
+# neighbours the manuscript never tried.  A first draft of this file had grids equal to the
+# manuscript's value sets; that could confirm its choices but never improve on them.
 #
-# batch_size stays at 2.  The binding constraint for iMF is HOST memory, not the device:
-# batch 8 peaked at 1.3 GiB on the GPU and sawtoothed to 55 GiB of RSS on a 62 GiB box and
-# was OOM-killed.  Check `ps -o rss` before raising it.
+# RHSO additionally probes the structural budget in `__rhso_budget`: (N, M) at the same
+# N*M = 160 the manuscript fixes, and at double it.  Standard-flow RHSO memory grows with
+# N (the first stage differentiates the whole remaining suffix), hence the smaller batches.
+#
+# Stage 2 then re-runs each cell's top three, the manuscript's value, and any winner on a
+# grid edge on more images, extending that axis further.
+#
+# SCREEN SIZE.  Four images.  Measured against the eight-image t1_hpo run, a four-image
+# screen keeps the same winner in 83% of cells and the true winner inside its top three in
+# 98%, at a median cost of 0.0000 and a p90 of 0.0058 LPIPS.  That is fine for narrowing
+# and not fine for deciding, which is why stage 2 re-runs the survivors on more images.
+#
+# 399 configurations per cell x 5 tasks x 3 models = ~6000 jobs, about 49 h.  iMF is absent:
+# its six methods cost ~764 s/image against pMF's 85, so the same grid would take ~135 h
+# here.  Generate it for the other machine from this file by adding the imf block.
 # =====================================================================================
 
 runtime:
@@ -49,7 +62,8 @@ data:
   image_size: 256
 
 models:
-  imf: {}
+  jit:
+    variant: JiT-B/16
 
 defaults:
   control_cost_normalization: sum_squared
@@ -71,10 +85,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
 
   denoising__pnp:
     enabled: true
@@ -82,8 +96,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
                         gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
@@ -95,10 +109,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
                         lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
 
   denoising__mpc_rhc:
@@ -107,8 +121,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
                         lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
@@ -119,8 +133,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
                         lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
@@ -131,10 +145,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
                         lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
 
   denoising__rhso_budget:
@@ -143,10 +157,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.20}
     models:
-      imf:
+      jit:
         batch_size: 2
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
                         lr: [0.01, 0.03], mu: 0.0}
 
   deblurring__sdedit:
@@ -155,10 +169,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
 
   deblurring__pnp:
     enabled: true
@@ -166,8 +180,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
                         gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
@@ -179,10 +193,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
                         lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
 
   deblurring__mpc_rhc:
@@ -191,8 +205,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
                         lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
@@ -203,8 +217,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
                         lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
@@ -215,10 +229,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
                         lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
 
   deblurring__rhso_budget:
@@ -227,10 +241,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
     models:
-      imf:
+      jit:
         batch_size: 2
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
                         lr: [0.01, 0.03], mu: 0.0}
 
   super_resolution__sdedit:
@@ -239,10 +253,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
 
   super_resolution__pnp:
     enabled: true
@@ -250,8 +264,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
                         gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
@@ -263,10 +277,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
                         lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
 
   super_resolution__mpc_rhc:
@@ -275,8 +289,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
                         lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
@@ -287,8 +301,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
                         lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
@@ -299,10 +313,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
                         lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
 
   super_resolution__rhso_budget:
@@ -311,10 +325,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, factor: 2}
     models:
-      imf:
+      jit:
         batch_size: 2
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
                         lr: [0.01, 0.03], mu: 0.0}
 
   random_inpainting__sdedit:
@@ -323,10 +337,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
 
   random_inpainting__pnp:
     enabled: true
@@ -334,8 +348,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
                         gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
@@ -347,10 +361,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
                         lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
 
   random_inpainting__mpc_rhc:
@@ -359,8 +373,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
                         lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
@@ -371,8 +385,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
                         lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
@@ -383,10 +397,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
                         lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
 
   random_inpainting__rhso_budget:
@@ -395,10 +409,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.01, missing_fraction: 0.70}
     models:
-      imf:
+      jit:
         batch_size: 2
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
                         lr: [0.01, 0.03], mu: 0.0}
 
   box_inpainting__sdedit:
@@ -407,10 +421,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
 
   box_inpainting__pnp:
     enabled: true
@@ -418,8 +432,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
                         gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
@@ -431,10 +445,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
                         lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
 
   box_inpainting__mpc_rhc:
@@ -443,8 +457,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
                         lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
@@ -455,8 +469,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
           mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
                         lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
@@ -467,10 +481,10 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
-        batch_size: 2
+      jit:
+        batch_size: 4
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
                         lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
 
   box_inpainting__rhso_budget:
@@ -479,8 +493,8 @@ experiments:
     num_images: 4
     degradation: {sigma: 0.05, box: 40}
     models:
-      imf:
+      jit:
         batch_size: 2
         methods:
-          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
                         lr: [0.01, 0.03], mu: 0.0}
