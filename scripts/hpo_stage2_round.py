@@ -76,7 +76,7 @@ data:
   image_size: 256
 
 models:
-  %s: {}%s
+  %s:%s
 
 defaults:
   control_cost_normalization: sum_squared
@@ -90,7 +90,7 @@ metrics:
   lpips_net: alex
 
 experiments:
-''' % (a.model, ", ".join(a.stage2), a.pool, a.model, "\n    variant: JiT-B/16" if a.model == "jit" else "")]
+''' % (a.model, ", ".join(a.stage2), a.pool, a.model, "\n    variant: JiT-B/16" if a.model == "jit" else " {}")]
     n = 0
     for (problem, method), cands in new.items():
         for i, (k, why) in enumerate(cands):

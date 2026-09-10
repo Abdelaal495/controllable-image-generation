@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hpo_stage2 import PROBLEMS, EXP_NAME, DEGRADATION, METHODS, KNOBS, FIXED, INTEGER, fnum, fmt
 
 GROUP = {"core": ["sdedit", "pnp", "dflow", "mpc_delta_t"], "rhc": ["mpc_rhc"], "rhso": ["rhso"]}
-VARIANT = {"jit": "\n    variant: JiT-B/16", "sit": "", "pmf": "", "imf": ""}
+VARIANT = {"jit": "\n    variant: JiT-B/16", "sit": " {}", "pmf": " {}", "imf": " {}"}
 
 
 def load_cells(runs, model):
@@ -96,7 +96,7 @@ data:
   image_size: 256
 
 models:
-  %s: {}%s
+  %s:%s
 
 defaults:
   control_cost_normalization: sum_squared
