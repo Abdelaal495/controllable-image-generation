@@ -1,6 +1,6 @@
 # Final benchmark on the frozen ImageNet-100 (class seed 42 / image seed 43), t0 = 1.0, 100 images per cell
 
-Generated 2026-09-10 by `scripts/make_final_tables.py` from outputs/final_jit, outputs/final_pmf.
+Generated 2026-09-10 by `scripts/make_final_tables.py` from outputs/final_jit, outputs/final_pmf, outputs/final_imf.
 
 Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is the standard error of LPIPS over the 100 images. Runtimes were measured with several processes sharing each A100 and are inflated by contention; treat them as upper bounds.
 
@@ -18,6 +18,11 @@ Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is t
 | pMF-L/16 | 2x SR | 0.7189 | 0.1202 | 0.2107 | 0.2261 | **0.0874** | 0.0947 | MPC-Delta_t |
 | pMF-L/16 | Random inpainting | 0.7189 | 0.1166 | 0.2037 | 0.2365 | **0.0774** | 0.0784 | MPC-Delta_t |
 | pMF-L/16 | Box inpainting | 0.7189 | 0.0572 | 0.1891 | 0.0956 | 0.0590 | **0.0462** | RHSO |
+| iMF-B-2 | Denoising | 0.7309 | 0.3121 | 0.3333 | 0.2202 | **0.1964** | 0.2005 | MPC-Delta_t |
+| iMF-B-2 | Deblurring | 0.7309 | 0.3652 | 0.3761 | 0.2649 | 0.2086 | **0.2010** | RHSO |
+| iMF-B-2 | 2x SR | 0.7309 | 0.3113 | 0.3226 | 0.2090 | 0.1961 | **0.1889** | RHSO |
+| iMF-B-2 | Random inpainting | 0.7309 | 0.3249 | 0.3282 | 0.2131 | 0.1886 | **0.1734** | RHSO |
+| iMF-B-2 | Box inpainting | 0.7309 | 0.3199 | 0.3221 | 0.2098 | 0.1821 | **0.1733** | RHSO |
 
 ## JiT-B/16
 
@@ -142,4 +147,66 @@ Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is t
 | MPC-RHC | 0.0956 | 0.0054 | 25.88 | 0.8456 | 9.51 | 0.4 | K=1 lam=30.0 lr=0.05 |
 | MPC-Delta_t | 0.0590 | 0.0032 | 29.16 | 0.8927 | 12.87 | 7.4 | num_mpc_steps=8 n_ctrl=40 lam=180.0 lr=0.3 |
 | RHSO | 0.0462 | 0.0024 | 29.00 | 0.9155 | 13.79 | 4.7 | num_rhso_steps=8 num_opt_steps=20 lr=0.01 mu=0.0 |
+
+## iMF-B-2
+
+### Denoising
+
+| method | LPIPS | +/- se | PSNR | SSIM | missing PSNR | s/image | hyperparameters |
+|---|---|---|---|---|---|---|---|
+| degraded input | 0.4857 | - | 20.51 | 0.3926 | - | - | |
+| SDEdit | 0.7309 | 0.0075 | 8.30 | -0.0052 | - | 0.0 | steps=8 |
+| PnP-Flow | 0.3121 | 0.0122 | 26.20 | 0.6902 | - | 5.6 | num_pnp_steps=200 gamma0=100000.0 alpha=1.0 |
+| D-Flow | 0.3333 | 0.0138 | 25.97 | 0.6877 | - | 20.4 | num_opt_steps=640 lr=0.3 |
+| MPC-RHC | 0.2202 | 0.0107 | 27.44 | 0.7471 | - | 4.1 | K=1 lam=15.0 lr=0.2 |
+| MPC-Delta_t | 0.1964 | 0.0098 | 27.77 | 0.7570 | - | 9.6 | num_mpc_steps=8 n_ctrl=40 lam=360.0 lr=0.3 |
+| RHSO | 0.2005 | 0.0094 | 27.69 | 0.7473 | - | 20.4 | num_rhso_steps=8 num_opt_steps=80 lr=0.03 mu=0.0 |
+
+### Deblurring
+
+| method | LPIPS | +/- se | PSNR | SSIM | missing PSNR | s/image | hyperparameters |
+|---|---|---|---|---|---|---|---|
+| degraded input | 0.2729 | - | 25.91 | 0.7120 | - | - | |
+| SDEdit | 0.7309 | 0.0075 | 8.30 | -0.0052 | - | 0.0 | steps=8 |
+| PnP-Flow | 0.3652 | 0.0117 | 25.41 | 0.6591 | - | 6.9 | num_pnp_steps=200 gamma0=100000.0 alpha=1.0 |
+| D-Flow | 0.3761 | 0.0124 | 25.39 | 0.6818 | - | 24.2 | num_opt_steps=640 lr=0.3 |
+| MPC-RHC | 0.2649 | 0.0118 | 27.14 | 0.7574 | - | 5.1 | K=1 lam=180.0 lr=0.2 |
+| MPC-Delta_t | 0.2086 | 0.0105 | 27.71 | 0.7779 | - | 12.1 | num_mpc_steps=8 n_ctrl=40 lam=1000.0 lr=0.3 |
+| RHSO | 0.2010 | 0.0107 | 27.54 | 0.7746 | - | 24.6 | num_rhso_steps=8 num_opt_steps=80 lr=0.03 mu=0.0 |
+
+### 2x SR
+
+| method | LPIPS | +/- se | PSNR | SSIM | missing PSNR | s/image | hyperparameters |
+|---|---|---|---|---|---|---|---|
+| degraded input | 0.2262 | - | 22.81 | 0.6491 | - | - | |
+| SDEdit | 0.7309 | 0.0075 | 8.30 | -0.0052 | - | 0.0 | steps=8 |
+| PnP-Flow | 0.3113 | 0.0117 | 25.86 | 0.6868 | - | 5.6 | num_pnp_steps=200 gamma0=100000.0 alpha=1.0 |
+| D-Flow | 0.3226 | 0.0135 | 25.30 | 0.6828 | - | 20.2 | num_opt_steps=640 lr=0.3 |
+| MPC-RHC | 0.2090 | 0.0106 | 26.67 | 0.7489 | - | 4.1 | K=1 lam=240.0 lr=0.2 |
+| MPC-Delta_t | 0.1961 | 0.0097 | 26.20 | 0.7388 | - | 9.5 | num_mpc_steps=8 n_ctrl=40 lam=1000.0 lr=0.3 |
+| RHSO | 0.1889 | 0.0095 | 25.83 | 0.7313 | - | 20.2 | num_rhso_steps=8 num_opt_steps=80 lr=0.03 mu=0.0 |
+
+### Random inpainting
+
+| method | LPIPS | +/- se | PSNR | SSIM | missing PSNR | s/image | hyperparameters |
+|---|---|---|---|---|---|---|---|
+| degraded input | 1.0438 | - | 12.31 | 0.1372 | - | - | |
+| SDEdit | 0.7309 | 0.0075 | 8.30 | -0.0052 | 7.95 | 0.0 | steps=8 |
+| PnP-Flow | 0.3249 | 0.0120 | 25.60 | 0.6775 | 23.64 | 5.7 | num_pnp_steps=200 gamma0=100000.0 alpha=1.0 |
+| D-Flow | 0.3282 | 0.0131 | 25.09 | 0.6775 | 22.87 | 20.3 | num_opt_steps=640 lr=0.3 |
+| MPC-RHC | 0.2131 | 0.0111 | 26.55 | 0.7467 | 23.78 | 4.2 | K=1 lam=180.0 lr=0.2 |
+| MPC-Delta_t | 0.1886 | 0.0101 | 26.50 | 0.7507 | 23.48 | 9.6 | num_mpc_steps=8 n_ctrl=40 lam=1000.0 lr=0.3 |
+| RHSO | 0.1734 | 0.0094 | 26.42 | 0.7524 | 23.28 | 20.6 | num_rhso_steps=8 num_opt_steps=80 lr=0.03 mu=0.0 |
+
+### Box inpainting
+
+| method | LPIPS | +/- se | PSNR | SSIM | missing PSNR | s/image | hyperparameters |
+|---|---|---|---|---|---|---|---|
+| degraded input | 0.1202 | - | 26.20 | 0.8098 | - | - | |
+| SDEdit | 0.7309 | 0.0075 | 8.30 | -0.0052 | 8.43 | 0.0 | steps=8 |
+| PnP-Flow | 0.3199 | 0.0123 | 25.32 | 0.6860 | 15.20 | 5.6 | num_pnp_steps=200 gamma0=100000.0 alpha=1.0 |
+| D-Flow | 0.3221 | 0.0141 | 25.13 | 0.7053 | 13.93 | 20.4 | num_opt_steps=640 lr=0.3 |
+| MPC-RHC | 0.2098 | 0.0117 | 26.89 | 0.7761 | 15.29 | 4.1 | K=1 lam=60.0 lr=0.2 |
+| MPC-Delta_t | 0.1821 | 0.0104 | 27.45 | 0.7970 | 15.49 | 9.6 | num_mpc_steps=8 n_ctrl=40 lam=540.0 lr=0.3 |
+| RHSO | 0.1733 | 0.0106 | 27.36 | 0.8036 | 14.89 | 20.3 | num_rhso_steps=8 num_opt_steps=80 lr=0.03 mu=0.0 |
 
