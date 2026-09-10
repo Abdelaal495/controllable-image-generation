@@ -51,9 +51,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage1", action="append", default=[]); p.add_argument("--stage2", action="append", required=True)
     p.add_argument("--out", default="docs/best_hyperparameters_t1.md"); p.add_argument("--models", default="jit,sit,pmf,imf")
+    p.add_argument("--grid-only", action="store_true", help="select winners only among configurations present in the Stage-1 grid (the final-benchmark rule)")
+    p.add_argument("--appendix", action="append", default=[], help="extra Stage-2 rounds (grid-edge extensions) listed in an appendix, never selected")
     a = p.parse_args()
     s1, _ = load(a.stage1) if a.stage1 else ({}, {})
     s2, pi2 = load(a.stage2)
+    if a.grid_only:
+        s2 = {cell: {k: r for k, r in tab.items() if cell in s1 and any(same(k, g) for g in s1[cell])} for cell, tab in s2.items()}
+        s2 = {c: t for c, t in s2.items() if t}
+    ext, _ = load(a.appendix) if a.appendix else ({}, {})
     models = [m for m in a.models.split(",") if any(c[0] == m for c in s2)]
     L = ["# Best hyperparameters per model, strategy and inverse problem at t0 = 1.0",
          "", "Generated %s by `scripts/make_best_hyperparameters_t1.py` from Stage 2 (%s) and Stage 1 (%s)."
@@ -65,6 +71,12 @@ def main():
          "still had it on the extreme of an axis (see the Stage-2 generator's log).  For the two inpainting problems read "
          "`missing_psnr` in results.csv alongside these full-image metrics.", "",
          "**Do not mix with `docs/best_hyperparameters.md`, which is the t0 = 0.8 study.**", ""]
+    if a.grid_only:
+        L += ["**Selection rule.** The winner is the lowest-LPIPS configuration among the Stage-2 candidates that lie INSIDE the "
+              "pre-registered Stage-1 grid (itself one step wider than the manuscript's ranges on every axis).  Configurations from the "
+              "grid-edge extension rounds are excluded from selection; they are reported in the appendix at the end because on several "
+              "axes (D-Flow steps, PnP steps, RHSO N/M) LPIPS kept improving with compute far past the grid, which is a compute-budget "
+              "effect rather than a hyperparameter optimum.", ""]
     paper_rows = []
     for m in models:
         L += ["---", "", "# %s" % MODEL_TITLE[m], ""]
@@ -102,6 +114,18 @@ def main():
         f1 = "#%d/%d (+%.4f)" % (r1[0], r1[3], r1[1]) if r1 else "not in sweep"
         f2 = "#%d/%d (+%.4f)" % (r2[0], r2[3], r2[1]) if r2 else "not run"
         L.append("| %s | %s | %s | %s | %s | %s | %s | %s | `%.4f` |" % (m, pr, me, cfg, f1, f2, ("`%.4f`" % r2[2]) if r2 else "-", win, wl))
+    if ext:
+        L += ["", "---", "", "# Appendix: grid-edge extension rounds (NOT used for the final benchmark)", "",
+              "Lowest LPIPS reached in each cell when the edge of the grid was pushed repeatedly (8 images), next to the grid-only winner above.", "",
+              "| model | problem | method | grid-only winner LPIPS | extended best LPIPS | extended configuration |", "|---|---|---|---|---|---|"]
+        for m in models:
+            for pr in PROBLEMS:
+                for me in METHODS:
+                    if (m, pr, me) not in ext or (m, pr, me) not in s2: continue
+                    ek, er = min(ext[(m, pr, me)].items(), key=lambda kv: fnum(kv[1]["lpips"]))
+                    gk, gr = min(s2[(m, pr, me)].items(), key=lambda kv: fnum(kv[1]["lpips"]))
+                    if fnum(er["lpips"]) >= fnum(gr["lpips"]) - 1e-9: continue
+                    L.append("| %s | %s | %s | `%.4f` | `%.4f` | %s |" % (m, pr, me, fnum(gr["lpips"]), fnum(er["lpips"]), hp(me, er)))
     Path(a.out).write_text("\n".join(L) + "\n")
     print("wrote %s: %d models, %d manuscript cells" % (a.out, len(models), len(paper_rows)))
 
