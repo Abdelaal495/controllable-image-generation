@@ -1,0 +1,18 @@
+mdl  problem           method       new winner                               old winner                               relation  old winner in new sweep
+jit  box_inpaint       dflow        num_opt_steps=640 lr=0.3                 num_opt_steps=640 lr=0.3                 same      #1/15 (+0.0000)
+jit  box_inpaint       mpc_delta_t  num_mpc_steps=8 n_ctrl=20 lam=180 lr=0.1 num_mpc_steps=8 n_ctrl=20 lam=180 lr=0.1 same      #1/96 (+0.0000)
+jit  box_inpaint       mpc_rhc      K=1 lam=30 lr=0.05                       K=1 lam=30 lr=0.05                       same      #1/84 (+0.0000)
+jit  box_inpaint       pnp          num_pnp_steps=50 gamma0=200000.0 alpha=0.1 num_pnp_steps=50 gamma0=200000.0 alpha=0.1 same      #1/175 (+0.0000)
+jit  box_inpaint       rhso         num_rhso_steps=8 num_opt_steps=20 lr=0.01 mu=0 num_rhso_steps=8 num_opt_steps=20 lr=0.01 mu=0 same      #1/26 (+0.0000)
+jit  box_inpaint       sdedit       steps=8                                  steps=8                                  same      #1/5 (+0.0000)
+jit  deblur            dflow        num_opt_steps=640 lr=0.3                 num_opt_steps=640 lr=0.3                 same      #1/15 (+0.0000)
+jit  deblur            mpc_delta_t  num_mpc_steps=8 n_ctrl=40 lam=1000 lr=0.1 num_mpc_steps=8 n_ctrl=40 lam=1000 lr=0.1 same      #1/96 (+0.0000)
+jit  deblur            mpc_rhc      K=1 lam=60 lr=0.2                        K=1 lam=60 lr=0.2                        same      #1/84 (+0.0000)
+jit  deblur            pnp          num_pnp_steps=200 gamma0=1200000.0 alpha=0.5 num_pnp_steps=200 gamma0=1200000.0 alpha=0.5 same      #1/175 (+0.0000)
+jit  deblur            rhso         num_rhso_steps=8 num_opt_steps=20 lr=0.01 mu=0 num_rhso_steps=8 num_opt_steps=20 lr=0.01 mu=0 same      #1/26 (+0.0000)
+jit  deblur            sdedit       steps=8                                  steps=8                                  same      #1/5 (+0.0000)
+jit  denoising         dflow        num_opt_steps=640 lr=0.3                 num_opt_steps=640 lr=0.3                 same      #1/15 (+0.0000)
+jit  denoising         mpc_delta_t  num_mpc_steps=8 n_ctrl=40 lam=30 lr=0.3  num_mpc_steps=8 n_ctrl=20 lam=30 lr=0.3  adjacent  #2/96 (+0.0004)
+jit  denoising         mpc_rhc      K=2 lam=15 lr=0.05                       K=2 lam=15 lr=0.05                       same      #1/84 (+0.0000)
+
+summary: {'same': 14, 'adjacent': 1}
