@@ -14,7 +14,7 @@ bit-identical across the three experiments (verified by the shared_initial_state
 """
 import argparse, collections, csv, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hpo_stage2 import PROBLEMS, EXP_NAME, DEGRADATION, METHODS, KNOBS, FIXED, INTEGER, fnum, fmt, key_of, same
 
 GROUP = {"core": ["sdedit", "pnp", "dflow", "mpc_delta_t"], "rhc": ["mpc_rhc"], "rhso": ["rhso"]}
@@ -101,7 +101,7 @@ runtime:
   nvml_sample_interval: 0.02
 
 data:
-  # Built by: python build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
+  # Built by: python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
   source: local_folder
   local_folder: "%s"
   image_size: 256

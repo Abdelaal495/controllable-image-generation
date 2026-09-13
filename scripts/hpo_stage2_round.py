@@ -10,7 +10,7 @@ more step (hpo_stage2.extend), and the round is finished when no cell needs a pu
 """
 import argparse, collections, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hpo_stage2 as H
 
 # the YAML per-model batch sizes hpo_stage2 uses

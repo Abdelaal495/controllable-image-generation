@@ -2,7 +2,7 @@
 # RHSO TRAJECTORY FIGURE -- one run per inpainting problem, traced stage by stage
 # =====================================================================================
 #
-#   python make_paper_figures.py --figure trajectory
+#   python scripts/make_paper_figures.py --figure trajectory
 #
 # Six jobs, eight images, pMF only.  Every entry is the setting that won its cell in
 # configs/experiments_t1_hpo.yaml, so the figure shows the method the benchmark reports and

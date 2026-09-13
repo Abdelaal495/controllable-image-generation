@@ -2,7 +2,7 @@
 # STAGE 1 -- iMF screening grid, for the OTHER machine
 # =====================================================================================
 #
-#   python build_local_imagenet_pool.py --num-classes 100 --seed 0    # once, same pool
+#   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0    # once, same pool
 #   python run.py --config configs/experiments_hpo_full_imf.yaml --run-id hpo_full_imf --no-figures
 #
 # The iMF quarter of configs/experiments_hpo_full.yaml: the same grids, the same five tasks,

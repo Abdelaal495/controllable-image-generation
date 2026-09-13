@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Two qualitative figures for the paper, built from runs that already happened.
 
-    python make_paper_figures.py --figure comparison   # Figure A: methods side by side
-    python make_paper_figures.py --figure trajectory   # Figure B: RHSO stage by stage
+    python scripts/make_paper_figures.py --figure comparison --run outputs/final_pmf \
+        --config configs/experiments_final_frozen100_pmf.yaml --pool cache/data/imagenet100_c42_i43_mirror
+    python scripts/make_paper_figures.py --figure trajectory --problem box_inpaint --collect
 
 Figure A reads reconstructions that a completed run wrote to disk; it loads no model and
 touches no GPU.  Ground truth and the displayed measurement are rebuilt through the same
@@ -20,12 +21,15 @@ import argparse
 import csv
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 from typing import Dict
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 CANONICAL_TEXTWIDTH_IN = 5.5          # NeurIPS \textwidth
 
@@ -650,9 +654,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--figure", choices=("comparison", "trajectory"), required=True)
-    p.add_argument("--run", default="outputs/t1_hpo", help="a finished run directory")
-    p.add_argument("--config", default="configs/experiments_t1_hpo.yaml")
-    p.add_argument("--pool", default="cache/data/imagenet_val_100")
+    p.add_argument("--run", default="outputs/final_pmf", help="a finished run directory")
+    p.add_argument("--config", default="configs/experiments_final_frozen100_pmf.yaml")
+    p.add_argument("--pool", default="cache/data/imagenet100_c42_i43_mirror")
     p.add_argument("--model", default="pmf")
     p.add_argument("--out", default="figures")
     p.add_argument("--auto-select", action="store_true",

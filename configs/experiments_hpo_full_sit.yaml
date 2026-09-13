@@ -1,6 +1,6 @@
 # PER-MODEL SPLIT of configs/experiments_hpo_full.yaml (SIT only) for machines with several
 # GPUs: run each model as its own process on its own card, never two on one card.  Merge
-# the finished runs with --aggregate; hpo_stage2.py accepts several --run directories.
+# the finished runs with --aggregate; scripts/hpo_stage2.py accepts several --run directories.
 # =====================================================================================
 # STAGE 1 -- per (model, task, method) screening grid at t0 = 1.0
 # =====================================================================================

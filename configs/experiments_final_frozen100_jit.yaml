@@ -26,7 +26,7 @@ runtime:
   nvml_sample_interval: 0.02
 
 data:
-  # Built by: python build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
+  # Built by: python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
   source: local_folder
   local_folder: "cache/data/imagenet100_c42_i43_mirror"
   image_size: 256

@@ -12,9 +12,9 @@ Two sources, in order of preference:
     validation split whose `label` feature uses the identical 1000-class ordering
     (verified against the curated class names in src/data.py).
 
-    python build_local_imagenet_pool.py                        # the 32 curated classes
-    python build_local_imagenet_pool.py --num-classes 100 --seed 0
-    python build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
+    python scripts/build_local_imagenet_pool.py                        # the 32 curated classes
+    python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0
+    python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
 
 The third form rebuilds the FROZEN paper benchmark (upstream's 100 images, class seed 42 /
 image seed 43) from the ungated mirror without the gated originals.  The mirror is sorted by
@@ -38,7 +38,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data import IMAGENET_EXAMPLES, center_crop
 
 MIRROR = "evanarlian/imagenet_1k_resized_256"

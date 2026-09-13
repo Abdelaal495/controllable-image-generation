@@ -7,7 +7,7 @@ plus the rank/gap of the manuscript's configurations (Tables 4-7) in Stage 1 (4 
 """
 import argparse, collections, csv, datetime, math, statistics, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hpo_stage2 import PROBLEMS, METHODS, KNOBS, PAPER, fnum, fmt, key_of, same
 
 MODEL_TITLE = {"jit": "JiT-B/16 (pixel, standard flow, PyTorch)", "pmf": "pMF-L/16 (pixel, MeanFlow, JAX)",
