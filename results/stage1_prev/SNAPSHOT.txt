@@ -1,3 +1,0 @@
-taken: 2026-09-08 20:46
-hpo_full: 4954 rows, ok 4499, failed 455
-hpo_full_imf: 2000 rows, ok 1339, failed 661

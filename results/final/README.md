@@ -7,7 +7,7 @@ Run 2026-09-10/11 on 4x A100-80GB, one model per GPU, one process per GPU (SiT w
   ungated mirror; degraded deblur / 2x-SR PSNR 25.91 / 22.81 vs the paper's 25.97 / 22.80)
 * t0 = 1.0, beta = 1, seed 42, replicate 0, 100 images per cell, `save_individual_images: true`
 * every cell uses the Stage-2 winner restricted to the pre-registered Stage-1 grid
-  (`scripts/make_final_frozen100_configs.py --grid-only`); see docs/best_hyperparameters_t1.md
+  (`scripts/make_final_frozen100_configs.py --grid-only`); see docs/best_hyperparameters.md
 
 Files
 * `final_<model>/results.csv`, `results_per_image.csv` -- copies of `outputs/final_<model>/` after `--aggregate`

@@ -1,5 +1,0 @@
-taken: 2026-09-09 13:14
-hpo_jit: 2005 rows, ok 2005, failed 0
-hpo_sit: 2005 rows, ok 2005, failed 0
-hpo_pmf: 2000 rows, ok 2000, failed 0
-hpo_imf: 2000 rows, ok 2000, failed 0

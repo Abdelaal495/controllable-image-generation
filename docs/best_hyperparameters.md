@@ -1,391 +1,381 @@
-# Best hyperparameters per model, strategy and inverse problem
+# Best hyperparameters per model, strategy and inverse problem at t0 = 1.0
 
-Generated 2026-08-31 from every tuning run in `outputs/` (1536 runs across six sweeps).
+Generated 2026-09-10 by `scripts/make_best_hyperparameters.py` from Stage 2 (outputs/stage2_jit, outputs/stage2_sit, outputs/stage2_pmf, outputs/stage2_imf) and Stage 1 (outputs/hpo_jit, outputs/hpo_sit, outputs/hpo_pmf, outputs/hpo_imf).
 
-**120 tuned entries** = 4 models x 5 strategies x 6 inverse problems. SDEdit appears in
-each table as the paired baseline but is not one of the 120: it has no measurement term
-to tune, only a step count.
+Every entry is the lowest-mean-LPIPS configuration of its cell among the Stage-2 candidates (Stage-1 top three on 4 images, the manuscript's configuration where one exists, and the grid-edge extensions), re-run on **8 images** of `cache/data/imagenet_val_100`, `t0 = 1.0`, `beta = 1`, seed 42, replicate 0.  `+/- se` is the standard error of LPIPS over those 8 images.  `edge` marks a winner whose Stage-2 candidate set still had it on the extreme of an axis (see the Stage-2 generator's log).  For the two inpainting problems read `missing_psnr` in results.csv alongside these full-image metrics.
 
-## How to read this
 
-Each entry is the lowest-LPIPS configuration swept for that cell, at `t0 = 0.8` and
-`beta = 1.0` unless stated, on 8 ImageNet validation images, seed 42, replicate 0.
-
-- **`+/- se`** is the standard error of LPIPS across those 8 images.
-- **`ties`** counts the other configurations in the same cell that a paired per-image
-  t-test cannot separate from the winner (|t| < 2.36, two-sided 5% at 7 d.o.f.). A cell
-  with several ties has a plateau rather than a point optimum: the exact winning value is
-  partly luck and any tied configuration is an equally defensible choice.
-- **`edge`** flags a winner sitting at the end of its swept range. Those are directions,
-  not optima -- the real best value is somewhere outside what was tried.
-
-Because every run in a cell shares bit-identical images and generative noise, the paired
-comparison is much more sensitive than comparing means. It is still 8 images: enough to
-separate a real effect from a coin flip, not enough to rank configurations differing in
-the third decimal.
-
-For the inpainting problems read `missing_psnr` in `results.csv` alongside LPIPS:
-full-image metrics there are dominated by pixels the measurement already supplies.
-
-## Two findings that override the shipped defaults
-
-**PnP-Flow needs `phi_normalization: half_sum_squared`.** Its per-method default divides
-the fidelity term by the measurement count (196,608 for a 256x256 RGB image), which
-leaves `gamma0` inert -- LPIPS spread 0.018 across a 4x range of `gamma0` under the
-default, versus 0.204 once the scale is fixed. On JiT this moved PnP from worst method
-to best on denoising.
-
-**RHSO's `mu` is state-space dependent, and the earlier "mu = 0" advice was wrong for
-pixel models.** On SiT and iMF, `mu = 0` wins. On JiT and pMF, `mu > 0` wins in all 12
-cells, by as much as 0.35 LPIPS (JiT deblurring: 0.497 at `mu=0` versus 0.151 at
-`mu=0.2`). Ten of those twelve chose the largest value swept, so `mu` is still an edge
-and the pixel entries below are a lower bound on what it is worth.
-
-This mirrors what `lambda` does in MPC: a penalty on the optimised variable helps in
-pixel space and does not in a latent space. See `configs/experiments_lambda_pixel_control.yaml`.
-
-| run directory | configuration | scope |
-|---|---|---|
-| `outputs/hpo_v2`, `outputs/hpo_v3` | `experiments_sit_imf_hpo_v2.yaml`, `_v3.yaml` | SiT/iMF, denoising, 360 runs |
-| `outputs/tasks5` | `experiments_sit_imf_tasks.yaml` | SiT/iMF, other five problems, 170 runs |
-| `outputs/tasks_pixel` | `experiments_jit_pmf_tasks.yaml` | JiT/pMF, all six problems, 504 runs |
-| `outputs/lambda_pixel` | `experiments_lambda_pixel_control.yaml` | four-model lambda control arm, 64 runs |
-| `outputs/round4` | `experiments_round4.yaml` | lambda x n_ctrl, K=2, mu on pixel models, 342 runs |
-| `outputs/round5` | `experiments_round5.yaml` | mu extended to 2.0 on all four models, 96 runs |
+**Selection rule.** The winner is the lowest-LPIPS configuration among the Stage-2 candidates that lie INSIDE the pre-registered Stage-1 grid (itself one step wider than the manuscript's ranges on every axis).  Configurations from the grid-edge extension rounds are excluded from selection; they are reported in the appendix at the end because on several axes (D-Flow steps, PnP steps, RHSO N/M) LPIPS kept improving with compute far past the grid, which is a compute-budget effect rather than a hyperparameter optimum.
 
 ---
 
-# JiT-B/16
+# JiT-B/16 (pixel, standard flow, PyTorch)
 
-pixel 3x256x256, standard flow, Torch
+## Denoising (sigma 0.20)
 
-## JiT-B/16 &mdash; Denoising
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7152` | `0.0261` | `9.22` | `-0.0105` | 3 | `steps=25` |
+| PnP-Flow | `0.0986` | `0.0120` | `28.00` | `0.7813` | 3 | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.5` |
+| D-Flow | `0.4802` | `0.0437` | `23.38` | `0.5277` | 4 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.1144` | `0.0193` | `28.29` | `0.7875` | 3 | `K=2` `lam=15` `lr=0.05` |
+| MPC-Delta_t | `0.1854` | `0.0240` | `27.31` | `0.7102` | 4 | `num_mpc_steps=8` `n_ctrl=20` `lam=30` `lr=0.3` |
+| RHSO | `0.1343` | `0.0183` | `27.41` | `0.7838` | 4 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.005` `mu=0.2` |
 
-Degraded observation: LPIPS `0.4712`, PSNR `20.46 dB`.
+**best non-baseline:** PnP-Flow (LPIPS 0.0986)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1136` | `0.0180` | `27.74` | `0.7745` | 1 / 19 | K at max, lr at min | `num_mpc_steps=4` `K=3` `lam=5.0` `n_ctrl=20` `lr=0.05` |
-| MPC-Delta_t | `0.1749` | `0.0187` | `26.61` | `0.6499` | 4 / 15 | n_ctrl at max | `num_mpc_steps=4` `lam=30.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.1050` | `0.0164` | `28.27` | `0.7983` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2272` | `0.0661` | `27.41` | `0.7516` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1028` | `0.0185` | `28.49` | `0.7959` | 0 / 17 | num_opt_steps at max, lr at min, mu at max, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=2.0` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4152` | `0.0369` | `18.04` | `0.3266` | 1 / 1 | steps at max | `steps=25` `solver=heun` |
+## Deblurring (Gaussian 7/1.0, sigma 0.05)
 
-## JiT-B/16 &mdash; Deblurring
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7152` | `0.0261` | `9.22` | `-0.0105` | 3 | `steps=25` |
+| PnP-Flow | `0.1720` | `0.0434` | `28.28` | `0.8327` | 4 | `num_pnp_steps=200` `gamma0=1200000.0` `alpha=0.5` |
+| D-Flow | `0.5283` | `0.0404` | `22.72` | `0.4899` | 4 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.1672` | `0.0270` | `28.26` | `0.7939` | 3 | `K=1` `lam=60` `lr=0.05` |
+| MPC-Delta_t | `0.1445` | `0.0292` | `28.68` | `0.8049` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.1` |
+| RHSO | `0.0965` | `0.0254` | `29.04` | `0.8488` | 4 | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `0.2709`, PSNR `25.74 dB`.
+**best non-baseline:** RHSO (LPIPS 0.0965)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1568` | `0.0288` | `28.32` | `0.8069` | 7 / 19 | K at min, lr at max | `num_mpc_steps=4` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.1643` | `0.0353` | `28.79` | `0.8185` | 2 / 15 | n_ctrl at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.3700` | `0.0530` | `25.65` | `0.6928` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2839` | `0.0539` | `26.22` | `0.7069` | 1 / 3 | num_opt_steps at max, lr at max | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1468` | `0.0411` | `28.90` | `0.8449` | 4 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.2` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4268` | `0.0370` | `18.18` | `0.3263` | 1 / 1 | steps at max | `steps=25` `solver=heun` |
+## 2x super-resolution (sigma 0.05)
 
-## JiT-B/16 &mdash; Super-resolution
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7152` | `0.0261` | `9.22` | `-0.0105` | 3 | `steps=25` |
+| PnP-Flow | `0.0937` | `0.0207` | `26.24` | `0.7870` | 4 | `num_pnp_steps=20` `gamma0=200000.0` `alpha=0.25` |
+| D-Flow | `0.4804` | `0.0439` | `23.28` | `0.5300` | 4 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.1491` | `0.0286` | `26.11` | `0.7467` | 4 | `K=2` `lam=720` `lr=0.05` |
+| MPC-Delta_t | `0.1007` | `0.0262` | `26.30` | `0.7758` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=540` `lr=0.05` |
+| RHSO | `0.1065` | `0.0291` | `26.70` | `0.7965` | 4 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0.2` |
 
-Degraded observation: LPIPS `0.2324`, PSNR `22.73 dB`.
+**best non-baseline:** PnP-Flow (LPIPS 0.0937)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1100` | `0.0296` | `26.88` | `0.7938` | 2 / 19 | K at max, lr at min | `num_mpc_steps=4` `K=3` `lam=150.0` `n_ctrl=20` `lr=0.05` |
-| MPC-Delta_t | `0.1085` | `0.0287` | `26.12` | `0.7657` | 0 / 15 | — | `num_mpc_steps=4` `lam=300.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.4312` | `0.0493` | `23.16` | `0.5485` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2517` | `0.0754` | `26.24` | `0.7318` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1036` | `0.0291` | `26.32` | `0.7864` | 0 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=1.0` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4153` | `0.0369` | `18.03` | `0.3253` | 1 / 1 | steps at max | `steps=25` `solver=heun` |
+## Random inpainting (70% missing, sigma 0.01)
 
-## JiT-B/16 &mdash; Box inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7152` | `0.0261` | `9.22` | `-0.0105` | 3 | `steps=25` |
+| PnP-Flow | `0.0974` | `0.0178` | `26.42` | `0.7954` | 3 | `num_pnp_steps=50` `gamma0=100000.0` `alpha=0.1` |
+| D-Flow | `0.4882` | `0.0422` | `23.05` | `0.5198` | 4 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.1717` | `0.0310` | `25.80` | `0.7343` | 4 | `K=2` `lam=240` `lr=0.02` |
+| MPC-Delta_t | `0.0798` | `0.0182` | `27.06` | `0.8247` | 4 | `num_mpc_steps=8` `n_ctrl=20` `lam=1000` `lr=0.05` |
+| RHSO | `0.0919` | `0.0282` | `26.99` | `0.8220` | 3 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `0.1010`, PSNR `27.50 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.0798)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.0620` | `0.0123` | `28.08` | `0.8694` | 6 / 19 | K at max, lr at min | `num_mpc_steps=4` `K=3` `lam=50.0` `n_ctrl=20` `lr=0.05` |
-| MPC-Delta_t | `0.0502` | `0.0061` | `29.05` | `0.8838` | 1 / 15 | — | `num_mpc_steps=4` `lam=100.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.1673` | `0.0306` | `27.36` | `0.8021` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2502` | `0.0642` | `26.08` | `0.7496` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.0364` | `0.0064` | `29.23` | `0.9082` | 1 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.2` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4181` | `0.0341` | `18.49` | `0.3505` | 1 / 1 | steps at min | `steps=4` `solver=heun` |
+## Box inpainting (40x40, sigma 0.05)
 
-## JiT-B/16 &mdash; Random inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7152` | `0.0261` | `9.22` | `-0.0105` | 3 | `steps=25` |
+| PnP-Flow | `0.0441` | `0.0052` | `30.61` | `0.8993` | 4 | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.1` |
+| D-Flow | `0.4926` | `0.0436` | `21.25` | `0.5299` | 4 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.0635` | `0.0078` | `29.14` | `0.8581` | 3 | `K=1` `lam=30` `lr=0.05` |
+| MPC-Delta_t | `0.0401` | `0.0043` | `30.92` | `0.8992` | 4 | `num_mpc_steps=8` `n_ctrl=20` `lam=180` `lr=0.1` |
+| RHSO | `0.0458` | `0.0071` | `29.38` | `0.9079` | 3 | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `1.0188`, PSNR `12.72 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1325` | `0.0232` | `26.24` | `0.7647` | 1 / 19 | K at max, lr at min | `num_mpc_steps=4` `K=3` `lam=150.0` `n_ctrl=20` `lr=0.05` |
-| MPC-Delta_t | `0.0903` | `0.0223` | `26.37` | `0.8074` | 2 / 15 | lam at max | `num_mpc_steps=4` `lam=1000.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.3825` | `0.0512` | `23.61` | `0.5780` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2910` | `0.0498` | `25.46` | `0.6844` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1003` | `0.0234` | `26.30` | `0.7998` | 5 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.5` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.7014` | `0.0296` | `13.25` | `0.0997` | 1 / 1 | steps at max | `steps=25` `solver=heun` |
-
-## JiT-B/16 &mdash; Stroke painting
-
-Degraded observation: LPIPS `0.4517`, PSNR `19.63 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.4196` | `0.0385` | `19.24` | `0.3784` | 12 / 19 | K at max | `num_mpc_steps=4` `K=3` `lam=5.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.4296` | `0.0377` | `19.10` | `0.3769` | 13 / 15 | n_ctrl at min | `num_mpc_steps=4` `lam=15.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5789` | `0.0466` | `19.31` | `0.4063` | 1 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5247` | `0.0368` | `14.90` | `0.2702` | 1 / 3 | num_opt_steps at min, lr at min | `steps=2` `solver=heun` `num_opt_steps=40` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.4292` | `0.0403` | `17.60` | `0.3155` | 2 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=1.0` `beta=0.5` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4695` | `0.0362` | `17.44` | `0.2848` | 1 / 1 | steps at max | `steps=25` `solver=heun` |
+**best non-baseline:** MPC-Delta_t (LPIPS 0.0401)
 
 ---
 
-# pMF-L-16
+# SiT-XL/2 (latent, standard flow, PyTorch)
 
-pixel 256x256x3, MeanFlow, JAX
+## Denoising (sigma 0.20)
 
-## pMF-L-16 &mdash; Denoising
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7143` | `0.0213` | `9.72` | `0.0202` | 3 | `steps=1` |
+| PnP-Flow | `0.4621` | `0.0471` | `24.42` | `0.6369` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=0.5` |
+| D-Flow | `0.3068` | `0.0328` | `24.43` | `0.6111` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2563` | `0.0355` | `25.74` | `0.6802` | 3 | `K=1` `lam=5` `lr=0.2` |
+| MPC-Delta_t | `0.2104` | `0.0317` | `26.05` | `0.6999` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=180` `lr=0.3` |
+| RHSO | `0.2287` | `0.0363` | `26.21` | `0.7034` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.4712`, PSNR `20.46 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.2104)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1068` | `0.0174` | `27.73` | `0.7712` | 0 / 19 | lr at max | `num_mpc_steps=2` `K=2` `lam=15.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.2501` | `0.0233` | `25.05` | `0.5925` | 2 / 15 | lam at min | `num_mpc_steps=2` `lam=5.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.1050` | `0.0172` | `27.55` | `0.7777` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2695` | `0.0676` | `25.44` | `0.6752` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.0988` | `0.0146` | `27.96` | `0.7792` | 0 / 17 | num_opt_steps at max, lr at min, mu at max, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=2.0` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.3890` | `0.0480` | `18.49` | `0.3454` | 1 / 1 | steps at max | `steps=2` |
+## Deblurring (Gaussian 7/1.0, sigma 0.05)
 
-## pMF-L-16 &mdash; Deblurring
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7143` | `0.0213` | `9.72` | `0.0202` | 3 | `steps=1` |
+| PnP-Flow | `0.4926` | `0.0470` | `24.07` | `0.6237` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=0.5` |
+| D-Flow | `0.3685` | `0.0236` | `23.16` | `0.5468` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2890` | `0.0459` | `25.75` | `0.7035` | 3 | `K=1` `lam=720` `lr=0.2` |
+| MPC-Delta_t | `0.2275` | `0.0297` | `25.72` | `0.6996` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.3` |
+| RHSO | `0.2305` | `0.0355` | `25.75` | `0.7183` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.2709`, PSNR `25.74 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.2275)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.1791` | `0.0276` | `27.28` | `0.7508` | 4 / 19 | K at min, lr at max | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.1818` | `0.0316` | `28.32` | `0.7960` | 10 / 15 | n_ctrl at max | `num_mpc_steps=2` `lam=100.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.2613` | `0.0527` | `24.33` | `0.6796` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2518` | `0.0526` | `25.71` | `0.7034` | 0 / 3 | num_opt_steps at max, lr at min | `steps=2` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.2305` | `0.0297` | `26.96` | `0.7626` | 10 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=0.05` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.3944` | `0.0492` | `18.47` | `0.3390` | 1 / 1 | steps at max | `steps=2` |
+## 2x super-resolution (sigma 0.05)
 
-## pMF-L-16 &mdash; Super-resolution
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7143` | `0.0213` | `9.72` | `0.0202` | 3 | `steps=1` |
+| PnP-Flow | `0.4608` | `0.0546` | `24.55` | `0.6297` | 3 | `num_pnp_steps=200` `gamma0=200000.0` `alpha=1` |
+| D-Flow | `0.3199` | `0.0365` | `23.61` | `0.5837` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2458` | `0.0400` | `25.50` | `0.6966` | 3 | `K=1` `lam=720` `lr=0.2` |
+| MPC-Delta_t | `0.2203` | `0.0345` | `25.11` | `0.6857` | 3 | `num_mpc_steps=4` `n_ctrl=40` `lam=540` `lr=0.3` |
+| RHSO | `0.2356` | `0.0404` | `24.58` | `0.6710` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.2324`, PSNR `22.73 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.2203)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.2337` | `0.0345` | `24.28` | `0.6013` | 7 / 19 | lr at max | `num_mpc_steps=2` `K=2` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.1153` | `0.0305` | `26.32` | `0.7701` | 4 / 15 | lam at max, n_ctrl at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.2987` | `0.0300` | `22.35` | `0.5749` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2446` | `0.0593` | `25.40` | `0.6913` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1167` | `0.0267` | `26.28` | `0.7805` | 2 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=0.5` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.3884` | `0.0490` | `18.42` | `0.3424` | 1 / 1 | steps at max | `steps=2` |
+## Random inpainting (70% missing, sigma 0.01)
 
-## pMF-L-16 &mdash; Box inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7143` | `0.0213` | `9.72` | `0.0202` | 3 | `steps=1` |
+| PnP-Flow | `0.4722` | `0.0513` | `24.23` | `0.6187` | 3 | `num_pnp_steps=200` `gamma0=200000.0` `alpha=1` |
+| D-Flow | `0.3076` | `0.0312` | `23.78` | `0.5961` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2457` | `0.0381` | `25.18` | `0.6838` | 3 | `K=1` `lam=60` `lr=0.2` |
+| MPC-Delta_t | `0.2117` | `0.0320` | `24.81` | `0.6813` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.3` |
+| RHSO | `0.2061` | `0.0364` | `24.99` | `0.6937` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.1010`, PSNR `27.50 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2061)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.0807` | `0.0077` | `27.81` | `0.8365` | 5 / 19 | K at min, lr at max | `num_mpc_steps=2` `K=1` `lam=15.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.0669` | `0.0060` | `28.35` | `0.8652` | 6 / 15 | n_ctrl at max | `num_mpc_steps=2` `lam=30.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.1166` | `0.0247` | `26.15` | `0.7993` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2577` | `0.0611` | `25.04` | `0.6885` | 0 / 3 | num_opt_steps at max, lr at min | `steps=2` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.0673` | `0.0155` | `28.52` | `0.8808` | 7 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=0.2` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.3870` | `0.0505` | `18.47` | `0.3515` | 1 / 1 | steps at min | `steps=1` |
+## Box inpainting (40x40, sigma 0.05)
 
-## pMF-L-16 &mdash; Random inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7143` | `0.0213` | `9.72` | `0.0202` | 3 | `steps=1` |
+| PnP-Flow | `0.4675` | `0.0451` | `24.18` | `0.6362` | 3 | `num_pnp_steps=200` `gamma0=200000.0` `alpha=0.75` |
+| D-Flow | `0.3022` | `0.0354` | `23.86` | `0.6260` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2525` | `0.0424` | `25.86` | `0.7159` | 3 | `K=1` `lam=15` `lr=0.2` |
+| MPC-Delta_t | `0.1942` | `0.0299` | `26.17` | `0.7440` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.3` |
+| RHSO | `0.2026` | `0.0350` | `25.83` | `0.7551` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `1.0188`, PSNR `12.72 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.5504` | `0.0305` | `20.06` | `0.3824` | 7 / 19 | K at max, lr at min | `num_mpc_steps=2` `K=3` `lam=15.0` `n_ctrl=20` `lr=0.05` |
-| MPC-Delta_t | `0.1323` | `0.0200` | `25.91` | `0.7607` | 2 / 15 | n_ctrl at max | `num_mpc_steps=2` `lam=300.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.2540` | `0.0319` | `22.70` | `0.5982` | 0 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.2992` | `0.0539` | `24.50` | `0.6462` | 2 / 3 | num_opt_steps at max, lr at min | `steps=2` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1061` | `0.0161` | `26.40` | `0.7891` | 6 / 17 | num_opt_steps at max, lr at min, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=0.5` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6700` | `0.0264` | `13.44` | `0.1130` | 1 / 1 | steps at max | `steps=2` |
-
-## pMF-L-16 &mdash; Stroke painting
-
-Degraded observation: LPIPS `0.4517`, PSNR `19.63 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.4052` | `0.0467` | `18.49` | `0.3473` | 9 / 19 | K at min, lam at max | `num_mpc_steps=2` `K=1` `lam=500.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.4144` | `0.0460` | `18.32` | `0.3348` | 8 / 15 | n_ctrl at min | `num_mpc_steps=2` `lam=15.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.4792` | `0.0431` | `17.52` | `0.3080` | 5 / 11 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=1.0` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.7421` | `0.0368` | `11.72` | `0.1197` | 3 / 3 | num_opt_steps at min, lr at min | `steps=2` `num_opt_steps=40` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.4802` | `0.0377` | `15.68` | `0.2420` | 1 / 17 | num_opt_steps at max, lr at min, mu at max, beta at max | `num_rhso_steps=4` `num_opt_steps=20` `lr=0.05` `mu=2.0` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.4520` | `0.0510` | `17.58` | `0.2964` | 1 / 1 | steps at max | `steps=2` |
+**best non-baseline:** MPC-Delta_t (LPIPS 0.1942)
 
 ---
 
-# SiT-XL/2
+# pMF-L/16 (pixel, MeanFlow, JAX)
 
-SD-VAE latent 4x32x32, standard flow, Torch
+## Denoising (sigma 0.20)
 
-## SiT-XL/2 &mdash; Denoising
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7136` | `0.0201` | `9.35` | `0.0189` | 3 | `steps=2` |
+| PnP-Flow | `0.0787` | `0.0111` | `27.31` | `0.8100` | 4 | `num_pnp_steps=10` `gamma0=200000.0` `alpha=0.1` |
+| D-Flow | `0.2101` | `0.0253` | `26.34` | `0.7068` | 4 | `num_opt_steps=320` `lr=0.1` |
+| MPC-RHC | `0.1052` | `0.0202` | `28.18` | `0.7931` | 3 | `K=2` `lam=30` `lr=0.1` |
+| MPC-Delta_t | `0.1670` | `0.0203` | `27.38` | `0.7216` | 4 | `num_mpc_steps=8` `n_ctrl=20` `lam=30` `lr=0.15` |
+| RHSO | `0.0905` | `0.0150` | `28.32` | `0.7975` | 4 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.03` `mu=1` |
 
-Degraded observation: LPIPS `0.4712`, PSNR `20.46 dB`.
+**best non-baseline:** PnP-Flow (LPIPS 0.0787)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.2844` | `0.0343` | `25.13` | `0.6374` | 2 / 19 | K at min, lam at max, n_ctrl at max, lr at max | `num_mpc_steps=4` `K=1` `lam=500.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.2335` | `0.0337` | `25.92` | `0.6779` | 1 / 23 | num_mpc_steps at min, n_ctrl at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=80` `lr=0.1` |
-| PnP-Flow | `0.5979` | `0.0457` | `22.23` | `0.5206` | 3 / 29 | alpha at min | `num_pnp_steps=20` `gamma0=0.5` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6171` | `0.0302` | `19.17` | `0.3602` | 11 / 17 | steps at min, num_opt_steps at max, lr at max | `steps=2` `solver=heun` `num_opt_steps=40` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.2239` | `0.0322` | `26.09` | `0.6929` | 5 / 69 | num_opt_steps at max, mu at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6717` | `0.0253` | `12.28` | `0.0696` | 2 / 5 | steps at min | `steps=4` `solver=heun` |
+## Deblurring (Gaussian 7/1.0, sigma 0.05)
 
-## SiT-XL/2 &mdash; Deblurring
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7136` | `0.0201` | `9.35` | `0.0189` | 3 | `steps=2` |
+| PnP-Flow | `0.1389` | `0.0396` | `27.33` | `0.8041` | 4 | `num_pnp_steps=200` `gamma0=5000000.0` `alpha=1` |
+| D-Flow | `0.2901` | `0.0499` | `24.82` | `0.6700` | 3 | `num_opt_steps=640` `lr=0.03` |
+| MPC-RHC | `0.1524` | `0.0315` | `28.09` | `0.7918` | 3 | `K=1` `lam=60` `lr=0.2` |
+| MPC-Delta_t | `0.1352` | `0.0215` | `28.62` | `0.8034` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.1` |
+| RHSO | `0.1211` | `0.0249` | `29.00` | `0.8473` | 3 | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `0.2709`, PSNR `25.74 dB`.
+**best non-baseline:** RHSO (LPIPS 0.1211)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.2744` | `0.0353` | `25.04` | `0.6599` | 1 / 2 | — | `num_mpc_steps=4` `K=1` `lam=50.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.2492` | `0.0304` | `25.05` | `0.6694` | 0 / 2 | lam at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.6186` | `0.0435` | `21.98` | `0.5066` | 3 / 3 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=0.5` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5297` | `0.0350` | `20.51` | `0.4031` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.2189` | `0.0328` | `26.05` | `0.7218` | 1 / 11 | num_opt_steps at max, lr at min, mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6082` | `0.0271` | `12.96` | `0.1534` | 0 / 0 | — | `steps=4` `solver=heun` |
+## 2x super-resolution (sigma 0.05)
 
-## SiT-XL/2 &mdash; Super-resolution
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7136` | `0.0201` | `9.35` | `0.0189` | 3 | `steps=2` |
+| PnP-Flow | `0.1286` | `0.0239` | `25.24` | `0.7535` | 4 | `num_pnp_steps=20` `gamma0=100000.0` `alpha=0.1` |
+| D-Flow | `0.1891` | `0.0311` | `25.56` | `0.7263` | 3 | `num_opt_steps=640` `lr=0.03` |
+| MPC-RHC | `0.2027` | `0.0184` | `25.20` | `0.7099` | 3 | `K=3` `lam=180` `lr=0.05` |
+| MPC-Delta_t | `0.0938` | `0.0214` | `26.52` | `0.7802` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.15` |
+| RHSO | `0.1072` | `0.0288` | `26.66` | `0.7931` | 4 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0.2` |
 
-Degraded observation: LPIPS `0.2324`, PSNR `22.73 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.0938)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.2558` | `0.0369` | `24.71` | `0.6514` | 1 / 2 | lam at max | `num_mpc_steps=4` `K=1` `lam=500.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.2739` | `0.0337` | `24.26` | `0.6318` | 0 / 2 | lam at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.6081` | `0.0432` | `21.58` | `0.4663` | 3 / 3 | gamma0 at min, alpha at min | `num_pnp_steps=20` `gamma0=0.25` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5433` | `0.0409` | `20.46` | `0.4098` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1889` | `0.0353` | `25.58` | `0.7161` | 3 / 11 | num_opt_steps at max, lr at max, mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.1` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6237` | `0.0286` | `13.16` | `0.1740` | 0 / 0 | — | `steps=4` `solver=heun` |
+## Random inpainting (70% missing, sigma 0.01)
 
-## SiT-XL/2 &mdash; Box inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7136` | `0.0201` | `9.35` | `0.0189` | 3 | `steps=2` |
+| PnP-Flow | `0.1221` | `0.0183` | `25.23` | `0.7499` | 3 | `num_pnp_steps=20` `gamma0=100000.0` `alpha=0.1` |
+| D-Flow | `0.2955` | `0.0929` | `24.44` | `0.6379` | 3 | `num_opt_steps=640` `lr=0.03` |
+| MPC-RHC | `0.2217` | `0.0206` | `24.92` | `0.6892` | 3 | `K=3` `lam=180` `lr=0.05` |
+| MPC-Delta_t | `0.0878` | `0.0204` | `26.95` | `0.8135` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.15` |
+| RHSO | `0.1026` | `0.0294` | `26.80` | `0.8145` | 4 | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `0.1010`, PSNR `27.50 dB`.
+**best non-baseline:** MPC-Delta_t (LPIPS 0.0878)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.2414` | `0.0366` | `24.92` | `0.6883` | 1 / 2 | lam at max | `num_mpc_steps=4` `K=1` `lam=500.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.2225` | `0.0336` | `24.92` | `0.7086` | 1 / 2 | lam at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.5981` | `0.0432` | `21.93` | `0.5160` | 2 / 3 | gamma0 at max, alpha at min | `num_pnp_steps=20` `gamma0=0.5` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5339` | `0.0481` | `20.26` | `0.4064` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.1960` | `0.0300` | `25.95` | `0.7516` | 3 / 11 | num_opt_steps at max, lr at min, mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6195` | `0.0277` | `12.98` | `0.1523` | 0 / 0 | — | `steps=4` `solver=heun` |
+## Box inpainting (40x40, sigma 0.05)
 
-## SiT-XL/2 &mdash; Random inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7136` | `0.0201` | `9.35` | `0.0189` | 3 | `steps=2` |
+| PnP-Flow | `0.0449` | `0.0051` | `29.63` | `0.8916` | 4 | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.1` |
+| D-Flow | `0.1406` | `0.0177` | `24.67` | `0.8077` | 4 | `num_opt_steps=640` `lr=0.1` |
+| MPC-RHC | `0.0810` | `0.0065` | `25.65` | `0.8542` | 3 | `K=1` `lam=30` `lr=0.05` |
+| MPC-Delta_t | `0.0457` | `0.0059` | `29.04` | `0.8953` | 4 | `num_mpc_steps=8` `n_ctrl=40` `lam=180` `lr=0.3` |
+| RHSO | `0.0485` | `0.0121` | `29.44` | `0.9010` | 4 | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` |
 
-Degraded observation: LPIPS `1.0188`, PSNR `12.72 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.3561` | `0.0240` | `23.49` | `0.5695` | 1 / 2 | lam at max | `num_mpc_steps=4` `K=1` `lam=500.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.3635` | `0.0293` | `23.40` | `0.5745` | 0 / 2 | lam at max | `num_mpc_steps=4` `lam=300.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.6149` | `0.0482` | `21.82` | `0.4776` | 2 / 3 | gamma0 at min, alpha at min | `num_pnp_steps=20` `gamma0=0.25` `alpha=0.5` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5939` | `0.0350` | `20.37` | `0.3981` | 1 / 3 | num_opt_steps at max, lr at max | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.2055` | `0.0346` | `25.31` | `0.7105` | 3 / 11 | num_opt_steps at max, lr at max, mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.1` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.7483` | `0.0364` | `10.78` | `0.0191` | 0 / 0 | — | `steps=4` `solver=heun` |
-
-## SiT-XL/2 &mdash; Stroke painting
-
-Degraded observation: LPIPS `0.4517`, PSNR `19.63 dB`.
-
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.5846` | `0.0416` | `18.49` | `0.3611` | 2 / 2 | — | `num_mpc_steps=4` `K=1` `lam=50.0` `n_ctrl=40` `lr=0.1` |
-| MPC-Delta_t | `0.5426` | `0.0359` | `17.61` | `0.3391` | 2 / 2 | — | `num_mpc_steps=4` `lam=100.0` `n_ctrl=40` `lr=0.1` |
-| PnP-Flow | `0.7195` | `0.0378` | `18.52` | `0.3808` | 3 / 3 | gamma0 at min, alpha at max | `num_pnp_steps=20` `gamma0=0.25` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6064` | `0.0402` | `16.82` | `0.2927` | 1 / 3 | num_opt_steps at max, lr at min | `steps=2` `solver=heun` `num_opt_steps=80` `lr=0.05` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.5632` | `0.0358` | `17.70` | `0.3255` | 9 / 11 | num_opt_steps at max, lr at min, mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.05` `mu=0.0` `beta=0.25` `solver=heun` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6981` | `0.0294` | `13.60` | `0.1839` | 0 / 0 | — | `steps=4` `solver=heun` |
+**best non-baseline:** PnP-Flow (LPIPS 0.0449)
 
 ---
 
-# iMF-B-2
+# iMF-B-2 (latent, MeanFlow, JAX)
 
-SD-VAE latent 32x32x4, MeanFlow, JAX
+## Denoising (sigma 0.20)
 
-## iMF-B-2 &mdash; Denoising
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7558` | `0.0511` | `9.75` | `0.0498` | 3 | `steps=8` |
+| PnP-Flow | `0.3597` | `0.0464` | `25.11` | `0.6398` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=1` |
+| D-Flow | `0.3657` | `0.0555` | `24.65` | `0.6258` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2651` | `0.0508` | `26.03` | `0.6952` | 3 | `K=1` `lam=15` `lr=0.2` |
+| MPC-Delta_t | `0.2357` | `0.0518` | `26.29` | `0.7125` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.3` |
+| RHSO | `0.2271` | `0.0468` | `26.36` | `0.7112` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.4712`, PSNR `20.46 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2271)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.4261` | `0.0297` | `23.28` | `0.5273` | 3 / 9 | — | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.4593` | `0.0288` | `23.10` | `0.5204` | 2 / 7 | lam at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5175` | `0.0481` | `23.13` | `0.5337` | 0 / 11 | gamma0 at min | `num_pnp_steps=20` `gamma0=0.5` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5539` | `0.0455` | `21.62` | `0.4654` | 1 / 19 | steps at max, num_opt_steps at max | `steps=2` `num_opt_steps=80` `lr=0.2` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.3320` | `0.0478` | `24.94` | `0.6418` | 4 / 27 | mu at min | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6387` | `0.0205` | `12.52` | `0.0945` | 2 / 2 | steps at max | `steps=4` |
+## Deblurring (Gaussian 7/1.0, sigma 0.05)
 
-## iMF-B-2 &mdash; Deblurring
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7558` | `0.0511` | `9.75` | `0.0498` | 3 | `steps=8` |
+| PnP-Flow | `0.4113` | `0.0399` | `24.52` | `0.6108` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=1` |
+| D-Flow | `0.3882` | `0.0482` | `24.24` | `0.6268` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.3011` | `0.0538` | `25.85` | `0.7089` | 3 | `K=1` `lam=180` `lr=0.2` |
+| MPC-Delta_t | `0.2567` | `0.0606` | `26.14` | `0.7301` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.3` |
+| RHSO | `0.2467` | `0.0562` | `25.90` | `0.7249` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.2709`, PSNR `25.74 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2467)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.3775` | `0.0347` | `23.51` | `0.5658` | 0 / 4 | lam at max | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.3795` | `0.0339` | `23.55` | `0.5681` | 1 / 4 | lam at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5345` | `0.0456` | `22.42` | `0.4796` | 1 / 1 | gamma0 at min | `num_pnp_steps=20` `gamma0=0.25` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.5938` | `0.0474` | `19.57` | `0.3797` | 1 / 1 | lr at min | `steps=2` `num_opt_steps=40` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.3547` | `0.0531` | `25.02` | `0.6660` | 1 / 5 | mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.25` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.5963` | `0.0422` | `14.08` | `0.1738` | 0 / 0 | — | `steps=2` |
+## 2x super-resolution (sigma 0.05)
 
-## iMF-B-2 &mdash; Super-resolution
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7558` | `0.0511` | `9.75` | `0.0498` | 3 | `steps=8` |
+| PnP-Flow | `0.3570` | `0.0449` | `24.93` | `0.6382` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=1` |
+| D-Flow | `0.3594` | `0.0503` | `24.03` | `0.6114` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2412` | `0.0482` | `25.60` | `0.7029` | 3 | `K=1` `lam=240` `lr=0.2` |
+| MPC-Delta_t | `0.2376` | `0.0490` | `25.18` | `0.6983` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.3` |
+| RHSO | `0.2360` | `0.0395` | `24.59` | `0.6748` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.2324`, PSNR `22.73 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2360)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.3505` | `0.0352` | `23.53` | `0.5774` | 0 / 4 | lam at max | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.3630` | `0.0357` | `23.48` | `0.5747` | 0 / 4 | lam at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5406` | `0.0431` | `21.94` | `0.4693` | 1 / 1 | gamma0 at max | `num_pnp_steps=20` `gamma0=0.5` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6145` | `0.0483` | `19.26` | `0.3619` | 1 / 1 | lr at min | `steps=2` `num_opt_steps=40` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.3194` | `0.0578` | `25.03` | `0.6687` | 1 / 5 | mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.25` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.5758` | `0.0431` | `14.02` | `0.1934` | 0 / 0 | — | `steps=2` |
+## Random inpainting (70% missing, sigma 0.01)
 
-## iMF-B-2 &mdash; Box inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7558` | `0.0511` | `9.75` | `0.0498` | 3 | `steps=8` |
+| PnP-Flow | `0.3722` | `0.0449` | `24.57` | `0.6256` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=1` |
+| D-Flow | `0.3720` | `0.0487` | `23.72` | `0.6052` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2587` | `0.0526` | `25.27` | `0.6953` | 3 | `K=1` `lam=180` `lr=0.2` |
+| MPC-Delta_t | `0.2347` | `0.0551` | `25.10` | `0.6976` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.3` |
+| RHSO | `0.2301` | `0.0513` | `25.03` | `0.7013` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `0.1010`, PSNR `27.50 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2301)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.3559` | `0.0324` | `23.00` | `0.5784` | 0 / 4 | lam at max | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.3776` | `0.0324` | `23.19` | `0.5728` | 1 / 4 | lam at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5209` | `0.0478` | `22.94` | `0.5312` | 1 / 1 | gamma0 at max | `num_pnp_steps=20` `gamma0=0.5` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6104` | `0.0403` | `19.03` | `0.3615` | 1 / 1 | lr at min | `steps=2` `num_opt_steps=40` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.2948` | `0.0391` | `25.02` | `0.6781` | 1 / 5 | mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.25` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.5842` | `0.0298` | `13.16` | `0.1455` | 0 / 0 | — | `steps=2` |
+## Box inpainting (40x40, sigma 0.05)
 
-## iMF-B-2 &mdash; Random inpainting
+| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |
+|---|---|---|---|---|---|---|
+| SDEdit (baseline) | `0.7558` | `0.0511` | `9.75` | `0.0498` | 3 | `steps=8` |
+| PnP-Flow | `0.3632` | `0.0448` | `24.87` | `0.6391` | 3 | `num_pnp_steps=200` `gamma0=100000.0` `alpha=1` |
+| D-Flow | `0.3689` | `0.0516` | `24.21` | `0.6358` | 3 | `num_opt_steps=640` `lr=0.3` |
+| MPC-RHC | `0.2498` | `0.0518` | `26.25` | `0.7285` | 3 | `K=1` `lam=60` `lr=0.2` |
+| MPC-Delta_t | `0.2193` | `0.0490` | `26.46` | `0.7529` | 3 | `num_mpc_steps=8` `n_ctrl=40` `lam=540` `lr=0.3` |
+| RHSO | `0.2121` | `0.0425` | `26.38` | `0.7603` | 3 | `num_rhso_steps=8` `num_opt_steps=80` `lr=0.03` `mu=0` |
 
-Degraded observation: LPIPS `1.0188`, PSNR `12.72 dB`.
+**best non-baseline:** RHSO (LPIPS 0.2121)
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.5424` | `0.0266` | `21.70` | `0.4260` | 0 / 4 | lam at max | `num_mpc_steps=2` `K=1` `lam=50.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.5805` | `0.0240` | `21.60` | `0.4262` | 1 / 4 | lam at max | `num_mpc_steps=2` `lam=1000.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.5276` | `0.0439` | `22.05` | `0.4689` | 1 / 1 | gamma0 at max | `num_pnp_steps=20` `gamma0=0.5` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6490` | `0.0253` | `18.98` | `0.3529` | 1 / 1 | lr at max | `steps=2` `num_opt_steps=40` `lr=0.2` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.3391` | `0.0406` | `24.22` | `0.6175` | 1 / 5 | mu at min, beta at min | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.25` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.7234` | `0.0135` | `11.07` | `0.0193` | 0 / 0 | — | `steps=2` |
+---
 
-## iMF-B-2 &mdash; Stroke painting
+# Are the manuscript's hyperparameters (Tables 4-7) optimal?
 
-Degraded observation: LPIPS `0.4517`, PSNR `19.63 dB`.
+Rank of the manuscript's configuration inside each cell, and its LPIPS gap to the cell's winner.  Stage 1 ranks among all grid configurations on 4 images; Stage 2 ranks among the surviving candidates on 8 images (the manuscript's configuration is always one of them).  A gap of 0.0000 means the manuscript's choice is the winner.
 
-| strategy | LPIPS | +/- se | PSNR | SSIM | ties | edge | best configuration |
-|---|---|---|---|---|---|---|---|
-| MPC-RHC | `0.5965` | `0.0375` | `17.48` | `0.3232` | 0 / 4 | lam at min | `num_mpc_steps=2` `K=1` `lam=5.0` `n_ctrl=20` `lr=0.1` |
-| MPC-Delta_t | `0.6117` | `nan` | `17.14` | `0.3061` | 0 / 4 | lam at min | `num_mpc_steps=2` `lam=15.0` `n_ctrl=20` `lr=0.1` |
-| PnP-Flow | `0.6572` | `0.0429` | `16.93` | `0.2677` | 1 / 1 | gamma0 at min | `num_pnp_steps=20` `gamma0=0.25` `alpha=1.0` `noise_samples=1` `phi_normalization=half_sum_squared` |
-| D-Flow | `0.6672` | `0.0561` | `14.98` | `0.2605` | 1 / 1 | lr at min | `steps=2` `num_opt_steps=40` `lr=0.1` `phi_normalization=half_mean_squared_per_measurement` |
-| RHSO | `0.6480` | `0.0387` | `16.51` | `0.2862` | 4 / 5 | mu at min, beta at max | `num_rhso_steps=4` `num_opt_steps=10` `lr=0.1` `mu=0.0` `beta=0.5` `phi_normalization=half_mean_squared_per_measurement` |
-| SDEdit *(baseline)* | `0.6565` | `0.0372` | `14.26` | `0.2142` | 0 / 0 | — | `steps=2` |
+| model | problem | method | manuscript config | Stage-1 rank / gap (4 img) | Stage-2 rank / gap (8 img) | manuscript LPIPS (8 img) | our winner | winner LPIPS |
+|---|---|---|---|---|---|---|---|---|
+| jit | denoising | pnp | num_pnp_steps=50 gamma0=200000.0 alpha=0.5 | #2/175 (+0.0046) | #1/3 (+0.0000) | `0.0986` | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.5` | `0.0986` |
+| jit | denoising | dflow | num_opt_steps=320 lr=0.03 | #9/15 (+0.2093) | #4/4 (+0.2394) | `0.7196` | `num_opt_steps=640` `lr=0.3` | `0.4802` |
+| jit | denoising | mpc_rhc | K=2 lam=15 lr=0.05 | #1/84 (+0.0000) | #1/3 (+0.0000) | `0.1144` | `K=2` `lam=15` `lr=0.05` | `0.1144` |
+| jit | denoising | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=30 lr=0.1 | #4/96 (+0.0032) | #4/4 (+0.0068) | `0.1922` | `num_mpc_steps=8` `n_ctrl=20` `lam=30` `lr=0.3` | `0.1854` |
+| jit | denoising | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #10/26 (+0.1058) | #4/4 (+0.1555) | `0.2898` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.005` `mu=0.2` | `0.1343` |
+| jit | deblur | pnp | num_pnp_steps=100 gamma0=1200000.0 alpha=0.5 | #6/175 (+0.0281) | #4/4 (+0.0254) | `0.1974` | `num_pnp_steps=200` `gamma0=1200000.0` `alpha=0.5` | `0.1720` |
+| jit | deblur | dflow | num_opt_steps=320 lr=0.03 | #9/15 (+0.1707) | #4/4 (+0.1939) | `0.7221` | `num_opt_steps=640` `lr=0.3` | `0.5283` |
+| jit | deblur | mpc_rhc | K=1 lam=60 lr=0.1 | #3/84 (+0.0028) | #3/3 (+0.0017) | `0.1689` | `K=1` `lam=60` `lr=0.05` | `0.1672` |
+| jit | deblur | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=540 lr=0.1 | #6/96 (+0.0203) | #4/4 (+0.0129) | `0.1574` | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.1` | `0.1445` |
+| jit | deblur | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #4/26 (+0.0600) | #3/4 (+0.0418) | `0.1383` | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` | `0.0965` |
+| jit | super_resolution | pnp | num_pnp_steps=20 gamma0=100000.0 alpha=0.25 | #13/175 (+0.0523) | #4/4 (+0.0503) | `0.1440` | `num_pnp_steps=20` `gamma0=200000.0` `alpha=0.25` | `0.0937` |
+| jit | super_resolution | dflow | num_opt_steps=320 lr=0.03 | #9/15 (+0.2110) | #4/4 (+0.2390) | `0.7194` | `num_opt_steps=640` `lr=0.3` | `0.4804` |
+| jit | super_resolution | mpc_rhc | K=3 lam=240 lr=0.05 | #8/84 (+0.0300) | #4/4 (+0.0140) | `0.1632` | `K=2` `lam=720` `lr=0.05` | `0.1491` |
+| jit | super_resolution | mpc_delta_t | num_mpc_steps=4 n_ctrl=20 lam=360 lr=0.1 | #21/96 (+0.0095) | #4/4 (+0.0070) | `0.1077` | `num_mpc_steps=8` `n_ctrl=40` `lam=540` `lr=0.05` | `0.1007` |
+| jit | super_resolution | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #5/26 (+0.0304) | #4/4 (+0.0298) | `0.1363` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0.2` | `0.1065` |
+| jit | random_inpaint | pnp | num_pnp_steps=20 gamma0=200000.0 alpha=0.25 | #2/175 (+0.0023) | #2/3 (+0.0024) | `0.0998` | `num_pnp_steps=50` `gamma0=100000.0` `alpha=0.1` | `0.0974` |
+| jit | random_inpaint | dflow | num_opt_steps=320 lr=0.03 | #9/15 (+0.2070) | #4/4 (+0.2318) | `0.7200` | `num_opt_steps=640` `lr=0.3` | `0.4882` |
+| jit | random_inpaint | mpc_rhc | K=3 lam=180 lr=0.05 | #7/84 (+0.0166) | #3/4 (+0.0069) | `0.1786` | `K=2` `lam=240` `lr=0.02` | `0.1717` |
+| jit | random_inpaint | mpc_delta_t | num_mpc_steps=4 n_ctrl=20 lam=540 lr=0.1 | #18/96 (+0.0143) | #4/4 (+0.0092) | `0.0890` | `num_mpc_steps=8` `n_ctrl=20` `lam=1000` `lr=0.05` | `0.0798` |
+| jit | random_inpaint | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #2/26 (+0.0036) | #1/3 (+0.0000) | `0.0919` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0` | `0.0919` |
+| jit | box_inpaint | pnp | num_pnp_steps=100 gamma0=400000.0 alpha=0.25 | #10/175 (+0.0108) | #4/4 (+0.0119) | `0.0560` | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.1` | `0.0441` |
+| jit | box_inpaint | dflow | num_opt_steps=320 lr=0.03 | #9/15 (+0.2058) | #4/4 (+0.2273) | `0.7199` | `num_opt_steps=640` `lr=0.3` | `0.4926` |
+| jit | box_inpaint | mpc_rhc | K=1 lam=30 lr=0.05 | #1/84 (+0.0000) | #1/3 (+0.0000) | `0.0635` | `K=1` `lam=30` `lr=0.05` | `0.0635` |
+| jit | box_inpaint | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=180 lr=0.1 | #4/96 (+0.0036) | #4/4 (+0.0023) | `0.0424` | `num_mpc_steps=8` `n_ctrl=20` `lam=180` `lr=0.1` | `0.0401` |
+| jit | box_inpaint | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #2/26 (+0.0122) | #2/3 (+0.0035) | `0.0492` | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` | `0.0458` |
+| pmf | denoising | pnp | num_pnp_steps=50 gamma0=800000.0 alpha=0.75 | #23/175 (+0.0466) | #4/4 (+0.0357) | `0.1144` | `num_pnp_steps=10` `gamma0=200000.0` `alpha=0.1` | `0.0787` |
+| pmf | denoising | dflow | num_opt_steps=320 lr=0.03 | #5/15 (+0.1292) | #4/4 (+0.0878) | `0.2978` | `num_opt_steps=320` `lr=0.1` | `0.2101` |
+| pmf | denoising | mpc_rhc | K=2 lam=15 lr=0.1 | #3/84 (+0.0179) | #3/3 (+0.0098) | `0.1150` | `K=2` `lam=30` `lr=0.1` | `0.1052` |
+| pmf | denoising | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=30 lr=0.1 | #5/96 (+0.0025) | #3/4 (+0.0023) | `0.1693` | `num_mpc_steps=8` `n_ctrl=20` `lam=30` `lr=0.15` | `0.1670` |
+| pmf | denoising | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.03 mu=0 | #13/26 (+0.0843) | #4/4 (+0.1037) | `0.1942` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.03` `mu=1` | `0.0905` |
+| pmf | deblur | pnp | num_pnp_steps=100 gamma0=1200000.0 alpha=0.5 | #4/175 (+0.0487) | #3/4 (+0.0553) | `0.1942` | `num_pnp_steps=200` `gamma0=5000000.0` `alpha=1` | `0.1389` |
+| pmf | deblur | dflow | num_opt_steps=320 lr=0.03 | #2/15 (+0.0517) | #2/3 (+0.0478) | `0.3380` | `num_opt_steps=640` `lr=0.03` | `0.2901` |
+| pmf | deblur | mpc_rhc | K=1 lam=60 lr=0.05 | #3/84 (+0.0042) | #3/3 (+0.0025) | `0.1549` | `K=1` `lam=60` `lr=0.2` | `0.1524` |
+| pmf | deblur | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=540 lr=0.1 | #7/96 (+0.0227) | #4/4 (+0.0104) | `0.1456` | `num_mpc_steps=8` `n_ctrl=40` `lam=1000` `lr=0.1` | `0.1352` |
+| pmf | deblur | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #2/26 (+0.0353) | #3/3 (+0.0323) | `0.1534` | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` | `0.1211` |
+| pmf | super_resolution | pnp | num_pnp_steps=20 gamma0=100000.0 alpha=0.25 | #6/175 (+0.0270) | #4/4 (+0.0177) | `0.1463` | `num_pnp_steps=20` `gamma0=100000.0` `alpha=0.1` | `0.1286` |
+| pmf | super_resolution | dflow | num_opt_steps=320 lr=0.03 | #2/15 (+0.0992) | #2/3 (+0.0913) | `0.2804` | `num_opt_steps=640` `lr=0.03` | `0.1891` |
+| pmf | super_resolution | mpc_rhc | K=3 lam=240 lr=0.05 | #2/84 (+0.0046) | #2/3 (+0.0016) | `0.2042` | `K=3` `lam=180` `lr=0.05` | `0.2027` |
+| pmf | super_resolution | mpc_delta_t | num_mpc_steps=4 n_ctrl=20 lam=360 lr=0.1 | #39/96 (+0.0513) | #4/4 (+0.0320) | `0.1258` | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.15` | `0.0938` |
+| pmf | super_resolution | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #6/26 (+0.0245) | #4/4 (+0.0234) | `0.1306` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0.2` | `0.1072` |
+| pmf | random_inpaint | pnp | num_pnp_steps=20 gamma0=100000.0 alpha=0.25 | #2/175 (+0.0180) | #2/3 (+0.0196) | `0.1417` | `num_pnp_steps=20` `gamma0=100000.0` `alpha=0.1` | `0.1221` |
+| pmf | random_inpaint | dflow | num_opt_steps=320 lr=0.03 | #2/15 (+0.1101) | #2/3 (+0.0243) | `0.3198` | `num_opt_steps=640` `lr=0.03` | `0.2955` |
+| pmf | random_inpaint | mpc_rhc | K=3 lam=180 lr=0.05 | #1/84 (+0.0000) | #1/3 (+0.0000) | `0.2217` | `K=3` `lam=180` `lr=0.05` | `0.2217` |
+| pmf | random_inpaint | mpc_delta_t | num_mpc_steps=4 n_ctrl=20 lam=540 lr=0.15 | #37/96 (+0.0349) | #4/4 (+0.0199) | `0.1077` | `num_mpc_steps=8` `n_ctrl=40` `lam=360` `lr=0.15` | `0.0878` |
+| pmf | random_inpaint | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.01 mu=0 | #4/26 (+0.0094) | #1/4 (+0.0000) | `0.1026` | `num_rhso_steps=4` `num_opt_steps=40` `lr=0.01` `mu=0` | `0.1026` |
+| pmf | box_inpaint | pnp | num_pnp_steps=100 gamma0=400000.0 alpha=0.25 | #10/175 (+0.0198) | #4/4 (+0.0159) | `0.0608` | `num_pnp_steps=50` `gamma0=200000.0` `alpha=0.1` | `0.0449` |
+| pmf | box_inpaint | dflow | num_opt_steps=320 lr=0.03 | #6/15 (+0.1515) | #4/4 (+0.1680) | `0.3086` | `num_opt_steps=640` `lr=0.1` | `0.1406` |
+| pmf | box_inpaint | mpc_rhc | K=1 lam=30 lr=0.05 | #1/84 (+0.0000) | #1/3 (+0.0000) | `0.0810` | `K=1` `lam=30` `lr=0.05` | `0.0810` |
+| pmf | box_inpaint | mpc_delta_t | num_mpc_steps=8 n_ctrl=40 lam=180 lr=0.1 | #8/96 (+0.0081) | #2/4 (+0.0027) | `0.0483` | `num_mpc_steps=8` `n_ctrl=40` `lam=180` `lr=0.3` | `0.0457` |
+| pmf | box_inpaint | rhso | num_rhso_steps=4 num_opt_steps=40 lr=0.02 mu=0 | #5/26 (+0.0359) | #4/4 (+0.0184) | `0.0670` | `num_rhso_steps=8` `num_opt_steps=20` `lr=0.01` `mu=0` | `0.0485` |
 
+---
+
+# Appendix: grid-edge extension rounds (NOT used for the final benchmark)
+
+Lowest LPIPS reached in each cell when the edge of the grid was pushed repeatedly (8 images), next to the grid-only winner above.
+
+| model | problem | method | grid-only winner LPIPS | extended best LPIPS | extended configuration |
+|---|---|---|---|---|---|
+| jit | denoising | dflow | `0.4802` | `0.2884` | `num_opt_steps=2560` `lr=0.3` |
+| jit | deblur | dflow | `0.5283` | `0.3008` | `num_opt_steps=5120` `lr=0.3` |
+| jit | deblur | mpc_delta_t | `0.1445` | `0.1396` | `num_mpc_steps=8` `n_ctrl=320` `lam=1000` `lr=0.1` |
+| jit | super_resolution | dflow | `0.4804` | `0.3089` | `num_opt_steps=2560` `lr=0.3` |
+| jit | random_inpaint | dflow | `0.4882` | `0.3137` | `num_opt_steps=2560` `lr=0.3` |
+| jit | box_inpaint | dflow | `0.4926` | `0.1467` | `num_opt_steps=20480` `lr=0.3` |
+| pmf | denoising | dflow | `0.2101` | `0.2054` | `num_opt_steps=2560` `lr=0.1` |
+| pmf | deblur | dflow | `0.2901` | `0.1315` | `num_opt_steps=5120` `lr=0.03` |
+| pmf | super_resolution | dflow | `0.1891` | `0.1383` | `num_opt_steps=2560` `lr=0.03` |
+| pmf | random_inpaint | dflow | `0.2955` | `0.1484` | `num_opt_steps=2560` `lr=0.03` |
+| imf | denoising | pnp | `0.3597` | `0.2249` | `num_pnp_steps=4004` `gamma0=100000.0` `alpha=1` |
+| imf | denoising | dflow | `0.3657` | `0.2490` | `num_opt_steps=5120` `lr=0.3` |
+| imf | denoising | mpc_delta_t | `0.2357` | `0.2200` | `num_mpc_steps=8` `n_ctrl=160` `lam=540` `lr=0.3` |
+| imf | denoising | rhso | `0.2271` | `0.2197` | `num_rhso_steps=8` `num_opt_steps=320` `lr=0.03` `mu=0` |
+| imf | deblur | pnp | `0.4113` | `0.2866` | `num_pnp_steps=4004` `gamma0=100000.0` `alpha=1` |
+| imf | deblur | dflow | `0.3882` | `0.2776` | `num_opt_steps=5120` `lr=0.3` |
+| imf | deblur | mpc_delta_t | `0.2567` | `0.2335` | `num_mpc_steps=8` `n_ctrl=320` `lam=1000` `lr=0.3` |
+| imf | deblur | rhso | `0.2467` | `0.2418` | `num_rhso_steps=32` `num_opt_steps=80` `lr=0.03` `mu=0` |
+| imf | super_resolution | pnp | `0.3570` | `0.1999` | `num_pnp_steps=8468` `gamma0=100000.0` `alpha=1` |
+| imf | super_resolution | dflow | `0.3594` | `0.2535` | `num_opt_steps=5120` `lr=0.3` |
+| imf | super_resolution | mpc_delta_t | `0.2376` | `0.2311` | `num_mpc_steps=8` `n_ctrl=40` `lam=6300` `lr=0.3` |
+| imf | random_inpaint | pnp | `0.3722` | `0.2341` | `num_pnp_steps=4004` `gamma0=100000.0` `alpha=1` |
+| imf | random_inpaint | dflow | `0.3720` | `0.2493` | `num_opt_steps=5120` `lr=0.3` |
+| imf | random_inpaint | mpc_delta_t | `0.2347` | `0.2125` | `num_mpc_steps=8` `n_ctrl=160` `lam=1000` `lr=0.3` |
+| imf | random_inpaint | rhso | `0.2301` | `0.1969` | `num_rhso_steps=8` `num_opt_steps=640` `lr=0.03` `mu=0` |
+| imf | box_inpaint | pnp | `0.3632` | `0.2527` | `num_pnp_steps=4004` `gamma0=100000.0` `alpha=1` |
+| imf | box_inpaint | dflow | `0.3689` | `0.2142` | `num_opt_steps=5120` `lr=0.3` |
+| imf | box_inpaint | mpc_delta_t | `0.2193` | `0.1932` | `num_mpc_steps=8` `n_ctrl=320` `lam=1000` `lr=0.3` |
+| imf | box_inpaint | rhso | `0.2121` | `0.1947` | `num_rhso_steps=32` `num_opt_steps=80` `lr=0.03` `mu=0` |

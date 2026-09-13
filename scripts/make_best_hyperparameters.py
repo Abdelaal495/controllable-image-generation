@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""docs/best_hyperparameters_t1.md: the Stage-2 winner of every (model, problem, method) cell at t0 = 1.0,
+"""docs/best_hyperparameters.md: the Stage-2 winner of every (model, problem, method) cell at t0 = 1.0,
 plus the rank/gap of the manuscript's configurations (Tables 4-7) in Stage 1 (4 images) and Stage 2 (8 images).
 
-    python scripts/make_best_hyperparameters_t1.py --stage1 outputs/hpo_jit ... --stage2 outputs/stage2_jit ... \
-        --out docs/best_hyperparameters_t1.md
+    python scripts/make_best_hyperparameters.py --stage1 outputs/hpo_jit ... --stage2 outputs/stage2_jit ... \
+        --out docs/best_hyperparameters.md
 """
 import argparse, collections, csv, datetime, math, statistics, sys
 from pathlib import Path
@@ -50,7 +50,7 @@ def hp(method, row):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage1", action="append", default=[]); p.add_argument("--stage2", action="append", required=True)
-    p.add_argument("--out", default="docs/best_hyperparameters_t1.md"); p.add_argument("--models", default="jit,sit,pmf,imf")
+    p.add_argument("--out", default="docs/best_hyperparameters.md"); p.add_argument("--models", default="jit,sit,pmf,imf")
     p.add_argument("--grid-only", action="store_true", help="select winners only among configurations present in the Stage-1 grid (the final-benchmark rule)")
     p.add_argument("--appendix", action="append", default=[], help="extra Stage-2 rounds (grid-edge extensions) listed in an appendix, never selected")
     a = p.parse_args()
@@ -62,7 +62,7 @@ def main():
     ext, _ = load(a.appendix) if a.appendix else ({}, {})
     models = [m for m in a.models.split(",") if any(c[0] == m for c in s2)]
     L = ["# Best hyperparameters per model, strategy and inverse problem at t0 = 1.0",
-         "", "Generated %s by `scripts/make_best_hyperparameters_t1.py` from Stage 2 (%s) and Stage 1 (%s)."
+         "", "Generated %s by `scripts/make_best_hyperparameters.py` from Stage 2 (%s) and Stage 1 (%s)."
          % (datetime.date.today().isoformat(), ", ".join(a.stage2), ", ".join(a.stage1) or "none"),
          "", "Every entry is the lowest-mean-LPIPS configuration of its cell among the Stage-2 candidates "
          "(Stage-1 top three on 4 images, the manuscript's configuration where one exists, and the grid-edge extensions), "
@@ -70,7 +70,7 @@ def main():
          "`+/- se` is the standard error of LPIPS over those 8 images.  `edge` marks a winner whose Stage-2 candidate set "
          "still had it on the extreme of an axis (see the Stage-2 generator's log).  For the two inpainting problems read "
          "`missing_psnr` in results.csv alongside these full-image metrics.", "",
-         "**Do not mix with `docs/best_hyperparameters.md`, which is the t0 = 0.8 study.**", ""]
+         ""]
     if a.grid_only:
         L += ["**Selection rule.** The winner is the lowest-LPIPS configuration among the Stage-2 candidates that lie INSIDE the "
               "pre-registered Stage-1 grid (itself one step wider than the manuscript's ranges on every axis).  Configurations from the "

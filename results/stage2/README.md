@@ -5,4 +5,4 @@ Copies of `outputs/stage2_<model>[_rN]/results*.csv`.  `stage2_<model>` is the r
 `_r2`, `_r3`, ... are the follow-up rounds from `scripts/hpo_stage2_round.py`, each pushing one step
 further on every axis where the current 8-image winner still sat on the edge of everything tried.
 An axis was stopped once the last doubling was no longer significant on a paired per-image t-test
-(alpha 0.05) -- see docs/best_hyperparameters_t1.md for the per-cell trail.  All rows have status ok.
+(alpha 0.05) -- see docs/best_hyperparameters.md for the per-cell trail.  All rows have status ok.
