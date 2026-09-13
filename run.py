@@ -145,15 +145,10 @@ def parse_shard(text: Optional[str]) -> Optional[Tuple[int, int]]:
 
 
 def shard_suffix(shard: Optional[Tuple[int, int]]) -> str:
-    """The filename suffix that makes a top-level artefact PRIVATE to one array task.
+    """Filename suffix that makes a top-level artefact private to one array task.
 
-    Every mutable file an array task writes into the SHARED run directory must carry this
-    suffix.  Two tasks writing `checks.json` (or `run_metadata.json`) is a last-writer-wins
-    race: the file that survives contains one shard's information and the other shard's is
-    silently lost -- which is exactly what happened in the two-shard H100 smoke test, where
-    the downloaded `checks.json` held only one model family even though both families'
-    checks had clearly run.  `--aggregate` merges the shard-private files into the
-    canonical unsuffixed ones afterwards.
+    Concurrent tasks writing the same `checks.json` or `run_metadata.json` would be a
+    last-writer-wins race; `--aggregate` merges the shard-private files afterwards.
     """
     return "" if shard is None else "_shard%02d" % shard[0]
 
@@ -270,16 +265,11 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
 
 
 def configure_jax_environment(accel: Dict[str, Any], cache_root: Path) -> Path:
-    """Set JAX's allocator policy BEFORE anything can import jax.
+    """Set JAX's allocator policy before anything imports jax.
 
-    These are read once, when JAX first initialises its backend, so setting them late is
-    the same as not setting them at all.  That mattered: `src/checks.py` imports JAX for
-    the three-backend operator-parity check REGARDLESS of which models the plan needs, and
-    the structural checks run before `init_frameworks`.  So on a torch-only run -- and on
-    a mixed run too -- JAX initialised with its defaults and PREALLOCATED ~75% of the
-    device (17.7 GiB of a 24 GiB card), which it never gives back.  PyTorch was then left
-    with ~6 GiB, and D-Flow, which keeps its whole trajectory in the autograd graph, died
-    with `CUDA out of memory` while reporting only ~5 GiB allocated by PyTorch itself.
+    The variables are read once when the backend initialises.  `src/checks.py` imports JAX
+    for the operator-parity check regardless of the plan, so without this JAX preallocates
+    most of the device before PyTorch gets a chance.
     """
     if accel["kind"] == "gpu":
         # Do not grab the whole device: PyTorch may share this process.

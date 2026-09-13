@@ -31,15 +31,9 @@ from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
 
 @contextmanager
 def _jax_cost_analysis_as_list():
-    """Make `Compiled.cost_analysis()` subscriptable by index for the iMF repository.
-
-    `utils/vae_util.LatentManager.get_decode_fn` logs the decoder's FLOPs with
-    `compiled_decode_fn.cost_analysis()[0]["flops"]`.  JAX returned a LIST of per-device
-    dicts when iMF was written; current JAX returns the dict itself, so the indexing
-    raises `KeyError: 0` and the checkpoint never loads.  The line is pure diagnostics --
-    it does not shape the decoder -- so the smallest honest fix is to restore the old
-    return shape for exactly as long as the repository's constructor runs, rather than
-    editing a pinned upstream checkout that lives in a gitignored cache.
+    """Restore the list return shape of `Compiled.cost_analysis()` while iMF's
+    `LatentManager` constructor runs: it indexes `cost_analysis()[0]["flops"]` for a log
+    line, and current JAX returns the dict directly.
     """
     import jax.stages
     compiled = jax.stages.Compiled
@@ -130,17 +124,10 @@ class IMFAdapter(MeanFlowAdapter):
             self._vae = self._latent_manager.vae
             self._vae_params = self._latent_manager.vae_params
 
-        # Pin both parameter trees to the accelerator ONCE.  As loaded they are not there:
-        # the model params come back from restore_checkpoint as host numpy (356 MB), and
-        # FlaxAutoencoderKL.from_pretrained hands the VAE params over as arrays COMMITTED
-        # TO THE CPU DEVICE (335 MB).  Upstream never notices because it only uses the VAE
-        # through jax_utils.replicate + pmap, which re-places it; the differentiable decode
-        # below calls the VAE directly, and a jitted function follows its committed inputs
-        # -- so every fidelity evaluation was running the whole SD-VAE decoder on the CPU
-        # (4.0 s per call, measured; 22 ms on the GPU) and re-uploading the model params on
-        # every step (108 ms per call; 5 ms once resident).  That was the flat ~4 s per
-        # iteration that made iMF 20-280x slower than pMF across every method.  Outputs
-        # agree to 3e-4 (decode) and 5e-4 relative (gradient), i.e. float32 backend noise.
+        # Pin both parameter trees to the accelerator once.  As loaded, the model params
+        # are host numpy and the VAE params are committed to the CPU device; a jitted
+        # function follows its committed inputs, so the differentiable decode would
+        # otherwise run the whole VAE on the CPU at every fidelity evaluation.
         device = jax.devices()[0]
         self._params = jax.device_put(self._params, device)
         self._vae_params = jax.device_put(self._vae_params, device)
