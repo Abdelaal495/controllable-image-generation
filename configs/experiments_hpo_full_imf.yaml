@@ -1,30 +1,16 @@
 # =====================================================================================
-# STAGE 1 -- iMF screening grid, for the OTHER machine
+# STAGE 1 -- per (task, method) screening grid at t0 = 1.0, model imf only
 # =====================================================================================
 #
-#   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0    # once, same pool
-#   python run.py --config configs/experiments_hpo_full_imf.yaml --run-id hpo_full_imf --no-figures
+#   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0    # once
+#   python run.py --config configs/experiments_hpo_full_imf.yaml --run-id hpo_imf --no-figures
 #
-# The iMF quarter of configs/experiments_hpo_full.yaml: the same grids, the same five tasks,
-# the same four screening images, so its winners are selected by the same rule as the other
-# three models'.  Split out only because of cost -- iMF's six methods run ~764 s/image
-# against pMF's 85, so this file was ~300 GPU-hours before the device-placement fix in
-# src/models/imf.py (the VAE decoder ran on the CPU inside every gradient step); with it,
-# PnP measures 2.6 s/image (was 80) and RHSO 35 (was 167), so budget ~40-45 GPU-hours --
-# iMF is now, like pMF, bound by the un-jitted outer objective trace, not by the decode.  Merge its results with
-# `--aggregate` afterwards.
-#
-# RUNS ALONGSIDE the main sweep on one 24 GiB card (started 2026-09-06 while hpo_full was at
-# 1260/6010): launch with XLA_PYTHON_CLIENT_MEM_FRACTION=0.40 so JAX can never take more
-# than ~9.8 GiB (iMF peaks 7.6-9.2 GiB at batch 2), which leaves >=14.7 GiB for the main
-# run whose worst measured job is 13.0 GiB (pMF MPC-RHC K=3 at batch 2).  Both processes
-# are host-bound on a single thread, so sharing the GPU costs each little and roughly doubles
-# total throughput.  If either log shows an OOM, a `resume: true` pass re-runs only the jobs
-# that did not finish with status ok.
-#
-# batch_size stays at 2.  The binding constraint for iMF is HOST memory, not the device:
-# batch 8 peaked at 1.3 GiB on the GPU and sawtoothed to 55 GiB of RSS on a 62 GiB box and
-# was OOM-killed.  Check `ps -o rss` before raising it.
+# Every (task, method) cell is screened on 4 images over a grid that contains the
+# manuscript's hyperparameter values and extends at least one step beyond them on every
+# axis.  RHSO additionally probes the (N, M) budget in `__rhso_budget`.  Stage 2
+# (scripts/hpo_stage2.py) confirms each cell's top three, the manuscript's value and any
+# winner on a grid edge on 8 images.  One model per file so the four models can run as
+# separate processes; scripts/hpo_stage2.py accepts several --run directories.
 # =====================================================================================
 
 runtime:

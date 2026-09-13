@@ -7,7 +7,7 @@
 For every cell (model, problem, method) of a Stage-1 sweep this script
 
   1. ranks every configuration by mean LPIPS on the screening images;
-  2. keeps the top `--top`, adds the manuscript's own configuration (Tables 4-7) when the
+  2. keeps the top `--top`, adds the manuscript's own configuration when the
      cell has one and it did not already survive, so the paper's choice is always
      re-evaluated at the larger image count;
   3. checks the winner against the grid EDGES: a winner sitting on the smallest or largest
@@ -80,7 +80,7 @@ BATCH = {("jit", "sdedit"): 4, ("jit", "pnp"): 4, ("jit", "dflow"): 4, ("jit", "
 # standard-flow RHSO memory grows with N; the budget rows use smaller batches
 BATCH_RHSO_LONG = {"jit": 2, "sit": 1, "pmf": 4, "imf": 2}
 
-# Manuscript Tables 4-7, per problem in PROBLEMS order.  Only JiT and pMF are tabulated.
+# The manuscript's hyperparameter tables, per problem in PROBLEMS order.  Only JiT and pMF are tabulated.
 PAPER = {
     ("pmf", "pnp"): [dict(num_pnp_steps=50, gamma0=8e5, alpha=.75), dict(num_pnp_steps=100, gamma0=1.2e6, alpha=.50),
                      dict(num_pnp_steps=20, gamma0=1e5, alpha=.25), dict(num_pnp_steps=20, gamma0=1e5, alpha=.25),

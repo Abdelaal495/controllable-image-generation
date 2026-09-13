@@ -285,7 +285,7 @@ Every entry is the lowest-mean-LPIPS configuration of its cell among the Stage-2
 
 ---
 
-# Are the manuscript's hyperparameters (Tables 4-7) optimal?
+# Are the manuscript's hyperparameters optimal?
 
 Rank of the manuscript's configuration inside each cell, and its LPIPS gap to the cell's winner.  Stage 1 ranks among all grid configurations on 4 images; Stage 2 ranks among the surviving candidates on 8 images (the manuscript's configuration is always one of them).  A gap of 0.0000 means the manuscript's choice is the winner.
 

@@ -60,7 +60,7 @@ data:
   # The SAME frozen ImageNet-100 benchmark the final paper configuration uses
   # (class seed 42, image seed 43). Point `local_folder` at your copy.
   source: local_folder
-  local_folder: /home/abdelaal/controllable-image-generation-benchmarks/imagenet100_c42_i43
+  local_folder: cache/data/imagenet100_c42_i43_mirror   # scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
   image_size: 256
 
 models:

@@ -1,43 +1,16 @@
-# PER-MODEL SPLIT of configs/experiments_hpo_full.yaml (PMF only) for machines with several
-# GPUs: run each model as its own process on its own card, never two on one card.  Merge
-# the finished runs with --aggregate; scripts/hpo_stage2.py accepts several --run directories.
 # =====================================================================================
-# STAGE 1 -- per (model, task, method) screening grid at t0 = 1.0
+# STAGE 1 -- per (task, method) screening grid at t0 = 1.0, model pmf only
 # =====================================================================================
 #
-#   python run.py --config configs/experiments_hpo_full.yaml --run-id hpo_full --no-figures
+#   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0    # once
+#   python run.py --config configs/experiments_hpo_full_pmf.yaml --run-id hpo_pmf --no-figures
 #
-# WHY THIS EXISTS.  The previous t0 = 1.0 sweep varied exactly ONE knob per method and
-# froze the rest at model-level constants -- PnP at gamma0 = 1e5, alpha = 0.5; MPC-RHC at
-# lam = 60; MPC-dt at lam = 180; RHSO at lr = 0.01.  Those constants were carried over from
-# the t0 = 0.8 rounds, and gamma0 in particular had only ever been swept over {0.25, 0.5,
-# 1.0} -- five orders of magnitude below the range that the per-measurement normalisation
-# (which divides by 196,608) makes meaningful.  So not one of the manuscript's ten PnP
-# configurations had ever been executed, and the lam values it reports span 15 to 540 where
-# we used a single number per method.
-#
-# COVERAGE.  Every value in Tables 4-7 lies inside the grids below, and every axis extends
-# at least one step BEYOND the manuscript's range on both sides -- lambda by 3x each way,
-# lr by 2-2.5x, gamma0 by 4x, PnP's N by 2x -- so the manuscript's choices are a strict
-# interior subset of what is searched, and a manuscript value that wins here wins against
-# neighbours the manuscript never tried.  A first draft of this file had grids equal to the
-# manuscript's value sets; that could confirm its choices but never improve on them.
-#
-# RHSO additionally probes the structural budget in `__rhso_budget`: (N, M) at the same
-# N*M = 160 the manuscript fixes, and at double it.  Standard-flow RHSO memory grows with
-# N (the first stage differentiates the whole remaining suffix), hence the smaller batches.
-#
-# Stage 2 then re-runs each cell's top three, the manuscript's value, and any winner on a
-# grid edge on more images, extending that axis further.
-#
-# SCREEN SIZE.  Four images.  Measured against the eight-image t1_hpo run, a four-image
-# screen keeps the same winner in 83% of cells and the true winner inside its top three in
-# 98%, at a median cost of 0.0000 and a p90 of 0.0058 LPIPS.  That is fine for narrowing
-# and not fine for deciding, which is why stage 2 re-runs the survivors on more images.
-#
-# 399 configurations per cell x 5 tasks x 3 models = ~6000 jobs, about 49 h.  iMF is absent:
-# its six methods cost ~764 s/image against pMF's 85, so the same grid would take ~135 h
-# here.  Generate it for the other machine from this file by adding the imf block.
+# Every (task, method) cell is screened on 4 images over a grid that contains the
+# manuscript's hyperparameter values and extends at least one step beyond them on every
+# axis.  RHSO additionally probes the (N, M) budget in `__rhso_budget`.  Stage 2
+# (scripts/hpo_stage2.py) confirms each cell's top three, the manuscript's value and any
+# winner on a grid edge on 8 images.  One model per file so the four models can run as
+# separate processes; scripts/hpo_stage2.py accepts several --run directories.
 # =====================================================================================
 
 runtime:

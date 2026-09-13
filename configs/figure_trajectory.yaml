@@ -2,16 +2,12 @@
 # RHSO TRAJECTORY FIGURE -- one run per inpainting problem, traced stage by stage
 # =====================================================================================
 #
-#   python scripts/make_paper_figures.py --figure trajectory
+#   python scripts/make_paper_figures.py --figure trajectory --problem box_inpaint --collect
 #
-# Six jobs, eight images, pMF only.  Every entry is the setting that won its cell in
-# configs/experiments_t1_hpo.yaml, so the figure shows the method the benchmark reports and
-# not a configuration invented to look good.  `num_rhso_steps` is swept 4 / 6 / 8 purely to
-# choose a panel count for the figure: N is the number of intervals, so a traced run has
-# N + 1 states to draw, and N = 4 gives five.
-#
-# The trace itself is `src.rhso.TRACE`, which the figure script installs; a benchmark run
-# leaves it None and is unaffected.
+# Eight images, pMF only, at the final-benchmark RHSO settings of each cell.
+# `num_rhso_steps` is swept 4 / 6 / 8 only to choose the number of panels (N intervals
+# give N + 1 states).  The trace is `src.rhso.TRACE`, installed by the figure script; a
+# benchmark run leaves it None and is unaffected.
 # =====================================================================================
 
 runtime:
@@ -30,7 +26,7 @@ runtime:
 
 data:
   source: local_folder
-  local_folder: "cache/data/imagenet_val_100"
+  local_folder: "cache/data/imagenet100_c42_i43_mirror"
   image_size: 256
 
 models:

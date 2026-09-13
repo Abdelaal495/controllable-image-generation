@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """docs/best_hyperparameters.md: the Stage-2 winner of every (model, problem, method) cell at t0 = 1.0,
-plus the rank/gap of the manuscript's configurations (Tables 4-7) in Stage 1 (4 images) and Stage 2 (8 images).
+plus the rank/gap of the manuscript's configurations in Stage 1 (4 images) and Stage 2 (8 images).
 
     python scripts/make_best_hyperparameters.py --stage1 outputs/hpo_jit ... --stage2 outputs/stage2_jit ... \
         --out docs/best_hyperparameters.md
@@ -105,7 +105,7 @@ def main():
                     paper_rows.append((m, pr, me, " ".join("%s=%s" % (x, fmt(float(pv[x]), x)) for x in KNOBS[me] if x in pv), r1, r2, hp(me, r), lp))
             if best: L.append("\n**best non-baseline:** %s (LPIPS %.4f)" % (METHOD_TITLE[best[1]], best[0]))
             L.append("")
-    L += ["---", "", "# Are the manuscript's hyperparameters (Tables 4-7) optimal?", "",
+    L += ["---", "", "# Are the manuscript's hyperparameters optimal?", "",
           "Rank of the manuscript's configuration inside each cell, and its LPIPS gap to the cell's winner.  Stage 1 ranks among "
           "all grid configurations on 4 images; Stage 2 ranks among the surviving candidates on 8 images (the manuscript's "
           "configuration is always one of them).  A gap of 0.0000 means the manuscript's choice is the winner.", "",

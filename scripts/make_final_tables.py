@@ -4,8 +4,7 @@
     python scripts/make_final_tables.py --run outputs/final_jit [--run ...] --out results/final/tables.md
 
 Per model and problem: LPIPS / PSNR / SSIM (mean over the 100 images), the standard error of LPIPS, the missing-region
-PSNR for the inpainting problems, and the per-image runtime (NOTE: measured while several processes shared each GPU,
-so runtimes are inflated and only comparable within a run).  The degraded observation is shown as the first row.
+PSNR for the inpainting problems, and the per-image runtime (one process per GPU).  The degraded observation is shown as the first row.
 """
 import argparse, collections, csv, datetime, math, statistics
 from pathlib import Path
@@ -41,7 +40,7 @@ def main():
     L = ["# Final benchmark on the frozen ImageNet-100 (class seed 42 / image seed 43), t0 = 1.0, 100 images per cell",
          "", "Generated %s by `scripts/make_final_tables.py` from %s." % (datetime.date.today().isoformat(), ", ".join(a.run)), "",
          "Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is the standard error of LPIPS over the 100 images. "
-         "Runtimes were measured with several processes sharing each A100 and are inflated by contention; treat them as upper bounds.", ""]
+         "Runtimes were measured with one process per A100-80GB.", ""]
     # compact cross-model LPIPS table first
     L += ["## LPIPS summary (lower is better)", "", "| model | problem | " + " | ".join(MT[m] for m in METHODS) + " | best |", "|---|---|" + "---|" * (len(METHODS) + 1)]
     for m in models:

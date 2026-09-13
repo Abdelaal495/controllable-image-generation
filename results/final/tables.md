@@ -1,8 +1,8 @@
 # Final benchmark on the frozen ImageNet-100 (class seed 42 / image seed 43), t0 = 1.0, 100 images per cell
 
-Generated 2026-09-11 by `scripts/make_final_tables.py` from outputs/final_jit, outputs/final_pmf, outputs/final_sit, outputs/final_imf.
+Generated 2026-09-13 by `scripts/make_final_tables.py` from results/final/final_jit, results/final/final_pmf, results/final/final_sit, results/final/final_imf.
 
-Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is the standard error of LPIPS over the 100 images. Runtimes were measured with several processes sharing each A100 and are inflated by contention; treat them as upper bounds.
+Each cell runs the Stage-2 winner of its (model, problem, method); `+/- se` is the standard error of LPIPS over the 100 images. Runtimes were measured with one process per A100-80GB.
 
 ## LPIPS summary (lower is better)
 
