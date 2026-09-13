@@ -1,43 +1,22 @@
 #!/usr/bin/env python
-"""RHSO on a two-moons prior with a learned finite-interval transition -- a 2D example.
+"""RHSO on a two-moons prior in 2-D (the toy example of the paper).
 
-    python toy_rhso_two_moons.py                 # train on the CPU (~30 min), then draw
-    python toy_rhso_two_moons.py --retrain       # ignore the cached model
-    python toy_rhso_two_moons.py --N 1 2 4 8 --M 40 --lr 0.05 [--budget 160]
+    python toy/rhso_two_moons.py                 # train on the CPU, then draw
+    python toy/rhso_two_moons.py --retrain       # ignore the cached model
+    python toy/rhso_two_moons.py --N 1 2 4 8 --M 40 --lr 0.05 [--budget 160]
 
-What it shows.  A model u(x, t, s) of the AVERAGE velocity from time t to time s is fitted
-to the two-moons distribution (t = 0 Gaussian noise, t = 1 data, the manuscript's
-convention), so one evaluation transports a state straight from t to s -- the MeanFlow
-capability that RHSO plans with.  A target x* is placed at the tip of one moon.  From one
-noise sample the left panel overlays
+A small MLP u(x, t, s) models the average velocity from time t to time s on the two-moons
+distribution (t = 0 noise, t = 1 data), so one evaluation transports a state from t to s.
+A target x* sits at the tip of one moon.  From one noise sample the left panel overlays the
+uncontrolled flow-ODE trajectory and RHSO for several N: at each of the N stages the
+current state is optimised so that the one-jump terminal prediction T(q; t_k -> 1) lands
+on x*, one interval is executed, and the plan is discarded.  The right panel plots the
+distance of each stage's terminal prediction from x* before and after that stage's
+optimisation.  N = 1 is the D-Flow-like special case.
 
-    * the uncontrolled trajectory: the flow ODE integrated finely with the instantaneous
-      velocity v(x, t);
-    * RHSO for several N: at each of the N stages the current state is optimised so that
-      the ONE-JUMP terminal prediction T(q; t_k -> 1) lands on x*, then one interval is
-      executed with the learned transition and the plan is discarded.
-
-The right panel is the number behind the picture: how far each stage's terminal prediction
-is from x*, before (hollow) and after (filled) that stage's optimisation.  N = 1 is the
-D-Flow-like special case; larger N replans more often.
-
-How u is obtained.  By trajectory distillation from a flow-matching teacher: v(x, t) is
-trained by plain flow matching, then u(x_t, t, s) regresses onto (x_s - x_t) / (s - t) with
-x_s the teacher's ODE solution.  This is the same object a MeanFlow learns through the
-identity u = v + (s - t) du/dt; `--trainer meanflow` runs that identity-based trainer, which
-in this 2-D setting repeatedly diverges when long intervals enter (raw errors in the
-hundreds to thousands across three attempts, with curriculum, warm-up and clipping) and
-leaves the one-jump map smeared.  For a figure whose whole point is the one-jump prediction,
-the transition map has to be right, so distillation is the default.
-
-Relation to MPC-Flow, Appendix C.  That paper trains flow matching on the boundary of a
-hexagon and steers with MPC-RHC toward one corner, plotting K = 1..10 against the globally
-optimal control.  Same spirit here, with the two differences that matter for RHSO: the
-planner is one learned jump rather than an Euler roll-out, and the decision variable is
-the state itself, not an added control with an energy penalty.
-
-Everything runs on the CPU on purpose: the GPU in this repository is usually busy and a
-2-D MLP does not need it.
+By default u is obtained by trajectory distillation from a flow-matching teacher;
+`--trainer meanflow` uses the MeanFlow identity u = v + (s - t) du/dt instead, which is
+less stable on this problem.  Everything runs on the CPU.
 """
 import argparse
 import math
@@ -48,10 +27,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-torch.set_num_threads(6)
 DEVICE = "cpu"
 DATA_NOISE = 0.0          # jitter on the moons; 0 = pure curves, like MPC-Flow's hexagon
-CACHE = Path("cache") / "toy_two_moons_meanflow.pt"
+ROOT = Path(__file__).resolve().parents[1]
+CACHE = ROOT / "cache" / "toy_two_moons_meanflow.pt"
 TEXTWIDTH_IN = 5.5
 
 
@@ -512,7 +491,7 @@ def main():
                    help="the noise start (fixed, like MPC-Flow's x0 = (-0.75, -0.5)); pass 'auto' logic by giving no value: --x0 with --min-dist selects a seed")
     p.add_argument("--budget", type=int, default=0,
                    help="total inner steps shared by the N stages (M = budget / N); 0 = use --M")
-    p.add_argument("--out", default="figures")
+    p.add_argument("--out", default=str(ROOT / "figures"))
     args = p.parse_args()
 
     global DATA_NOISE
