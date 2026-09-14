@@ -90,6 +90,7 @@ class IMFAdapter(MeanFlowAdapter):
             for k, v in overrides.items():
                 config[k].update(v) if isinstance(v, dict) else config.__setitem__(k, v)
             config.eval_only = True
+            config.model.model_str = cfg["model_str"]     # eval_config.yml names iMF-B/2 only
 
             extracted = download_and_extract_zip(cfg["hf_repo"], cfg["ckpt_file"],
                                                  self.ckpt_cache)

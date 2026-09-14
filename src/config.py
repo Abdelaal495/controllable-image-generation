@@ -67,6 +67,7 @@ MODEL_REGISTRY_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "repo_dirname": "imeanflow",
         "hf_repo": "Lyy0725/iMF",
         "ckpt_file": "iMF-B-2.zip",
+        "model_str": "imfDiT_B_2",             # architecture named in the repository; iMF-XL/2 = imfDiT_XL_2
         "config_yml": "configs/eval_config.yml",
         "use_ema": True,                       # single EMA pytree (contrast with pMF)
 
