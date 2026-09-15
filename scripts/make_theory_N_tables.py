@@ -7,8 +7,8 @@ Reads outputs/theory_<protocol>_<model>/results{,_per_image}.csv for the two pro
 (fixedB: B = N*M = 160; fixedM: M = 40) and the four models, and writes
   <out>/tables.md            five-task means per N, per-task tables, MeanFlow-minus-FM deltas
                              with paired per-image tests (same images and measurements)
-  <out>/theory_N_sweep.pdf   five-task mean PSNR and LPIPS against N, one panel per protocol
-                             and metric (plus a .png preview)
+  <out>/theory_N_sweep.pdf   five-task mean PSNR, SSIM, LPIPS and measurement RMSE against N,
+                             one row per protocol (plus a .png preview)
   <out>/theory_N.tex         the five-task means and per-task tables as booktabs LaTeX
 """
 import argparse, collections, csv, datetime, math
@@ -183,31 +183,35 @@ def figure(rows, out):
     colour = {"pmf": "#2a78d6", "jit": "#eb6834", "imf": "#1baf7a", "sit": "#eda100"}
     style = {"pmf": "-", "imf": "-", "jit": "--", "sit": "--"}
     marker = {"pmf": "o", "jit": "o", "imf": "s", "sit": "s"}
-    fig, axes = plt.subplots(2, 2, figsize=(5.5, 4.4), sharex="row")
+    panels = [("psnr", "PSNR (dB), higher is better"), ("ssim", "SSIM, higher is better"),
+              ("lpips", "LPIPS, lower is better"), ("measurement_rmse", "meas. RMSE, lower is better")]
+    fig, axes = plt.subplots(len(PROTOCOLS), len(panels), figsize=(7.2, 4.2), sharex="row")
     for i, (proto, title) in enumerate(PROTOCOLS):
         Ns = sorted({k[3] for k in rows if k[0] == proto})
-        for j, (metric, lab, _) in enumerate([("psnr", "PSNR (dB)", 2), ("lpips", "LPIPS", 3)]):
+        for j, (metric, lab) in enumerate(panels):
             ax = axes[i, j]
             for m, name, space, fam in MODELS:
                 ys = [mean_over_tasks(rows, proto, m, n, metric)[0] for n in Ns]
                 pts = [(n, y) for n, y in zip(Ns, ys) if y is not None]
-                if not pts:
-                    continue
-                ax.plot([p[0] for p in pts], [p[1] for p in pts], style[m], marker=marker[m], ms=4, lw=1.6,
-                        color=colour[m], label="%s (%s, %s)" % (name, space, fam))
+                if pts:
+                    ax.plot([q[0] for q in pts], [q[1] for q in pts], style[m], marker=marker[m], ms=3.5, lw=1.4,
+                            color=colour[m], label="%s (%s, %s)" % (name, space, fam))
             ax.set_xscale("log", base=2); ax.set_xticks(Ns); ax.set_xticklabels([str(n) for n in Ns])
             ax.grid(True, color="#e6e5e0", lw=0.6); ax.set_axisbelow(True)
-            for s in ("top", "right"):
-                ax.spines[s].set_visible(False)
-            ax.tick_params(labelsize=8)
-            ax.set_ylabel(lab + (" (higher is better)" if metric == "psnr" else " (lower is better)"), fontsize=8)
-            ax.set_title(title, fontsize=8)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            ax.tick_params(labelsize=7)
+            ax.set_ylabel(lab, fontsize=7)
+            if i == 0:
+                ax.set_title(title if j == 0 else "", fontsize=8, loc="left")
             if i == 1:
-                ax.set_xlabel("generative intervals N", fontsize=8)
+                ax.set_xlabel("generative intervals N", fontsize=7)
+                if j == 0:
+                    ax.set_title(title, fontsize=8, loc="left")
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=7, frameon=False, bbox_to_anchor=(0.5, -0.02))
-    fig.suptitle("RHSO stage-count sweeps, capacity-matched priors (five-task means)", fontsize=9)
-    fig.tight_layout(rect=(0, 0.08, 1, 0.97))
+    fig.legend(handles, labels, loc="lower center", ncol=4, fontsize=7, frameon=False, bbox_to_anchor=(0.5, -0.01))
+    fig.suptitle("RHSO stage-count sweeps with capacity-matched priors (five-task means over 100 images)", fontsize=9)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.96))
     for ext in ("pdf", "png"):
         fig.savefig(out / ("theory_N_sweep.%s" % ext), dpi=200, bbox_inches="tight")
     print("wrote", out / "theory_N_sweep.pdf")
