@@ -30,3 +30,5 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+!results/theory_N/*.pdf
+!results/theory_N/*.png
