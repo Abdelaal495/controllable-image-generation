@@ -16,6 +16,8 @@ cluster.env
 *.png
 *.pdf
 !docs/*.png
+!results/**/*.png
+!results/**/*.pdf
 
 # Python
 __pycache__/
@@ -30,5 +32,3 @@ venv/
 .DS_Store
 .idea/
 .vscode/
-!results/theory_N/*.pdf
-!results/theory_N/*.png
