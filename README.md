@@ -587,7 +587,6 @@ scripts/                   data-pool builder, the two-stage hyperparameter searc
                            report generators that turn a finished run into the tables and
                            figures under results/ (see scripts/README.md)
 benchmarks/                manifest and checksums of the frozen ImageNet-100 benchmark
-results/                   committed CSVs and rendered tables for every reported experiment
 toy/                       RHSO on a two-moons prior in 2-D, CPU only
 submit.sh                  cluster job submission (reads the gitignored cluster.env)
 scripts/cluster_modules.sh cluster-conditional CUDA/cuDNN module selection
@@ -619,29 +618,32 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
 
-## Tuned hyperparameters and reported results
+## Tuning: the two-stage hyperparameter search
 
-The defaults above are starting values. `docs/best_hyperparameters.md` records the tuned
-setting of every (model, strategy, problem) cell at `t0 = 1`, and how the manuscript's own
-value ranks inside the same search. The search runs in two stages and only the Stage-1 grid
-is committed, because the Stage-2 configurations are generated from Stage-1 results:
+The defaults above are starting values, not tuned JiT/pMF settings. `configs/` carries the
+Stage-1 screening grid; Stage-2 configurations are generated from Stage-1 results rather than
+committed, because they are a function of those results and would go stale:
 
 ```bash
+# Stage 1: every (model, task, method) cell on a grid one step wider than the manuscript's
 python run.py --config configs/experiments_hpo_stage1.yaml --models pmf --run-id hpo_pmf --no-figures
+# Stage 2: each cell's top three, the manuscript's value, and one step past any grid edge
 python scripts/hpo_stage2.py --run outputs/hpo_pmf --only-model pmf --out configs/experiments_hpo_stage2_pmf.yaml
 python run.py --config configs/experiments_hpo_stage2_pmf.yaml --run-id stage2_pmf --no-figures
+python scripts/hpo_stage2_round.py --model pmf --stage1 outputs/hpo_pmf --stage2 outputs/stage2_pmf \
+    --out configs/experiments_hpo_stage2_pmf_r2.yaml        # repeat until no cell sits on an edge
+# Final: the Stage-2 winner of each cell, restricted to the Stage-1 grid
 python scripts/make_final_frozen100_configs.py --run outputs/stage2_pmf --grid-only outputs/hpo_pmf \
     --models pmf --out configs/experiments_final_frozen100.yaml
 python run.py --config configs/experiments_final_frozen100.yaml --models pmf --run-id final_pmf --no-figures
 ```
 
-| directory | experiment |
-|---|---|
-| `results/stage1`, `results/stage2` | the screening grid and its survivors, the audit trail behind every tuned value |
-| `results/final` | 4 models x 5 problems x 6 strategies on the frozen ImageNet-100, as `tables.md` and `results.tex` |
-| `results/theory_N` | RHSO stage-count sweeps with capacity-matched priors (pMF-L/16 vs JiT-L/16, iMF-XL/2 vs SiT-XL/2) |
+`configs/experiments_theory_N_fixed{B,M}_final100.yaml` then sweep the RHSO stage count `N`
+under the two budget controls, on capacity-matched priors: pMF-L/16 against JiT-L/16 in pixel
+space and iMF-XL/2 against SiT-XL/2 in latent space.
 
-`scripts/README.md` lists what each script consumes and produces.
+`scripts/README.md` lists what each script consumes and produces; the report generators turn a
+finished run into the tables and figures that the results archive carries.
 
 ## Running on clusters
 

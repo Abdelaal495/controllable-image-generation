@@ -16,8 +16,6 @@ cluster.env
 *.png
 *.pdf
 !docs/*.png
-!results/**/*.png
-!results/**/*.pdf
 
 # Python
 __pycache__/
