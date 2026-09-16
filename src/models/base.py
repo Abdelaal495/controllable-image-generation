@@ -377,9 +377,10 @@ class _StubFinder:
 
     def exec_module(self, module):
         def _stub_getattr(item):
-            # Dunders must raise AttributeError as on a real module: `inspect.getmodule`
+            # Dunders must raise AttributeError as a real module does: `inspect.getmodule`
             # calls `getfile(m)` on any module with a truthy `__file__`, so a stubbed
-            # `__file__` would break every later `inspect` call in the process.
+            # `__file__` turns every later `inspect` call in the process into a TypeError
+            # (a stubbed wandb from iMF/pMF broke the diffusers import for SiT/JiT).
             if item.startswith("__") and item.endswith("__"):
                 raise AttributeError(item)
             return _InertStub()

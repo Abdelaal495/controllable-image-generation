@@ -145,10 +145,15 @@ def parse_shard(text: Optional[str]) -> Optional[Tuple[int, int]]:
 
 
 def shard_suffix(shard: Optional[Tuple[int, int]]) -> str:
-    """Filename suffix that makes a top-level artefact private to one array task.
+    """The filename suffix that makes a top-level artefact PRIVATE to one array task.
 
-    Concurrent tasks writing the same `checks.json` or `run_metadata.json` would be a
-    last-writer-wins race; `--aggregate` merges the shard-private files afterwards.
+    Every mutable file an array task writes into the SHARED run directory must carry this
+    suffix.  Two tasks writing `checks.json` (or `run_metadata.json`) is a last-writer-wins
+    race: the file that survives contains one shard's information and the other shard's is
+    silently lost -- which is exactly what happened in the two-shard H100 smoke test, where
+    the downloaded `checks.json` held only one model family even though both families'
+    checks had clearly run.  `--aggregate` merges the shard-private files into the
+    canonical unsuffixed ones afterwards.
     """
     return "" if shard is None else "_shard%02d" % shard[0]
 
@@ -267,9 +272,8 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
 def configure_jax_environment(accel: Dict[str, Any], cache_root: Path) -> Path:
     """Set JAX's allocator policy before anything imports jax.
 
-    The variables are read once when the backend initialises.  `src/checks.py` imports JAX
-    for the operator-parity check regardless of the plan, so without this JAX preallocates
-    most of the device before PyTorch gets a chance.
+    Read once when the backend initialises: set later and JAX has already preallocated
+    ~75% of the device, and Torch-side D-Flow then dies with CUDA OOM.
     """
     if accel["kind"] == "gpu":
         # Do not grab the whole device: PyTorch may share this process.
@@ -1629,8 +1633,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report = checks_module.CheckReport()
     if args.check or args.checks_only:
         print("\n" + RULE)
-        # The parity checks import JAX whatever the plan contains, so its allocator policy
-        # has to be in the environment before they run -- see configure_jax_environment.
+        # src/checks.py imports JAX even on a Torch-only plan, so the allocator policy
+        # must be set before the checks run, not in init_frameworks after them.
         configure_jax_environment(accel, cache_root)
         checks_module.run_structural_checks(plan, problems, data, report)
         failures = report.failures()

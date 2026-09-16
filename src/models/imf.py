@@ -31,9 +31,8 @@ from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
 
 @contextmanager
 def _jax_cost_analysis_as_list():
-    """Restore the list return shape of `Compiled.cost_analysis()` while iMF's
-    `LatentManager` constructor runs: it indexes `cost_analysis()[0]["flops"]` for a log
-    line, and current JAX returns the dict directly.
+    """iMF's `LatentManager` logs `cost_analysis()[0]["flops"]`; current JAX returns the
+    dict itself, so without this shim the indexing raises KeyError and iMF never loads.
     """
     import jax.stages
     compiled = jax.stages.Compiled
@@ -125,10 +124,10 @@ class IMFAdapter(MeanFlowAdapter):
             self._vae = self._latent_manager.vae
             self._vae_params = self._latent_manager.vae_params
 
-        # Pin both parameter trees to the accelerator once.  As loaded, the model params
-        # are host numpy and the VAE params are committed to the CPU device; a jitted
-        # function follows its committed inputs, so the differentiable decode would
-        # otherwise run the whole VAE on the CPU at every fidelity evaluation.
+        # As loaded, the model params are host numpy and the VAE params are committed to
+        # the CPU device; a jitted function follows its committed inputs, so without this
+        # the differentiable decode runs the VAE on the CPU in every gradient step (~4 s
+        # per iteration, which made iMF 20-280x slower than pMF).
         device = jax.devices()[0]
         self._params = jax.device_put(self._params, device)
         self._vae_params = jax.device_put(self._vae_params, device)
