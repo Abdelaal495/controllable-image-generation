@@ -857,8 +857,20 @@ def run_model_checks(adapter, problem: InverseProblem, spec, manager,
     sub_problem = problem.subset(indices)
 
     def _probe_spec(method: str, **overrides):
-        """A small spec for `method`; defaults are merged with the caller's overrides
-        before `dataclasses.replace`, so an explicit override always wins."""
+        """A small spec for `method`, with DEFAULTS a caller may freely override.
+
+        The defaults and the caller's overrides are merged into ONE mapping before
+        `dataclasses.replace` is called.  Passing them as separate keyword arguments --
+        `replace(base, record_loss_history=False, **overrides)` -- raises
+
+            TypeError: dataclasses.replace() got multiple values for keyword argument
+                       'record_loss_history'
+
+        the moment any caller asks for a default it also sets (which
+        `rhso_receding_horizon` and `rhso_state_regularization` both do, for
+        `record_loss_history=True`).  Merging first makes an explicit override win for
+        EVERY field rather than only for the two that happened to be noticed.
+        """
         import dataclasses
         base = by_method.get(method, spec)
         fields: Dict[str, Any] = {"method": method, "num_images": n,
