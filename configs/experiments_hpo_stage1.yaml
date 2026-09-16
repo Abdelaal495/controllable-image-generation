@@ -1,0 +1,1001 @@
+# =====================================================================================
+# STAGE 1 -- per (model, task, method) screening grid at t0 = 1.0
+# =====================================================================================
+#
+#   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0   # once
+#   python run.py --config configs/experiments_hpo_stage1.yaml --models pmf --run-id hpo_pmf --no-figures
+#
+# All four priors in one file; run one per GPU with --models, then merge with --aggregate.
+# Each cell is screened on 4 images over a grid that contains the manuscript's values and
+# extends at least one step beyond them on every axis, so a manuscript value that wins here
+# wins against neighbours the manuscript never tried.  RHSO also probes the (N, M) budget in
+# `__rhso_budget`.  Stage 2 (scripts/hpo_stage2.py) re-runs each cell's top three, the
+# manuscript's value and any winner sitting on a grid edge on 8 images.
+# =====================================================================================
+
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 8192            # 8010 with all four priors; run one per GPU with --models
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # Written by scripts/build_local_imagenet_pool.py; point it at your copy.
+  source: local_folder
+  local_folder: "cache/data/imagenet_val_100"
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-B/16
+  sit: {}
+  pmf: {}
+  imf: {}
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising__sdedit:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      sit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      pmf:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+      imf:
+        batch_size: 2
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+
+  denoising__pnp:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      sit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+
+  denoising__dflow:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+
+  denoising__mpc_rhc:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      pmf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+
+  denoising__mpc_delta_t:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+
+  denoising__rhso:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  denoising__rhso_budget:
+    enabled: true
+    problem: denoising
+    num_images: 4
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  deblurring__sdedit:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      sit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      pmf:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+      imf:
+        batch_size: 2
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+
+  deblurring__pnp:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      sit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+
+  deblurring__dflow:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+
+  deblurring__mpc_rhc:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      pmf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+
+  deblurring__mpc_delta_t:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+
+  deblurring__rhso:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  deblurring__rhso_budget:
+    enabled: true
+    problem: deblur
+    num_images: 4
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  super_resolution__sdedit:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      sit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      pmf:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+      imf:
+        batch_size: 2
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+
+  super_resolution__pnp:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      sit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+
+  super_resolution__dflow:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+
+  super_resolution__mpc_rhc:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      pmf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+
+  super_resolution__mpc_delta_t:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+
+  super_resolution__rhso:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  super_resolution__rhso_budget:
+    enabled: true
+    problem: super_resolution
+    num_images: 4
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  random_inpainting__sdedit:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      sit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      pmf:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+      imf:
+        batch_size: 2
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+
+  random_inpainting__pnp:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      sit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+
+  random_inpainting__dflow:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+
+  random_inpainting__mpc_rhc:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      pmf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+
+  random_inpainting__mpc_delta_t:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+
+  random_inpainting__rhso:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  random_inpainting__rhso_budget:
+    enabled: true
+    problem: random_inpaint
+    num_images: 4
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  box_inpainting__sdedit:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      sit:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8, 25], solver: heun}
+      pmf:
+        batch_size: 4
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+      imf:
+        batch_size: 2
+        methods:
+          sdedit:      {t0: 1.0, steps: [1, 2, 4, 8]}
+
+  box_inpainting__pnp:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      sit:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          pnp:         {t0: 1.0, num_pnp_steps: [10, 20, 50, 100, 200],
+                        gamma0: [25000.0, 100000.0, 200000.0, 400000.0, 800000.0, 1200000.0, 5000000.0],
+                        alpha: [0.1, 0.25, 0.5, 0.75, 1.0]}
+
+  box_inpainting__dflow:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, solver: euler, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          dflow:       {t0: 1.0, steps: 1, num_opt_steps: [160, 320, 640],
+                        lr: [0.003, 0.01, 0.03, 0.1, 0.3]}
+
+  box_inpainting__mpc_rhc:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      pmf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_rhc:     {t0: 1.0, num_mpc_steps: 4, K: [1, 2, 3], n_ctrl: 40,
+                        lam: [5.0, 15.0, 30.0, 60.0, 180.0, 240.0, 720.0], lr: [0.02, 0.05, 0.1, 0.2]}
+
+  box_inpainting__mpc_delta_t:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      sit:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      pmf:
+        batch_size: 4
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+      imf:
+        batch_size: 2
+        methods:
+          mpc_delta_t: {t0: 1.0, num_mpc_steps: [4, 8], n_ctrl: [20, 40],
+                        lam: [10.0, 30.0, 180.0, 360.0, 540.0, 1000.0], lr: [0.05, 0.1, 0.15, 0.3]}
+
+  box_inpainting__rhso:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  box_inpainting__rhso_budget:
+    enabled: true
+    problem: box_inpaint
+    num_images: 4
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun,
+                        lr: [0.01, 0.03], mu: 0.0}
+      pmf:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80],
+                        lr: [0.01, 0.03], mu: 0.0}

@@ -1,6 +1,7 @@
 # Final benchmark: 4 models x 5 problems x 6 methods on the frozen ImageNet-100
 
-Configs `configs/experiments_final_frozen100_<model>.yaml`, one process per model on an A100-80GB.
+Config `configs/experiments_final_frozen100.yaml`, run once per model with `--models <model>`,
+one process per A100-80GB.
 
 * pool `cache/data/imagenet100_c42_i43_mirror` (class seed 42 / image seed 43), rebuilt from the
   ungated mirror by `scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv`
