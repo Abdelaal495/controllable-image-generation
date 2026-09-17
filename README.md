@@ -618,32 +618,33 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
 
-## Tuning: the two-stage hyperparameter search
+## Tuning
 
-The defaults above are starting values, not tuned JiT/pMF settings. `configs/` carries the
-Stage-1 screening grid; Stage-2 configurations are generated from Stage-1 results rather than
-committed, because they are a function of those results and would go stale:
+The defaults above are starting values, not tuned JiT/pMF settings. `scripts/hpo.py` searches
+every (model, problem, method) cell as a loop rather than a fixed number of stages: run a
+configuration, `propose` the next one from its results, repeat until no cell wants to move.
 
 ```bash
-# Stage 1: every (model, task, method) cell on a grid one step wider than the manuscript's
-python run.py --config configs/experiments_hpo_stage1.yaml --models pmf --run-id hpo_pmf --no-figures
-# Stage 2: each cell's top three, the manuscript's value, and one step past any grid edge
-python scripts/hpo_stage2.py --run outputs/hpo_pmf --only-model pmf --out configs/experiments_hpo_stage2_pmf.yaml
-python run.py --config configs/experiments_hpo_stage2_pmf.yaml --run-id stage2_pmf --no-figures
-python scripts/hpo_stage2_round.py --model pmf --stage1 outputs/hpo_pmf --stage2 outputs/stage2_pmf \
-    --out configs/experiments_hpo_stage2_pmf_r2.yaml        # repeat until no cell sits on an edge
-# Final: the Stage-2 winner of each cell, restricted to the Stage-1 grid
-python scripts/make_final_frozen100_configs.py --run outputs/stage2_pmf --grid-only outputs/hpo_pmf \
+# the pre-registered grid: one step wider than the manuscript's ranges on every axis
+python run.py --config configs/experiments_hpo_grid.yaml --models pmf --run-id hpo_pmf --no-figures
+# the best of each cell, the manuscript's value, and one step past any edge the winner sat on
+python scripts/hpo.py propose --from outputs/hpo_pmf --models pmf --out configs/round2.yaml
+python run.py --config configs/round2.yaml --run-id hpo_pmf_r2 --no-figures
+# the winners, restricted to the grid, as the benchmark configuration
+python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
     --models pmf --out configs/experiments_final_frozen100.yaml
 python run.py --config configs/experiments_final_frozen100.yaml --models pmf --run-id final_pmf --no-figures
+# the tables, and the document that justifies every value in them
+python scripts/report.py --run outputs/final_pmf --out results/final
+python scripts/hpo.py report --from outputs/hpo_pmf_r2 --screen outputs/hpo_pmf --out docs/best_hyperparameters.md
 ```
 
-`configs/experiments_theory_N_fixed{B,M}_final100.yaml` then sweep the RHSO stage count `N`
-under the two budget controls, on capacity-matched priors: pMF-L/16 against JiT-L/16 in pixel
-space and iMF-XL/2 against SiT-XL/2 in latent space.
+Only the first round's configuration is committed; later rounds are a function of results, so
+they are generated rather than stored. `configs/experiments_theory_N_fixed{B,M}_final100.yaml`
+then sweep the RHSO stage count `N` under the two budget controls, on capacity-matched priors:
+pMF-L/16 against JiT-L/16 in pixel space and iMF-XL/2 against SiT-XL/2 in latent space.
 
-`scripts/README.md` lists what each script consumes and produces; the report generators turn a
-finished run into the tables and figures that the results archive carries.
+`scripts/README.md` describes each script and the search loop in more detail.
 
 ## Running on clusters
 

@@ -1,18 +1,17 @@
 # =====================================================================================
-# STAGE 1 -- per (model, task, method) screening grid at t0 = 1.0
+# HYPERPARAMETER SEARCH -- the pre-registered grid, round one
 # =====================================================================================
 #
 #   python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0   # once
-#   python run.py --config configs/experiments_hpo_stage1.yaml --models pmf --run-id hpo_pmf --no-figures
+#   python run.py --config configs/experiments_hpo_grid.yaml --models pmf --run-id hpo_pmf --no-figures
+#   python scripts/hpo.py propose --from outputs/hpo_pmf --models pmf --out configs/round2.yaml
 #
-# All four priors in one file; run one per GPU with --models, then merge with --aggregate.
-# Each cell is screened on 4 images over a grid that contains the manuscript's values and
-# extends at least one step beyond them on every axis, so a manuscript value that wins here
-# wins against neighbours the manuscript never tried.  RHSO also probes the (N, M) budget in
-# `__rhso_budget`.  Stage 2 (scripts/hpo_stage2.py) re-runs each cell's top three, the
-# manuscript's value and any winner sitting on a grid edge on 8 images.
+# All four priors in one file; run one per GPU with --models.  Every (model, task, method)
+# cell is screened on 4 images over a grid that contains the manuscript's values and extends
+# at least one step beyond them on every axis, so a manuscript value that wins here wins
+# against neighbours the manuscript never tried.  RHSO also probes the (N, M) budget in
+# `__rhso_budget`.  `scripts/hpo.py propose` then reads the results and writes the next round.
 # =====================================================================================
-
 runtime:
   seed: 42
   accelerator: auto

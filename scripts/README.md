@@ -1,40 +1,40 @@
 # scripts/
 
-Everything here reads a finished run under `outputs/` (or the CSVs committed under
-`results/`) and writes a configuration, a table or a figure. None of them trains or
-reconstructs anything; `run.py` is the only entry point that touches a GPU.
+Everything here reads a finished run under `outputs/` and writes a configuration, a table or
+a figure. None of them reconstructs anything; `run.py` is the only entry point that needs a GPU.
 
-## Data
+| script | what it does |
+|---|---|
+| `build_local_imagenet_pool.py` | builds the image folder `data.source: local_folder` reads. `--frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv` rebuilds the paper's 100-image benchmark from an ungated mirror |
+| `hpo.py` | the hyperparameter search: `propose` the next round from a finished one, `finalize` the winners into the benchmark configuration, `report` what won each cell and where the manuscript's value ranked |
+| `report.py` | a finished benchmark to `tables.md`, `results.tex` and the paired per-image tests |
+| `make_theory_N_configs.py` | the two RHSO stage-count sweeps, from the frozen learning rates it carries |
+| `make_theory_N_tables.py` | those sweeps to their tables, LaTeX and figure |
 
-| script | in | out |
-|---|---|---|
-| `build_local_imagenet_pool.py` | Hugging Face | `cache/data/<pool>/`, the image folder `data.source: local_folder` reads. `--frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv` rebuilds the paper's 100-image benchmark from an ungated mirror |
-| `extract_imagenet100_from_tar.py` | a local ImageNet tar | the same pool layout, without the mirror |
-
-## Two-stage hyperparameter search
-
-Stage-1 grids are committed (`configs/experiments_hpo_stage1.yaml`); Stage-2 configurations
-are not, because they are derived from Stage-1 results and would go stale.
-
-| script | in | out |
-|---|---|---|
-| `hpo_stage2.py` | Stage-1 `results.csv` | a Stage-2 config: each cell's top three, the manuscript's value, and one step past any grid edge the winner sits on |
-| `hpo_stage2_round.py` | Stage-1 + Stage-2 `results.csv` | a follow-up round for cells whose winner is still on an edge; stops when none is |
-| `make_final_frozen100_configs.py` | Stage-2 (+ Stage-1 for `--grid-only`) | `configs/experiments_final_frozen100.yaml`, the argmin-LPIPS winner of every cell |
-| `make_best_hyperparameters.py` | Stage-1 + Stage-2 | `docs/best_hyperparameters.md`, including the rank of the manuscript's value in each cell |
-
-## Reports
-
-| script | in | out |
-|---|---|---|
-| `make_final_tables.py` | `outputs/final_*/` | `results/final/tables.md` |
-| `make_results_tex.py` | `outputs/final_*/` | `results/final/results.tex` (booktabs) |
-| `paired_tests.py` | `results_per_image.csv` | paired per-image t and Wilcoxon tests between two methods of a cell |
-| `make_theory_N_configs.py` | the frozen lr/mu table it carries | the two `configs/experiments_theory_N_fixed*.yaml` stage-count sweeps |
-| `make_theory_N_tables.py` | `results/theory_N/` | that experiment's `tables.md`, `theory_N.tex` and `theory_N_sweep.pdf` |
-
-## Bundles
-
-`export_recon_bundle_only.py` and `add_corrupted_images_to_bundle.py` package a run's
+`extract_imagenet100_from_tar.py` builds the pool from a local ImageNet tar instead of the
+mirror; `export_recon_bundle_only.py` and `add_corrupted_images_to_bundle.py` package a run's
 reconstructions for sharing; `cluster_modules.sh` selects CUDA/cuDNN modules on Alliance
 clusters and is sourced by `setup_cluster.sh`.
+
+## The search loop
+
+There are no numbered stages: one round is run, `propose` reads it and writes the next, and
+the loop ends when `propose` reports that no cell wants to move.
+
+```bash
+python run.py --config configs/experiments_hpo_grid.yaml --models pmf --run-id hpo_pmf --no-figures
+python scripts/hpo.py propose --from outputs/hpo_pmf --models pmf --out configs/round2.yaml
+python run.py --config configs/round2.yaml --run-id hpo_pmf_r2 --no-figures
+python scripts/hpo.py propose --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf outputs/hpo_pmf_r2 \
+    --top 0 --no-paper --models pmf --out configs/round3.yaml        # only cells still on an edge
+```
+
+`--from` is what the ranking reads; `--grid` is the union of everything tried so far and
+decides what counts as a grid edge. Passing the original grid to `finalize` keeps the winner
+inside the pre-registered ranges, which matters because on several axes (D-Flow and PnP step
+counts, RHSO `N` and `M`) LPIPS keeps improving with compute far past the grid — a
+compute-budget effect rather than a hyperparameter optimum. `report` lists those out-of-grid
+candidates separately instead of selecting them.
+
+Only the first round's configuration is committed. Later rounds are a function of results, so
+they are generated rather than stored.
