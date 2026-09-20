@@ -17,11 +17,9 @@ until no cell wants to move, then `finalize` the winners into the benchmark conf
         --top 0 --no-paper --models pmf --images 8 --out configs/round3.yaml
     # `propose` prints "no cell needs another push" and writes nothing when the search is done
 
-    # the benchmark configuration, and the document that justifies every value in it
+    # the benchmark configuration
     python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
         --models pmf --out configs/experiments_final_frozen100.yaml
-    python scripts/hpo.py report --from outputs/hpo_pmf_r2 --screen outputs/hpo_pmf \
-        --out docs/best_hyperparameters.md
 
 `--grid` is the union of every value tried so far and decides what counts as a grid edge;
 `--from` is what the ranking reads, and defaults `--grid` to itself.  Restricting `finalize`
@@ -32,9 +30,7 @@ a compute-budget effect rather than a hyperparameter optimum.
 import argparse
 import collections
 import csv
-import datetime
 import math
-import statistics
 from pathlib import Path
 
 PROBLEMS = ["denoising", "deblur", "super_resolution", "random_inpaint", "box_inpaint"]
@@ -467,126 +463,17 @@ def finalize(a):
     print("wrote %s (%d models x %d cells)" % (a.out, len(models), len(PROBLEMS) * len(METHODS)))
 
 
-# =====================================================================================
-# report -- what won each cell, and where the manuscript's value ranked
-# =====================================================================================
-MODEL_TITLE = {"jit": "JiT-B/16 (pixel, standard flow, PyTorch)", "pmf": "pMF-L/16 (pixel, MeanFlow, JAX)",
-               "sit": "SiT-XL/2 (latent, standard flow, PyTorch)", "imf": "iMF-B-2 (latent, MeanFlow, JAX)"}
-METHOD_TITLE = {"sdedit": "SDEdit (baseline)", "pnp": "PnP-Flow", "dflow": "D-Flow", "mpc_rhc": "MPC-RHC",
-                "mpc_delta_t": "MPC-Delta_t", "rhso": "RHSO"}
-PROBLEM_TITLE = {"denoising": "Denoising (sigma 0.20)", "deblur": "Deblurring (Gaussian 7/1.0, sigma 0.05)",
-                 "super_resolution": "2x super-resolution (sigma 0.05)",
-                 "random_inpaint": "Random inpainting (70% missing, sigma 0.01)",
-                 "box_inpaint": "Box inpainting (40x40, sigma 0.05)"}
-
-
-def se(values):
-    return statistics.stdev(values) / math.sqrt(len(values)) if len(values) > 1 else float("nan")
-
-
-def hp(method, key):
-    return " ".join("`%s=%s`" % (kn, fmt(v, kn))
-                    for kn, v in zip(KNOBS[method], key) if v is not None)
-
-
-def rank_of(table, key):
-    """(rank, LPIPS gap to the winner, LPIPS, cell size) of `key`, or None if it was never run."""
-    ranked = sorted(table.items(), key=lambda kv: kv[1]["lpips"])
-    for i, (k, v) in enumerate(ranked):
-        if same(k, key):
-            return i + 1, v["lpips"] - ranked[0][1]["lpips"], v["lpips"], len(ranked)
-    return None
-
-
-def report(a):
-    models = [m for m in a.models.split(",") if m]
-    cells, _, images = load(getattr(a, "from"), per_image=True)
-    screen = load(a.screen)[0] if a.screen else {}
-    tables = restrict(cells, models, load(a.grid)[1] if a.grid else None)
-    best = winners(tables)
-    models = [m for m in models if any(c[0] == m for c in best)]
-
-    L = ["# Best hyperparameters per model, strategy and inverse problem at t0 = 1.0", "",
-         "Generated %s by `scripts/hpo.py report` from %s."
-         % (datetime.date.today().isoformat(), ", ".join(getattr(a, "from"))), "",
-         "Every entry is the lowest-mean-LPIPS configuration of its cell%s, on %s images of the "
-         "tuning pool at `t0 = 1.0`, `beta = 1`, seed 42, replicate 0.  `+/- se` is the standard "
-         "error of LPIPS over those images.  For the two inpainting problems read `missing_psnr` "
-         "in results.csv alongside these full-image metrics."
-         % (" among the candidates inside the searched grid" if a.grid else "",
-            best[next(iter(best))][1]["n"] if best else "the"), ""]
-    paper_rows = []
-    for model in models:
-        L += ["---", "", "# %s" % MODEL_TITLE[model], ""]
-        for problem in PROBLEMS:
-            L += ["## %s" % PROBLEM_TITLE[problem], "",
-                  "| strategy | LPIPS | +/- se | PSNR | SSIM | n cand. | hyperparameters |",
-                  "|---|---|---|---|---|---|---|"]
-            champion = None
-            for method in METHODS:
-                if (model, problem, method) not in best:
-                    L.append("| %s | - | - | - | - | 0 | (no result) |" % METHOD_TITLE[method])
-                    continue
-                key, cell, n_cand = best[(model, problem, method)]
-                row, lp = cell["row"], cell["lpips"]
-                per = images.get(row["job_id"], [])
-                if method != "sdedit" and (champion is None or lp < champion[0]):
-                    champion = (lp, method)
-                L.append("| %s | `%.4f` | `%s` | `%.2f` | `%.4f` | %d | %s |"
-                         % (METHOD_TITLE[method], lp, ("%.4f" % se(per)) if len(per) > 1 else "-",
-                            fnum(row["psnr"]) or 0, fnum(row["ssim"]) or 0, n_cand, hp(method, key)))
-                pkey = paper_key(model, method, problem)
-                if pkey is not None:
-                    paper_rows.append((model, problem, method, hp(method, pkey),
-                                       rank_of(screen.get((model, problem, method), {}), pkey) if screen else None,
-                                       rank_of(tables.get((model, problem, method), {}), pkey),
-                                       hp(method, key), lp))
-            if champion:
-                L.append("\n**best non-baseline:** %s (LPIPS %.4f)" % (METHOD_TITLE[champion[1]], champion[0]))
-            L.append("")
-    L += ["---", "", "# Are the manuscript's hyperparameters optimal?", "",
-          "Rank of the manuscript's configuration inside each cell, and its LPIPS gap to the "
-          "cell's winner.  A gap of 0.0000 means the manuscript's choice is the winner.", "",
-          "| model | problem | method | manuscript config | screening rank / gap | final rank / gap | manuscript LPIPS | our winner | winner LPIPS |",
-          "|---|---|---|---|---|---|---|---|---|"]
-    for model, problem, method, cfg, r_screen, r_final, win, win_lpips in paper_rows:
-        f = lambda r: "#%d/%d (+%.4f)" % (r[0], r[3], r[1]) if r else "not in sweep"
-        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | `%.4f` |"
-                 % (model, problem, method, cfg, f(r_screen), f(r_final),
-                    ("`%.4f`" % r_final[2]) if r_final else "-", win, win_lpips))
-    # Whatever the grid restriction excluded, and what it would have scored.  On several axes
-    # (D-Flow and PnP step counts, RHSO N and M) LPIPS keeps falling with compute well past the
-    # grid, so these are a compute-budget effect and are reported rather than selected.
-    outside = [(m, pr, me, best[(m, pr, me)][1]["lpips"], cand)
-               for m in models for pr in PROBLEMS for me in METHODS
-               if (m, pr, me) in best and (m, pr, me) in cells
-               for cand in [min(cells[(m, pr, me)].items(), key=lambda kv: kv[1]["lpips"])]
-               if cand[1]["lpips"] < best[(m, pr, me)][1]["lpips"] - 1e-9]
-    if outside:
-        L += ["", "---", "", "# Candidates outside the searched grid (reported, never selected)", "",
-              "Lowest LPIPS reached in each cell once an axis was pushed past the grid, next to the "
-              "winner above.", "",
-              "| model | problem | method | winner LPIPS | best outside the grid | configuration |",
-              "|---|---|---|---|---|---|"]
-        for model, problem, method, win_lpips, (key, cell) in outside:
-            L.append("| %s | %s | %s | `%.4f` | `%.4f` | %s |"
-                     % (model, problem, method, win_lpips, cell["lpips"], hp(method, key)))
-    Path(a.out).write_text("\n".join(L) + "\n")
-    print("wrote %s: %d models, %d manuscript cells, %d cells improved outside the grid"
-          % (a.out, len(models), len(paper_rows), len(outside)))
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
 
-    def common(q, out_default=None):
+    def common(q):
         q.add_argument("--from", dest="from", action="append", required=True, metavar="RUN",
                        help="run directory whose results.csv is ranked (repeatable)")
         q.add_argument("--grid", action="append", metavar="RUN",
                        help="run directories that define the searched grid (default: --from)")
         q.add_argument("--models", default="jit,sit,pmf,imf")
-        q.add_argument("--out", default=out_default, required=out_default is None)
+        q.add_argument("--out", required=True)
 
     q = sub.add_parser("propose", help="write the next round of candidates")
     common(q)
@@ -604,12 +491,6 @@ def main():
     q.add_argument("--pool", default="cache/data/imagenet100_c42_i43_mirror")
     q.add_argument("--num-images", type=int, default=100)
     q.set_defaults(run=finalize)
-
-    q = sub.add_parser("report", help="write the tuned-hyperparameter document")
-    common(q, out_default="docs/best_hyperparameters.md")
-    q.add_argument("--screen", action="append", metavar="RUN",
-                   help="earlier, cheaper rounds, ranked separately in the manuscript table")
-    q.set_defaults(run=report)
 
     a = p.parse_args()
     a.run(a)

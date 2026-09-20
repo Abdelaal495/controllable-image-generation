@@ -634,9 +634,6 @@ python run.py --config configs/round2.yaml --run-id hpo_pmf_r2 --no-figures
 python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
     --models pmf --out configs/experiments_final_frozen100.yaml
 python run.py --config configs/experiments_final_frozen100.yaml --models pmf --run-id final_pmf --no-figures
-# the tables, and the document that justifies every value in them
-python scripts/report.py --run outputs/final_pmf --out results/final
-python scripts/hpo.py report --from outputs/hpo_pmf_r2 --screen outputs/hpo_pmf --out docs/best_hyperparameters.md
 ```
 
 Only the first round's configuration is committed; later rounds are a function of results, so
@@ -644,7 +641,7 @@ they are generated rather than stored. `configs/experiments_theory_N_fixed{B,M}_
 then sweep the RHSO stage count `N` under the two budget controls, on capacity-matched priors:
 pMF-L/16 against JiT-L/16 in pixel space and iMF-XL/2 against SiT-XL/2 in latent space.
 
-`scripts/README.md` describes each script and the search loop in more detail.
+`scripts/README.md` describes the search loop in more detail.
 
 ## Running on clusters
 
