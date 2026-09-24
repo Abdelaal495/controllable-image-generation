@@ -8,9 +8,8 @@
 # to N = 16 and N = 32, where M falls to 10 and 5 optimizer iterations per stage.
 #
 # HELD FIXED  : B = 160, t0 = 1.0 (canonical start s = 0), beta = 1.0, direct terminal
-#               planning, 100 frozen images, seed 42, and the task-specific learning
-#               rate and mu of the tuned runs. NOTHING is retuned per N or per model
-#               size; SiT and iMF-B values are reused for SiT-XL/2 and iMF-XL/2.
+#               planning, 100 frozen images, seed 42, and each model's task-specific
+#               learning rate and mu, which are not retuned per N.
 # SWEPT       : (N, M) over the six MATCHED pairs below, and the model.
 # DIAGNOSTICS : stage + consistency (the standard bookkeeping of the theory suite);
 #               Jacobian and gradient-authority probes are OFF -- they belong in
@@ -810,4 +809,3 @@ experiments:
         methods:
           rhso: {num_rhso_steps: 32, num_opt_steps: 5, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
-
