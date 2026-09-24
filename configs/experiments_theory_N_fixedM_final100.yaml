@@ -13,8 +13,8 @@
 #     2B  fixed M, B grows     -> "does replanning help when nothing is taken away?"
 #
 # HELD FIXED  : M = 40, t0 = 1.0, beta = 1.0, direct terminal planning, 100 frozen images,
-#               seed 42, the task-specific learning rate and mu of the tuned runs, which
-#               are retuned neither per N nor per model size.
+#               seed 42, and each model's task-specific learning rate and mu, which are
+#               not retuned per N.
 # SWEPT       : N in {1, 2, 4, 8, 16}, and the model.
 # BUDGET      : DELIBERATELY UNMATCHED -- B = 40N runs from 40 to 640. Rows from this file
 #               must never be placed in a matched-budget table without saying so.
@@ -686,4 +686,3 @@ experiments:
         methods:
           rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
-
