@@ -583,6 +583,11 @@ src/
   checks.py                parity, gradient, stroke and fairness tests
   utils.py                 canonical clock, seeding, backend shim, timing
 run.py                     the orchestrator
+scripts/                   data-pool builder, the two-stage hyperparameter search, and the
+                           report generators that turn a finished run into the tables and
+                           figures under results/ (see scripts/README.md)
+benchmarks/                manifest and checksums of the frozen ImageNet-100 benchmark
+toy/                       RHSO on a two-moons prior in 2-D, CPU only
 submit.sh                  cluster job submission (reads the gitignored cluster.env)
 scripts/cluster_modules.sh cluster-conditional CUDA/cuDNN module selection
 slurm/                     SLURM job templates (never need editing)
@@ -612,6 +617,31 @@ The objective normalisation is likewise explicit and selectable
 `sum_squared`, `mean_squared`, `gaussian_likelihood`), with control-cost normalisation
 `sum_squared` or `mean_squared`. Changing either rescales `Φ` and therefore invalidates
 Table E2's `λ`; the validator warns when you do.
+
+## Tuning
+
+The defaults above are starting values, not tuned JiT/pMF settings. `scripts/hpo.py` searches
+every (model, problem, method) cell as a loop rather than a fixed number of stages: run a
+configuration, `propose` the next one from its results, repeat until no cell wants to move.
+
+```bash
+# the pre-registered grid: one step wider than the manuscript's ranges on every axis
+python run.py --config configs/experiments_hpo_grid.yaml --models pmf --run-id hpo_pmf --no-figures
+# the best of each cell, the manuscript's value, and one step past any edge the winner sat on
+python scripts/hpo.py propose --from outputs/hpo_pmf --models pmf --out configs/round2.yaml
+python run.py --config configs/round2.yaml --run-id hpo_pmf_r2 --no-figures
+# the winners, restricted to the grid, as the benchmark configuration
+python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
+    --models pmf --out configs/experiments_final_frozen100.yaml
+python run.py --config configs/experiments_final_frozen100.yaml --models pmf --run-id final_pmf --no-figures
+```
+
+Only the first round's configuration is committed; later rounds are a function of results, so
+they are generated rather than stored. `configs/experiments_theory_N_fixed{B,M}_final100.yaml`
+then sweep the RHSO stage count `N` under the two budget controls, on capacity-matched priors:
+pMF-L/16 against JiT-L/16 in pixel space and iMF-XL/2 against SiT-XL/2 in latent space.
+
+`scripts/README.md` describes the search loop in more detail.
 
 ## Running on clusters
 

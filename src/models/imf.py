@@ -16,6 +16,7 @@ Two details are easy to get wrong and are therefore called out:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -26,6 +27,26 @@ from ..utils import (MEANFLOW, assert_pixel_batch, gaussian_noise, native_time,
 from .base import (AdapterSpec, Conditioning, MeanFlowAdapter, RepoSandbox,
                    download_and_extract_zip, find_checkpoint_dir, register_adapter,
                    register_prefetch, stub_missing_module)
+
+
+@contextmanager
+def _jax_cost_analysis_as_list():
+    """iMF's `LatentManager` logs `cost_analysis()[0]["flops"]`; current JAX returns the
+    dict itself, so without this shim the indexing raises KeyError and iMF never loads.
+    """
+    import jax.stages
+    compiled = jax.stages.Compiled
+    original = compiled.cost_analysis
+
+    def as_list(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        return [result] if isinstance(result, dict) else result
+
+    compiled.cost_analysis = as_list
+    try:
+        yield
+    finally:
+        compiled.cost_analysis = original
 
 
 class IMFAdapter(MeanFlowAdapter):
@@ -68,6 +89,7 @@ class IMFAdapter(MeanFlowAdapter):
             for k, v in overrides.items():
                 config[k].update(v) if isinstance(v, dict) else config.__setitem__(k, v)
             config.eval_only = True
+            config.model.model_str = cfg["model_str"]     # eval_config.yml names iMF-B/2 only
 
             extracted = download_and_extract_zip(cfg["hf_repo"], cfg["ckpt_file"],
                                                  self.ckpt_cache)
@@ -94,11 +116,21 @@ class IMFAdapter(MeanFlowAdapter):
             from utils.vae_util import LatentManager
             from diffusers.models import FlaxAutoencoderKL
             self._FlaxAutoencoderKL = FlaxAutoencoderKL
-            self._latent_manager = LatentManager(vae_type=self.vae_type,
-                                                 decode_batch_size=cfg["vae_decode_batch"],
-                                                 input_size=self.latent_size)
+            with _jax_cost_analysis_as_list():
+                self._latent_manager = LatentManager(
+                    vae_type=self.vae_type,
+                    decode_batch_size=cfg["vae_decode_batch"],
+                    input_size=self.latent_size)
             self._vae = self._latent_manager.vae
             self._vae_params = self._latent_manager.vae_params
+
+        # As loaded, the model params are host numpy and the VAE params are committed to
+        # the CPU device; a jitted function follows its committed inputs, so without this
+        # the differentiable decode runs the VAE on the CPU in every gradient step (~4 s
+        # per iteration, which made iMF 20-280x slower than pMF).
+        device = jax.devices()[0]
+        self._params = jax.device_put(self._params, device)
+        self._vae_params = jax.device_put(self._vae_params, device)
 
         self._build_jitted()
         load_s = time.perf_counter() - t_start

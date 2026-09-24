@@ -12,8 +12,9 @@
 #     2A  fixed B, M shrinks   -> "is replanning worth the iterations it costs?"
 #     2B  fixed M, B grows     -> "does replanning help when nothing is taken away?"
 #
-# HELD FIXED  : M = 40, t0 = 1.0, beta = 1.0, mu = 0.0, direct terminal planning, 100 frozen
-#               images, seed 42, the validated task-specific learning rates.
+# HELD FIXED  : M = 40, t0 = 1.0, beta = 1.0, direct terminal planning, 100 frozen images,
+#               seed 42, the task-specific learning rate and mu of the tuned runs, which
+#               are retuned neither per N nor per model size.
 # SWEPT       : N in {1, 2, 4, 8, 16}, and the model.
 # BUDGET      : DELIBERATELY UNMATCHED -- B = 40N runs from 40 to 640. Rows from this file
 #               must never be placed in a matched-budget table without saying so.
@@ -26,7 +27,13 @@
 # array (`bash submit.sh --config ... --array 8`) rather than quietly reducing num_images,
 # which would break comparability with every other file in this suite.
 #
-# Expected scale: 5 tasks x 5 N values x 2 models = 50 atomic jobs.
+# CAPACITY-MATCHED MODELS
+# -----------------------
+# Two pairs of comparable size, so a MeanFlow-vs-standard-flow gap cannot be read as a
+# capacity gap: pMF-L/16 (410 M) against JiT-L/16 (459 M) in pixel space, and iMF-XL/2
+# (610 M) against SiT-XL/2 (675 M) in latent space.
+#
+# Expected scale: 5 tasks x 5 N values x 4 models = 100 atomic jobs.
 # Verify with: python run.py --config configs/experiments_theory_N_fixedM_final100.yaml --dry-run
 
 runtime:
@@ -54,10 +61,18 @@ data:
 
 models:
   jit:
-    variant: JiT-B/16
+    variant: JiT-L/16
     batch_size: 4
   pmf:
-    batch_size: 4
+    batch_size: 10
+  sit:
+    batch_size: 6
+  imf:
+    display_name: iMF-XL/2
+    ckpt_file: iMF-XL-2.zip
+    model_str: imfDiT_XL_2
+    guidance: {scale: 8.0, interval: [0.42, 0.62], mode: null}
+    batch_size: 2
 
 defaults:
   control_cost_normalization: sum_squared
@@ -81,11 +96,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.005, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 1, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   denoising_M40_N2:
@@ -97,11 +120,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.005, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 1, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   denoising_M40_N4:
@@ -113,11 +144,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.005, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 1, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   denoising_M40_N8:
@@ -129,11 +168,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.005, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 1, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   denoising_M40_N16:
@@ -145,11 +192,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.005, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 1, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   deblurring_M40_N1:
@@ -161,11 +216,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   deblurring_M40_N2:
@@ -177,11 +240,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   deblurring_M40_N4:
@@ -193,11 +264,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   deblurring_M40_N8:
@@ -209,11 +288,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   deblurring_M40_N16:
@@ -225,11 +312,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   super_resolution_M40_N1:
@@ -241,11 +336,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   super_resolution_M40_N2:
@@ -257,11 +360,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   super_resolution_M40_N4:
@@ -273,11 +384,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   super_resolution_M40_N8:
@@ -289,11 +408,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   super_resolution_M40_N16:
@@ -305,11 +432,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.2, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   box_inpainting_M40_N1:
@@ -321,11 +456,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   box_inpainting_M40_N2:
@@ -337,11 +480,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   box_inpainting_M40_N4:
@@ -353,11 +504,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   box_inpainting_M40_N8:
@@ -369,11 +528,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   box_inpainting_M40_N16:
@@ -385,11 +552,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.02, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   random_inpainting_M40_N1:
@@ -401,11 +576,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 1, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   random_inpainting_M40_N2:
@@ -417,11 +600,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 2, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   random_inpainting_M40_N4:
@@ -433,11 +624,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 4, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   random_inpainting_M40_N8:
@@ -449,11 +648,19 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 8, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 
   random_inpainting_M40_N16:
@@ -465,10 +672,18 @@ experiments:
     models:
       jit:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
       pmf:
         methods:
-          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0.0, optimizer: adam, rhso_terminal_mode: direct,
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.01, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      sit:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, solver: heun, rhso_terminal_mode: direct,
+                  rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
+      imf:
+        methods:
+          rhso: {num_rhso_steps: 16, num_opt_steps: 40, lr: 0.03, mu: 0, optimizer: adam, rhso_terminal_mode: direct,
                   rhso_stage_diagnostics: true, rhso_consistency_diagnostics: true, rhso_jacobian_diagnostics: false}
 

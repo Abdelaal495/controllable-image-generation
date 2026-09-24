@@ -5,12 +5,16 @@
 outputs/
 cache/
 logs/
+logs_shards/
+*.log
+figures/
 
 # Written by setup_cluster.sh; machine-specific paths
 activate_cluster.sh
 cluster.env
 *.npz
 *.png
+*.pdf
 !docs/*.png
 
 # Python
@@ -18,6 +22,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .ipynb_checkpoints/
+.pytest_cache/
 .venv/
 venv/
 

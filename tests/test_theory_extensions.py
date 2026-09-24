@@ -512,10 +512,11 @@ def test_defaults_and_backward_compatibility():
 # =====================================================================================
 EXPECTED = {
     "theory_jit_suffix_final100": dict(jobs=5, models={"jit"}, methods={"dflow"}, images={100}),
-    "theory_N_fixedB_final100": dict(jobs=60, models={"jit", "pmf"}, methods={"rhso"},
-                                     images={100}),
-    "theory_N_fixedM_final100": dict(jobs=50, models={"jit", "pmf"}, methods={"rhso"},
-                                     images={100}),
+    # capacity-matched: pMF-L/16 vs JiT-L/16 in pixel space, iMF-XL/2 vs SiT-XL/2 in latent
+    "theory_N_fixedB_final100": dict(jobs=120, models={"jit", "sit", "pmf", "imf"},
+                                     methods={"rhso"}, images={100}),
+    "theory_N_fixedM_final100": dict(jobs=100, models={"jit", "sit", "pmf", "imf"},
+                                     methods={"rhso"}, images={100}),
     "theory_noise_strength": dict(jobs=40, models={"jit", "pmf"}, methods={"rhso"},
                                   images={100}),
     "theory_mu_denoising": dict(jobs=24, models={"jit", "pmf"}, methods={"rhso"},

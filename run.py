@@ -269,6 +269,23 @@ def ensure_repositories(plan, cache_root: Path, verbose: bool = True) -> Dict[st
     return {"repo_paths": paths, "repo_heads": heads}
 
 
+def configure_jax_environment(accel: Dict[str, Any], cache_root: Path) -> Path:
+    """Set JAX's allocator policy before anything imports jax.
+
+    Read once when the backend initialises: set later and JAX has already preallocated
+    ~75% of the device, and Torch-side D-Flow then dies with CUDA OOM.
+    """
+    if accel["kind"] == "gpu":
+        # Do not grab the whole device: PyTorch may share this process.
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+        os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    jax_cache = Path(cache_root) / "jax_compilation_cache"
+    jax_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(jax_cache))
+    return jax_cache
+
+
 def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
                     cache_root: Path, verbose: bool = True) -> Dict[str, Any]:
     """Import and configure only the frameworks this plan needs."""
@@ -277,14 +294,7 @@ def init_frameworks(plan, config: Dict[str, Any], accel: Dict[str, Any],
     frameworks = plan.resources.frameworks
 
     if "jax" in frameworks:
-        if accel["kind"] == "gpu":
-            # Do not grab the whole device: PyTorch may share this process.
-            os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-            os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
-        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-        jax_cache = Path(cache_root) / "jax_compilation_cache"
-        jax_cache.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", str(jax_cache))
+        jax_cache = configure_jax_environment(accel, cache_root)
         import jax
         # Persist compiled executables to disk so compilation is paid ONCE EVER rather
         # than once per session. The defaults skip small/fast entries; pMF's model step is
@@ -1623,6 +1633,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report = checks_module.CheckReport()
     if args.check or args.checks_only:
         print("\n" + RULE)
+        # src/checks.py imports JAX even on a Torch-only plan, so the allocator policy
+        # must be set before the checks run, not in init_frameworks after them.
+        configure_jax_environment(accel, cache_root)
         checks_module.run_structural_checks(plan, problems, data, report)
         failures = report.failures()
         if failures:
