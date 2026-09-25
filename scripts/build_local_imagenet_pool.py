@@ -15,9 +15,13 @@ Two sources, in order of preference:
     python scripts/build_local_imagenet_pool.py                        # the 32 curated classes
     python scripts/build_local_imagenet_pool.py --num-classes 100 --seed 0
     python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet100_c42_i43/manifest.csv
+    python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet1000_c42_i43/manifest.csv
 
-The third form rebuilds the FROZEN paper benchmark (upstream's 100 images, class seed 42 /
-image seed 43) from the ungated mirror without the gated originals.  The mirror is sorted by
+The third form rebuilds a FROZEN benchmark from the ungated mirror without the gated
+originals: the paper's 100 images (class seed 42 / image seed 43), or the 1000-image
+benchmark that scripts/make_frozen_selection.py draws, one validation image per class.  The
+output folder defaults to cache/data/<manifest directory>_mirror, so the two benchmarks
+never share a folder (`_load_local` reads sorted(files)[:n]).  The mirror is sorted by
 label with exactly 50 validation images per class, and within each class its rows run in
 REVERSED validation-filename order, so upstream's `within_class_validation_rank` r maps to
 mirror row  class_id * 50 + (49 - r).  Verified by content fingerprint on 2026-09-06: with the
@@ -63,7 +67,7 @@ def choose(num_classes, seed):
 
 
 def build_frozen(manifest: Path, out: Path) -> None:
-    """Upstream's frozen 100 from the mirror: mirror_row = class_id*50 + (49 - rank)."""
+    """A frozen benchmark from the mirror, any number of rows: mirror_row = class_id*50 + (49 - rank)."""
     import csv
     rows = list(csv.DictReader(open(manifest)))
     want = {}                                   # mirror row -> (filename stem, class id, record)
@@ -111,8 +115,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--frozen-manifest", default=None,
-                    help="rebuild upstream's frozen benchmark from this manifest.csv instead of "
-                         "drawing classes (default out: cache/data/imagenet100_c42_i43_mirror)")
+                    help="rebuild a frozen benchmark from this manifest.csv instead of drawing "
+                         "classes (default out: cache/data/<manifest directory>_mirror)")
     ap.add_argument("--num-classes", type=int, default=len(IMAGENET_EXAMPLES))
     ap.add_argument("--seed", type=int, default=0,
                     help="only affects classes beyond the curated 32")
@@ -121,8 +125,11 @@ def main():
 
     root = Path(__file__).resolve().parent
     if args.frozen_manifest:
-        build_frozen(Path(args.frozen_manifest),
-                     Path(args.out) if args.out else root / "cache" / "data" / "imagenet100_c42_i43_mirror")
+        manifest = Path(args.frozen_manifest)
+        # benchmarks/imagenet100_c42_i43/manifest.csv -> imagenet100_c42_i43_mirror, exactly as
+        # before; benchmarks/imagenet1000_c42_i43/manifest.csv -> its own folder.
+        build_frozen(manifest, Path(args.out) if args.out else
+                     root / "cache" / "data" / (manifest.resolve().parent.name + "_mirror"))
         return
     out = Path(args.out) if args.out else root / "cache" / "data" / (
         "imagenet_val_local" if args.num_classes <= len(IMAGENET_EXAMPLES)

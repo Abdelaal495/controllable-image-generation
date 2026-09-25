@@ -12,6 +12,7 @@ python tests/test_rhso.py                   # needs jax + optax
 python tests/test_rhso_theory.py            # needs jax + optax + pyyaml
 python tests/test_cluster_and_aggregation.py  # needs pyyaml + bash (no jax/torch)
 python tests/test_theory_extensions.py      # needs jax + pyyaml
+python tests/test_benchmark1000_manifest.py # numpy + Pillow only; downloads nothing
 ```
 
 > These are **scripts**, not pytest test functions: `pytest tests/` collects nothing. Run
@@ -168,6 +169,15 @@ in the documented direction (`s₁ = 0.5000` at `β=0.5`, `0.2500` uniform, `0.0
 and that `delta` is null off the uniform grid; and that Experiment 6 enables both
 diagnostics on exactly the jacobian config's settings, images and probe seed while keeping
 the old jobs' identities disjoint.
+
+`test_benchmark1000_manifest.py` checks the 1000-image frozen benchmark
+(`benchmarks/imagenet1000_c42_i43`) without touching the network: 1000 rows, every class
+0–999 exactly once, ranks in 0–49, distinct mirror rows, no overlap with the tuning pool
+(`cache/data/imagenet_val_100`, reconstructed by rule when it is absent) with the exclusions
+and re-draws recorded in the plan, unique self-describing filenames whose synsets match
+`benchmarks/imagenet_class_index.json`, the 100-image manifest's columns and no filename in
+common with it, and that `scripts/make_frozen_selection.draw` regenerates both this plan and
+the 100-image one — so the two benchmarks provably share one selection procedure.
 
 ## What these tests do NOT cover
 

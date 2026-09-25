@@ -189,9 +189,15 @@ python run.py --config configs/experiments_theory_smoke.yaml \
 ```
 
 **Local benchmark folder.** With `data.source: local_folder`, the images are expected under
-the configured benchmark directory (this repository ships
-`benchmarks/imagenet100_c42_i43/` with its manifest and checksums). No HF token is needed in
-that mode, and step 5 stages only checkpoints and LPIPS weights.
+the configured benchmark directory. This repository ships two frozen selections:
+`benchmarks/imagenet100_c42_i43/` (the paper's **100-image** benchmark, with manifest and
+checksums) and `benchmarks/imagenet1000_c42_i43/` (the **1000-image** benchmark, one
+validation image per class). Build each into its own folder on a login node before
+submitting, e.g.
+`python scripts/build_local_imagenet_pool.py --frozen-manifest benchmarks/imagenet1000_c42_i43/manifest.csv --out cache/data/imagenet1000_c42_i43_mirror`.
+No HF token is needed in that mode, and step 5 stages only checkpoints and LPIPS weights.
+The 1000-image configs take roughly 10x longer per job, and resume is per **finished** job,
+so `--time` must cover the longest single job rather than the average.
 
 ---
 
