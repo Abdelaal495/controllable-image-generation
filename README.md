@@ -586,9 +586,7 @@ run.py                     the orchestrator
 scripts/                   data-pool builder, the two-stage hyperparameter search, and the
                            report generators that turn a finished run into the tables and
                            figures under results/ (see scripts/README.md)
-benchmarks/                the frozen benchmarks: imagenet100_c42_i43 (100 images, manifest +
-                           checksums), imagenet1000_c42_i43 (one image per class), and
-                           imagenet_class_index.json (the 1000-class synset / name index)
+benchmarks/                manifest and checksums of the frozen ImageNet-100 benchmark
 toy/                       RHSO on a two-moons prior in 2-D, CPU only
 submit.sh                  cluster job submission (reads the gitignored cluster.env)
 scripts/cluster_modules.sh cluster-conditional CUDA/cuDNN module selection
@@ -644,57 +642,6 @@ then sweep the RHSO stage count `N` under the two budget controls, on capacity-m
 pMF-L/16 against JiT-L/16 in pixel space and iMF-XL/2 against SiT-XL/2 in latent space.
 
 `scripts/README.md` describes the search loop in more detail.
-
-## 1000-image benchmark
-
-`benchmarks/imagenet1000_c42_i43/` is a second frozen benchmark: **one validation image from
-each of the 1000 ImageNet-1k classes**, alongside the paper's 100-image benchmark in
-`benchmarks/imagenet100_c42_i43/`. The 100-image benchmark, its configs and its job ids are
-unchanged, byte for byte.
-
-**How the selection was made.** `scripts/make_frozen_selection.py` draws it offline, with the
-procedure that produced the 100-image benchmark — the script reproduces that plan exactly when
-asked for 100 classes: classes from `numpy.random.default_rng(42)`, one within-class validation
-rank in 0–49 per class from `numpy.random.default_rng(43)`, in class order. One rule is added:
-no image of the **tuning pool** — the seed-0 `cache/data/imagenet_val_100` that `scripts/hpo.py`
-searched on, whose images are the first mirror row (rank 49) of each of its 100 classes — may
-be selected; a class that draws its tuning row is re-drawn from the same generator. The plan
-(`selection_plan.json`) records the excluded rows and every re-draw, and `manifest.csv` has
-the 100-image manifest's columns. `original_archive_member` and `sha256` are blank because
-they need the gated archive, so `filename` encodes `<class>_<synset>_r<rank>` instead; synsets
-and names come from `benchmarks/imagenet_class_index.json`, the standard 1000-class index the
-100-image benchmark was built with.
-
-**Build the pool** (login node or laptop; fetches the ungated mirror once):
-
-```bash
-python scripts/build_local_imagenet_pool.py \
-    --frozen-manifest benchmarks/imagenet1000_c42_i43/manifest.csv \
-    --out cache/data/imagenet1000_c42_i43_mirror
-```
-
-It is its own folder: `_load_local` reads `sorted(files)[:n]`, so a pool never holds two
-benchmarks, and the loader refuses to serve more images than a pool's `pool_manifest.json`
-declares.
-
-**Run.** The three 1000-image configurations are the 100-image files with `num_images: 1000`
-and `data.local_folder` pointing at the new pool; nothing was re-tuned:
-
-```bash
-python run.py --config configs/experiments_final_frozen1000.yaml --dry-run
-python run.py --config configs/experiments_final_frozen1000.yaml --models pmf --run-id final1000_pmf --no-figures
-python run.py --config configs/experiments_theory_N_fixedB_final1000.yaml --dry-run
-python run.py --config configs/experiments_theory_N_fixedM_final1000.yaml --dry-run
-```
-
-`num_images` is part of every job id, so 1000-image jobs never collide with, or resume from,
-cached 100-image jobs.
-
-**Runtime.** Every job takes roughly 10× its 100-image time. Resume is per **finished** job: a
-job the scheduler kills is redone from scratch, so the SLURM walltime must cover the
-**longest single job**, not the average — `bash submit.sh --config <file> --time <long enough>`,
-or `--array N` to spread the jobs over GPUs. `python tests/test_benchmark1000_manifest.py`
-checks the manifest without downloading anything.
 
 ## Running on clusters
 

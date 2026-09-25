@@ -573,8 +573,7 @@ measured region.
 
 ### D.7 The matched-budget experiment
 
-`configs/experiments_theory_validation_final100.yaml` holds the main suite on the **100-image**
-frozen benchmark (`benchmarks/imagenet100_c42_i43`): 100 images,
+`configs/experiments_theory_validation_final100.yaml` holds the main suite: 100 images,
 batch 4, both models, all five inverse problems, 70 atomic jobs.
 
 At a fixed total optimisation budget `B = N·M = 160`, the only pairs are
@@ -596,12 +595,9 @@ matched-budget job. Initialisation follows the repository's existing shared rule
 (`z_t0 = (1−t0)·g(y) + t0·ε`, and the prior noise itself at `t0 = 1`); both `t0` and
 `canonical_start_time = 1 − t0` are recorded on every row.
 
-Learning rates are copied verbatim from `configs/experiments_imagenet100_final.yaml` (the
-100-image frozen benchmark's configuration) and are **not** retuned per `N`. A test compares
-all ten `(model, task)` rates against the frozen config directly, so the two cannot silently
-diverge. The 1000-image copies of the `N` sweeps,
-`configs/experiments_theory_N_fixed{B,M}_final1000.yaml`, keep these rates and change only
-`num_images` and the pool (see "1000-image benchmark" in the README).
+Learning rates are copied verbatim from `configs/experiments_imagenet100_final.yaml` and are
+**not** retuned per `N`. A test compares all ten `(model, task)` rates against the frozen
+config directly, so the two cannot silently diverge.
 
 ### D.8 Persistence
 
