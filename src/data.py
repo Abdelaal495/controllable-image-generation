@@ -59,6 +59,16 @@ class SourceExamples:
                               self.source, dict(self.metadata))
 
 
+def pool_manifest_image_count(manifest: Dict[str, Any]) -> Optional[int]:
+    """How many images a pool_manifest.json written by scripts/build_local_imagenet_pool.py
+    declares: one explicit row per image for a frozen benchmark, one image per class for a
+    seeded pool.  None when the file says neither."""
+    for key in ("images", "classes"):
+        if isinstance(manifest.get(key), list):
+            return len(manifest[key])
+    return None
+
+
 def center_crop(pil_image, size: int):
     """Resize the short side to `size`, then take the central square crop."""
     scale = size / min(pil_image.size)
@@ -197,6 +207,19 @@ class DataManager:
         root = Path(folder)
         if not root.is_dir():
             raise RuntimeError("data.local_folder does not exist: %s" % folder)
+        # sorted(files)[:n] takes whatever the folder holds, so a pool that declares its size
+        # is checked by name here: 1000 images can never be "loaded" from the 100-image
+        # benchmark folder (the 1000-image benchmark lives in its own folder).
+        pool_manifest = root / "pool_manifest.json"
+        if pool_manifest.exists():
+            declared = pool_manifest_image_count(json.loads(pool_manifest.read_text()))
+            if declared is not None and n > declared:
+                raise RuntimeError(
+                    "Requested %d images but %s holds a pool of %d (its pool_manifest.json). "
+                    "Point data.local_folder at a pool built for at least %d images; the "
+                    "1000-image benchmark is cache/data/imagenet1000_c42_i43_mirror, built by "
+                    "scripts/build_local_imagenet_pool.py --frozen-manifest "
+                    "benchmarks/imagenet1000_c42_i43/manifest.csv." % (n, root, declared, n))
         files = sorted(p for p in root.iterdir()
                        if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp"))[:n]
         if not files:

@@ -20,6 +20,10 @@ until no cell wants to move, then `finalize` the winners into the benchmark conf
     # the benchmark configuration
     python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
         --models pmf --out configs/experiments_final_frozen100.yaml
+    # the same winners on the 1000-image benchmark (one validation image per class)
+    python scripts/hpo.py finalize --from outputs/hpo_pmf_r2 --grid outputs/hpo_pmf \
+        --models pmf --num-images 1000 --pool cache/data/imagenet1000_c42_i43_mirror \
+        --out configs/experiments_final_frozen1000.yaml
 
 `--grid` is the union of every value tried so far and decides what counts as a grid edge;
 `--from` is what the ranking reads, and defaults `--grid` to itself.  Restricting `finalize`
@@ -431,11 +435,15 @@ def finalize(a):
 
     stems = sorted({Path(r).name.split("_r")[0] for r in getattr(a, "from")})
     source = ", ".join(stems) + (" (+ follow-up rounds)" if len(stems) < len(getattr(a, "from")) else "")
+    # benchmarks/imagenet<N>_c42_i43 is the frozen selection for N images (100: the paper's;
+    # 1000: one validation image per class).  At 100 this header is byte-identical to before.
     out = [HEADER % (
-        "FINAL BENCHMARK at t0 = 1.0 on the frozen ImageNet-100 (class seed 42 / image seed 43)",
+        "FINAL BENCHMARK at t0 = 1.0 on the frozen ImageNet-%d (class seed 42 / image seed 43)"
+        % a.num_images,
         "#   python scripts/build_local_imagenet_pool.py --frozen-manifest "
-        "benchmarks/imagenet100_c42_i43/manifest.csv\n"
-        "#   python run.py --config %s --models <model> --run-id <id> --no-figures\n" % a.out,
+        "benchmarks/imagenet%d_c42_i43/manifest.csv\n"
+        "#   python run.py --config %s --models <model> --run-id <id> --no-figures\n"
+        % (a.num_images, a.out),
         "All four priors in one file; run one per GPU with --models.  Every entry is the\n"
         "# lowest-LPIPS configuration of its cell%s, and the trailing\n"
         "# comment is that score.  Each problem is split into __core / __rhc / __rhso so that\n"
@@ -488,8 +496,11 @@ def main():
     common(q)
     q.add_argument("--batch", action="append", default=[], metavar="MODEL:core=N,rhc=N,rhso=N",
                    help="override the built-in batch sizes for one model (repeatable)")
-    q.add_argument("--pool", default="cache/data/imagenet100_c42_i43_mirror")
-    q.add_argument("--num-images", type=int, default=100)
+    q.add_argument("--pool", default="cache/data/imagenet100_c42_i43_mirror",
+                   help="data.local_folder of the written configuration "
+                        "(1000-image benchmark: cache/data/imagenet1000_c42_i43_mirror)")
+    q.add_argument("--num-images", type=int, default=100,
+                   help="num_images of every experiment; must match the pool given by --pool")
     q.set_defaults(run=finalize)
 
     a = p.parse_args()
