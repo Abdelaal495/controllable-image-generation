@@ -1,0 +1,306 @@
+# =====================================================================================
+# RHSO HYPERPARAMETER SELECTION FOR THE CAPACITY-MATCHED SWEEP CHECKPOINTS
+# =====================================================================================
+#
+# WHY
+# ---
+# configs/experiments_hpo_grid.yaml selected the benchmark hyperparameters for the four
+# benchmark checkpoints (JiT-B/16, pMF-L/16, iMF-B/2, SiT-XL/2), with RHSO on the
+# standard-flow priors running the integrated-suffix planner.  The capacity-matched N sweeps
+# (configs/experiments_theory_N_fixed{B,M}_final100.yaml) run JiT-L/16 and iMF-XL/2 with
+# the DIRECT planner on lr / mu copied from JiT-B/16 and iMF-B/2, and SiT-XL/2 on values
+# selected with the suffix planner.  This file runs the same pre-registered RHSO grid --
+# the `__rhso` lr x mu block at N = 4, M = 40 and the `__rhso_budget` (N, M) block -- for
+# those checkpoints with the direct planner, so the sweep's values are either confirmed or
+# replaced.
+#
+#   jit -> JiT-L/16 (direct)      imf -> iMF-XL/2      sit -> SiT-XL/2 (direct; optional)
+#
+# ONE ROUND ON THE 8 TUNING IMAGES
+# --------------------------------
+# The benchmark selection screened the grid on 4 images and re-ran the best candidates on
+# 8.  Here every grid point runs on those 8 images directly (the first 8 of the tuning pool
+# below, the same images the refinement used), so there is no second round: for each task,
+# the selected configuration is the lowest-LPIPS row of the grid in results.csv.
+#
+# HOW TO RUN (one model per GPU; keep these run-ids separate from the JiT-B/16 and iMF-B/2
+# runs -- results.csv records the model as `jit` / `imf`, not the variant)
+#   python run.py --config configs/experiments_hpo_sweep_checkpoints.yaml --models jit --run-id hpo_jitl_direct --no-figures
+#   python run.py --config configs/experiments_hpo_sweep_checkpoints.yaml --models imf --run-id hpo_imfxl --no-figures
+#   python run.py --config configs/experiments_hpo_sweep_checkpoints.yaml --models sit --run-id hpo_sitxl_direct --no-figures
+#
+# WHAT TO READ AFTERWARDS
+# -----------------------
+# In outputs/<run-id>/results.csv, per task, among the N = 4, M = 40 rows: the lowest-LPIPS
+# (lr, mu) versus the inherited pair the sweep uses -- JiT-L/16: denoising .005/.2,
+# super-resolution .01/.2, deblurring, random and box inpainting .01/0; iMF-XL/2 and
+# SiT-XL/2: .03/0 on every task.  The `__rhso_budget` rows say whether a different (N, M)
+# would have been selected, as in the benchmark protocol.
+#
+# Scale per model: 5 tasks x 26 configurations x 8 images = 1040 image-runs.
+# =====================================================================================
+runtime:
+  seed: 42
+  accelerator: auto
+  output_root: outputs
+  cache_root: cache
+  release_model_after_use: true
+  continue_on_experiment_error: true
+  progress_bars: false
+  save_individual_images: false
+  verbose: true
+  max_atomic_jobs: 8192
+  resume: true
+  replicate: 0
+  gpu_memory_profiling: true
+  nvml_sample_interval: 0.02
+
+data:
+  # The 4-image screening pool of configs/experiments_hpo_grid.yaml (tuning draw, disjoint
+  # from the frozen 100 evaluation images); point it at your copy.
+  source: local_folder
+  local_folder: "cache/data/imagenet_val_100"
+  image_size: 256
+
+models:
+  jit:
+    variant: JiT-L/16
+  imf:
+    display_name: iMF-XL/2
+    ckpt_file: iMF-XL-2.zip
+    model_str: imfDiT_XL_2
+    guidance: {scale: 8.0, interval: [0.42, 0.62], mode: null}
+  sit: {}
+
+defaults:
+  control_cost_normalization: sum_squared
+  optimizer: adam
+  warm_start: false
+  grad_clip: null
+  record_loss_history: false
+
+metrics:
+  lpips: true
+  lpips_net: alex
+
+experiments:
+
+  denoising__rhso:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  denoising__rhso_budget:
+    enabled: true
+    problem: denoising
+    num_images: 8
+    degradation: {sigma: 0.20}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  deblurring__rhso:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  deblurring__rhso_budget:
+    enabled: true
+    problem: deblur
+    num_images: 8
+    degradation: {sigma: 0.05, blur_sigma: 1.0, kernel_size: 7, padding: reflect}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  super_resolution__rhso:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  super_resolution__rhso_budget:
+    enabled: true
+    problem: super_resolution
+    num_images: 8
+    degradation: {sigma: 0.05, factor: 2}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  random_inpainting__rhso:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  random_inpainting__rhso_budget:
+    enabled: true
+    problem: random_inpaint
+    num_images: 8
+    degradation: {sigma: 0.01, missing_fraction: 0.70}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+
+  box_inpainting__rhso:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 4
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+      sit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: 4, num_opt_steps: 40, solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.005, 0.01, 0.02, 0.03, 0.05, 0.1], mu: [0.0, 0.2, 1.0]}
+
+  box_inpainting__rhso_budget:
+    enabled: true
+    problem: box_inpaint
+    num_images: 8
+    degradation: {sigma: 0.05, box: 40}
+    models:
+      jit:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      imf:
+        batch_size: 2
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
+      sit:
+        batch_size: 1
+        methods:
+          rhso:        {t0: 1.0, num_rhso_steps: [2, 8], num_opt_steps: [20, 80], solver: heun, rhso_terminal_mode: direct,
+                        lr: [0.01, 0.03], mu: 0.0}
